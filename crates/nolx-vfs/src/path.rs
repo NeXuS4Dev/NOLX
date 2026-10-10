@@ -124,7 +124,7 @@ pub fn resolve<R: Resolver + ?Sized>(
 
     // Components, split once. Splitting up front keeps the symlink-substitution logic in
     // one place instead of tangled into the walk.
-    let mut pending: Vec<&[u8]> = split_components(path);
+    let mut pending: Queue<'_> = split_components(path);
 
     // A trailing slash means the pathname must name a directory.
     let require_dir = path.len() > 1 && path[path.len() - 1] == b'/';

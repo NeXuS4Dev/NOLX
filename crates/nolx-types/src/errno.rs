@@ -37,135 +37,147 @@ pub mod codes {
     pub const EBADF: i32 = 8;
     /// Bad message.
     pub const EBADMSG: i32 = 9;
+
+    /// Device or resource busy.
+    ///
+    /// `mount` on a busy mount point, `rmdir` on a working directory, `rename` onto a
+    /// directory in use. Issue 8 specifies it for all three, which is why a filesystem
+    /// cannot get far without it.
+    pub const EBUSY: i32 = 10;
     /// Operation in progress.
-    pub const EINPROGRESS: i32 = 10;
+    pub const EINPROGRESS: i32 = 11;
     /// Interrupted function.
-    pub const EINTR: i32 = 11;
+    pub const EINTR: i32 = 12;
     /// Invalid argument.
-    pub const EINVAL: i32 = 12;
+    pub const EINVAL: i32 = 13;
     /// I/O error.
-    pub const EIO: i32 = 13;
+    pub const EIO: i32 = 14;
     /// Socket is connected.
-    pub const EISCONN: i32 = 14;
+    pub const EISCONN: i32 = 15;
     /// Is a directory.
-    pub const EISDIR: i32 = 15;
+    pub const EISDIR: i32 = 16;
     /// Too many levels of symbolic links.
-    pub const ELOOP: i32 = 16;
+    pub const ELOOP: i32 = 17;
     /// File descriptor value too large.
-    pub const EMFILE: i32 = 17;
+    pub const EMFILE: i32 = 18;
     /// Too many links.
-    pub const EMLINK: i32 = 18;
+    pub const EMLINK: i32 = 19;
     /// Message too large.
-    pub const EMSGSIZE: i32 = 19;
+    pub const EMSGSIZE: i32 = 20;
     /// Filename too long.
-    pub const ENAMETOOLONG: i32 = 20;
+    pub const ENAMETOOLONG: i32 = 21;
     /// Network is down.
-    pub const ENETDOWN: i32 = 21;
+    pub const ENETDOWN: i32 = 22;
     /// Connection aborted by network.
-    pub const ENETRESET: i32 = 22;
+    pub const ENETRESET: i32 = 23;
     /// Network unreachable.
-    pub const ENETUNREACH: i32 = 23;
+    pub const ENETUNREACH: i32 = 24;
     /// Too many files open in system.
-    pub const ENFILE: i32 = 24;
+    pub const ENFILE: i32 = 25;
     /// No buffer space available.
-    pub const ENOBUFS: i32 = 25;
+    pub const ENOBUFS: i32 = 26;
     /// No such device.
-    pub const ENODEV: i32 = 26;
+    pub const ENODEV: i32 = 27;
     /// No such file or directory.
-    pub const ENOENT: i32 = 27;
+    pub const ENOENT: i32 = 28;
     /// Executable file format error.
-    pub const ENOEXEC: i32 = 28;
+    pub const ENOEXEC: i32 = 29;
     /// No locks available.
-    pub const ENOLCK: i32 = 29;
+    pub const ENOLCK: i32 = 30;
     /// Link has been severed.
-    pub const ENOLINK: i32 = 30;
+    pub const ENOLINK: i32 = 31;
     /// Not enough space.
-    pub const ENOMEM: i32 = 31;
+    pub const ENOMEM: i32 = 32;
     /// No message of the desired type.
-    pub const ENOMSG: i32 = 32;
+    pub const ENOMSG: i32 = 33;
     /// Protocol not available.
-    pub const ENOPROTOOPT: i32 = 33;
+    pub const ENOPROTOOPT: i32 = 34;
     /// No space left on device.
-    pub const ENOSPC: i32 = 34;
+    pub const ENOSPC: i32 = 35;
     /// Function not supported.
-    pub const ENOSYS: i32 = 35;
+    pub const ENOSYS: i32 = 36;
     /// The socket is not connected.
-    pub const ENOTCONN: i32 = 36;
+    pub const ENOTCONN: i32 = 37;
     /// Not a directory or a symbolic link to a directory.
-    pub const ENOTDIR: i32 = 37;
+    pub const ENOTDIR: i32 = 38;
     /// Directory not empty.
-    pub const ENOTEMPTY: i32 = 38;
+    pub const ENOTEMPTY: i32 = 39;
     /// State not recoverable.
-    pub const ENOTRECOVERABLE: i32 = 39;
+    pub const ENOTRECOVERABLE: i32 = 40;
     /// Not a socket.
-    pub const ENOTSOCK: i32 = 40;
+    pub const ENOTSOCK: i32 = 41;
     /// Operation not supported.
-    pub const ENOTSUP: i32 = 41;
+    pub const ENOTSUP: i32 = 42;
     /// Inappropriate I/O control operation.
-    pub const ENOTTY: i32 = 42;
+    pub const ENOTTY: i32 = 43;
     /// No such device or address.
-    pub const ENXIO: i32 = 43;
+    pub const ENXIO: i32 = 44;
     /// Operation not supported on socket.
-    pub const EOPNOTSUPP: i32 = 44;
+    pub const EOPNOTSUPP: i32 = 45;
     /// Value too large to be stored in data type.
-    pub const EOVERFLOW: i32 = 45;
+    pub const EOVERFLOW: i32 = 46;
     /// Previous owner died.
-    pub const EOWNERDEAD: i32 = 46;
+    pub const EOWNERDEAD: i32 = 47;
     /// Operation not permitted.
-    pub const EPERM: i32 = 47;
+    pub const EPERM: i32 = 48;
     /// Broken pipe.
-    pub const EPIPE: i32 = 48;
+    pub const EPIPE: i32 = 49;
     /// Protocol error.
-    pub const EPROTO: i32 = 49;
+    pub const EPROTO: i32 = 50;
     /// Protocol not supported.
-    pub const EPROTONOSUPPORT: i32 = 50;
+    pub const EPROTONOSUPPORT: i32 = 51;
     /// Protocol wrong type for socket.
-    pub const EPROTOTYPE: i32 = 51;
+    pub const EPROTOTYPE: i32 = 52;
     /// Result too large.
-    pub const ERANGE: i32 = 52;
+    pub const ERANGE: i32 = 53;
     /// Read-only file system.
-    pub const EROFS: i32 = 53;
+    pub const EROFS: i32 = 54;
     /// Invalid seek.
-    pub const ESPIPE: i32 = 54;
+    pub const ESPIPE: i32 = 55;
     /// No such process.
-    pub const ESRCH: i32 = 55;
+    pub const ESRCH: i32 = 56;
     /// Reserved.
-    pub const ESTALE: i32 = 56;
+    pub const ESTALE: i32 = 57;
     /// Connection timed out.
-    pub const ETIMEDOUT: i32 = 57;
+    pub const ETIMEDOUT: i32 = 58;
     /// Text file busy.
-    pub const ETXTBSY: i32 = 58;
+    pub const ETXTBSY: i32 = 59;
     /// Operation would block. Same value as [`EAGAIN`], as the standard requires.
     pub const EWOULDBLOCK: i32 = EAGAIN;
     /// Operation canceled.
-    pub const ECANCELED: i32 = 59;
+    pub const ECANCELED: i32 = 60;
     /// Operation not permitted on a stream (XSI streams compatibility).
-    pub const EBADFD: i32 = 60;
+    pub const EBADFD: i32 = 61;
     /// Identifier removed.
-    pub const EIDRM: i32 = 61;
+    pub const EIDRM: i32 = 62;
     /// Illegal byte sequence.
-    pub const EILSEQ: i32 = 62;
+    pub const EILSEQ: i32 = 63;
     /// No data available.
-    pub const ENODATA: i32 = 63;
+    pub const ENODATA: i32 = 64;
     /// Device not a stream.
-    pub const ENOSTR: i32 = 64;
+    pub const ENOSTR: i32 = 65;
     /// Timer expired.
-    pub const ETIME: i32 = 65;
+    pub const ETIME: i32 = 66;
     /// Resource deadlock would occur.
-    pub const EDEADLK: i32 = 66;
+    pub const EDEADLK: i32 = 67;
     /// Too many processes.
-    pub const EPROCUNAVAIL: i32 = 67;
+    pub const EPROCUNAVAIL: i32 = 68;
     /// Not a typewriter (terminal).
-    pub const ENOTBLK: i32 = 68;
+    pub const ENOTBLK: i32 = 69;
     /// Quota exceeded.
-    pub const EDQUOT: i32 = 69;
+    pub const EDQUOT: i32 = 70;
     /// Too many levels of remote references (reserved).
-    pub const EREMCHG: i32 = 70;
+    pub const EREMCHG: i32 = 71;
     /// Bad font file format (reserved).
-    pub const ELIBBAD: i32 = 71;
+    pub const ELIBBAD: i32 = 72;
     /// Highest defined error number. `sysconf(_SC_...)` does not expose this; it exists so
     /// the kernel can validate a user-supplied `errno` without a table walk.
-    pub const ELAST: i32 = 71;
+    ///
+    /// An alias rather than a literal: a literal would have to be updated every time a code
+    /// is added or removed, and getting it wrong silently either rejects valid errors or
+    /// accepts invented ones. The test `elast_tracks_the_table` is what catches a mismatch
+    /// between this and [`TABLE`].
+    pub const ELAST: i32 = ELIBBAD;
 }
 
 /// `true` if `code` is an error number this kernel can produce.
@@ -202,6 +214,7 @@ pub const TABLE: &[(i32, &str)] = &[
     (codes::EALREADY, "Operation already in progress"),
     (codes::EBADF, "Bad file descriptor"),
     (codes::EBADMSG, "Bad message"),
+    (codes::EBUSY, "Device or resource busy"),
     (codes::EBADFD, "File descriptor in bad state"),
     (codes::ECANCELED, "Operation canceled"),
     (codes::EDEADLK, "Resource deadlock avoided"),
@@ -309,6 +322,18 @@ mod tests {
         assert_eq!(message(0), None);
         assert_eq!(message(-1), None);
         assert_eq!(message(codes::ELAST + 1), None);
+    }
+
+    #[test]
+    fn elast_tracks_the_table() {
+        // ELAST is an alias for the highest-numbered code, and TABLE holds one row per
+        // code from 1 to ELAST. If either changes without the other, `is_valid` starts
+        // lying: it would accept an errno no code defines, or reject a real one.
+        let highest = TABLE.iter().map(|(code, _)| *code).max().unwrap();
+        assert_eq!(codes::ELAST, highest, "ELAST must equal the highest code in TABLE");
+        assert_eq!(TABLE.len(), codes::ELAST as usize, "TABLE must have exactly one row per code");
+        assert!(TABLE.windows(2).all(|w| w[0].0 < w[1].0), "TABLE must be in numeric order");
+        assert!(TABLE.windows(2).all(|w| w[0].0 + 1 == w[1].0), "codes must be contiguous");
     }
 
     #[test]

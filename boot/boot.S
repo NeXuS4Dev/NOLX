@@ -98,18 +98,21 @@ __start32:
     cli
     cld
 
-    /* --- zero BSS first: the page tables and the boot stack live there.
-     * %ebx (multiboot info) and %eax (magic) survive because we do not touch them. */
+    /* --- stash the boot information FIRST, before anything can clobber it.
+     * %eax holds the loader magic and %ebx the physical address of the Multiboot
+     * information structure. The BSS-zeroing loop below writes %eax, %ecx, and %edi, so
+     * these two have to be saved before it runs. Both live in .data, which the loader has
+     * already populated and which that loop does not touch. */
+    movl    %ebx, mb_info_phys
+    movl    %eax, mb_magic
+
+    /* --- zero BSS: the page tables and the boot stack live there. */
     movl    $_sbss, %edi
     movl    $_ebss, %ecx
     subl    %edi, %ecx
     shrl    $2, %ecx
     xorl    %eax, %eax
     rep stosl
-
-    /* --- stash the boot information before anything can clobber it. */
-    movl    %ebx, mb_info_phys
-    movl    %eax, mb_magic
 
     call    serial_init
     movl    $msg_hello, %esi

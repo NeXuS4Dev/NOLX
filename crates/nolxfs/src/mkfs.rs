@@ -40,6 +40,7 @@
 
 use alloc::string::String;
 use alloc::vec;
+use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use crate::btree::{BlockAllocator, BTree, KeyKind, Node};
@@ -330,8 +331,9 @@ pub fn format<D: BlockDevice>(dev: &mut D, opts: &FormatOptions) -> Result<Layou
     let mut vsb = gen::nolx_fs_superblock_t::zeroed();
     vsb.magic = gen::MAGIC_VOLUME_SUPERBLOCK;
     vsb.block_size = opts.block_size;
-    vsb.features_required = gen::NX_FEATURE_REQ_V1_BASE;
-    vsb.features_supported = if opts.casefold { gen::NX_FEATURE_SUP_CASEFOLD } else { 0 };
+    vsb.features_required = u64::from(gen::NX_FEATURE_REQ_V1_BASE);
+    vsb.features_supported =
+        if opts.casefold { u64::from(gen::NX_FEATURE_SUP_CASEFOLD) } else { 0 };
     vsb.omap_oid = oid::VOLUME_OMAP;
     vsb.root_tree_oid = oid::FS_TREE;
     vsb.extentref_tree_oid = oid::EXTENT_REF_TREE;
@@ -351,7 +353,7 @@ pub fn format<D: BlockDevice>(dev: &mut D, opts: &FormatOptions) -> Result<Layou
     csb.magic = gen::MAGIC_CONTAINER_SUPERBLOCK;
     csb.block_size = opts.block_size;
     csb.block_count = block_count;
-    csb.features_required = gen::NX_FEATURE_REQ_V1_BASE;
+    csb.features_required = u64::from(gen::NX_FEATURE_REQ_V1_BASE);
     csb.features_supported = vsb.features_supported;
     csb.next_oid = oid::NEXT;
     csb.next_xid = 2;

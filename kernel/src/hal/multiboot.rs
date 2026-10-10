@@ -133,6 +133,15 @@ impl BootInfo {
         self.flags & FLAG_CMDLINE != 0
     }
 
+    /// `true` if the loader identified itself.
+    ///
+    /// Worth checking before reading [`BootInfo::loader_name_addr`]: the field is always
+    /// present in the structure, but it holds a stale value unless this flag is set.
+    #[must_use]
+    pub const fn has_loader_name(&self) -> bool {
+        self.flags & FLAG_LOADER_NAME != 0
+    }
+
     /// Read the memory map into a fixed-capacity table.
     ///
     /// A table rather than an iterator because this runs before there is an allocator, and
@@ -158,6 +167,13 @@ impl BootInfo {
     ///
     /// Falls back to `mem_upper`, which the loader always provides and which undercounts
     /// (it stops at the first hole) but is better than nothing.
+    ///
+    /// # Safety
+    ///
+    /// As [`BootInfo::memory_map`]: the `mmap_addr` and `mmap_length` recorded here must
+    /// describe a valid, mapped memory map. This is `unsafe` rather than a plain function
+    /// because it reads through a physical address the loader supplied, and nothing in the
+    /// type can prove that address is still good.
     #[must_use]
     pub unsafe fn usable_bytes(&self) -> u64 {
         if !self.has_memory_map() {

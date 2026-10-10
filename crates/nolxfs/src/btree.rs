@@ -161,7 +161,7 @@ impl Node {
 
     /// Index of `key`, or the index at which it should be inserted.
     #[must_use]
-    pub fn find(&self, kind: KeyKind, key: &[u8]) -> Result<usize, usize> {
+    pub fn find(&self, kind: KeyKind, key: &[u8]) -> core::result::Result<usize, usize> {
         let mut lo = 0usize;
         let mut hi = self.entries.len();
         while lo < hi {
@@ -190,13 +190,13 @@ impl Node {
             have: block.len(),
             need: NODE_HEADER_SIZE,
         })?;
-        let _ = obj;
 
         let key_count = header.key_count as usize;
+        let toc_size = key_count
+            .checked_mul(TOC_ENTRY_SIZE)
+            .ok_or(FsError::CorruptNode("key_count overflows the table of contents"))?;
         let toc_end = NODE_HEADER_SIZE
-            .checked_add(key_count.checked_mul(TOC_ENTRY_SIZE).ok_or(FsError::CorruptNode(
-                "key_count overflows the table of contents",
-            )?)?)
+            .checked_add(toc_size)
             .ok_or(FsError::CorruptNode("table of contents overflows the block"))?;
         if toc_end > block.len() {
             return Err(FsError::CorruptNode("table of contents runs past the end of the block"));
@@ -236,7 +236,7 @@ impl Node {
         }
 
         // Entries must be strictly ordered, or a binary search will silently miss keys.
-        let kind = Self::key_kind_for(header.subtype);
+        let kind = Self::key_kind_for(obj.subtype());
         for pair in entries.windows(2) {
             if compare_keys(kind, &pair[0].key, &pair[1].key) != Ordering::Less {
                 return Err(FsError::CorruptNode("entries are not in strictly increasing order"));
@@ -320,7 +320,6 @@ impl Node {
             key_free_list_len: 0,
             val_free_list_off: 0,
             val_free_list_len: 0,
-            _reserved: [],
         };
         let mut raw = header;
         block[..NODE_HEADER_SIZE].copy_from_slice(raw.as_bytes_mut());

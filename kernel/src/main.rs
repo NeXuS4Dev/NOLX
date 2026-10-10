@@ -45,8 +45,12 @@ pub const MULTIBOOT_BOOTLOADER_MAGIC: u32 = 0x2BAD_B002;
 /// Called exactly once, with interrupts disabled, on the boot stack, with `mb_info`
 /// pointing at a Multiboot information structure that is valid for as long as the kernel
 /// runs, or null if `magic` is not [`MULTIBOOT_BOOTLOADER_MAGIC`].
+// Deliberately not `pub`: this is called from `boot/boot.S` and from nowhere in Rust, so it
+// is not an API. Keeping it private is also what makes clippy's
+// `not_unsafe_ptr_arg_deref` rule inapplicable -- the rule protects Rust callers, and there
+// are none. Its contract is the one stated above, and the assembly upholds it.
 #[no_mangle]
-pub extern "C" fn nolx_kernel_main(mb_info: *const u8, magic: u32) -> ! {
+extern "C" fn nolx_kernel_main(mb_info: *const u8, magic: u32) -> ! {
     let mut console = Console::new();
 
     // The assembly already logged that long mode was entered. Everything from here on has
