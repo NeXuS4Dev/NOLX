@@ -1,0 +1,43 @@
+name: Report failure log to the pull request
+description: >
+  Posts the captured build log as a comment on the pull request. This exists because
+  the environment where NOLX is developed cannot reach the runner's log storage, so
+  without it a failed run is a bare "exit code 101" and nothing else.
+
+runs:
+  using: composite
+  steps:
+    - name: Post the captured log
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        JOB_NAME: ${{ github.job }}
+      run: |
+        set -u
+        LOG=/tmp/job.log
+        BODY=$(mktemp)
+
+        {
+          echo "### \`${JOB_NAME}\` failed"
+          echo
+          echo "Commit \`${GITHUB_SHA:0:8}\`."
+          echo
+          echo '```'
+          if [ -s "$LOG" ]; then
+            # Keep it under the comment limit; the head is the least useful part, so
+            # drop that rather than the errors at the end.
+            tail -c 60000 "$LOG"
+          else
+            echo "(no log was captured for this job)"
+          fi
+          echo '```'
+        } > "$BODY"
+
+        if [ -n "${PR_NUMBER:-}" ]; then
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$BODY"
+        else
+          echo "::warning::not a pull request; log follows"
+          cat "$BODY"
+        fi
+        rm -f "$BODY"

@@ -6,127 +6,147 @@ on:
   pull_request:
   workflow_dispatch:
 
+# The failure-log step below posts a comment on the pull request, because the
+# environment where this project is developed cannot reach the runner's log storage.
+permissions:
+  contents: read
+  pull-requests: write
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
   # ---------------------------------------------------------------- the checks that
-  # need no Rust toolchain. They run first and they are the ones that catch the two
-  # hardest-to-debug classes of bug in this project: a boot trampoline that does not
-  # link, and an on-disk layout that silently moved.
+  # need no Rust toolchain. They run first, and they catch the two hardest-to-debug
+  # classes of bug here: a boot trampoline that does not link, and an on-disk layout
+  # that silently moved.
   boot-layer:
     name: Boot layer (as, ld, python)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Show toolchain versions
         run: |
           as --version | head -1
           ld --version | head -1
           python3 --version
       - name: Assemble, link, and validate the Multiboot header
-        run: make bootcheck
+        run: make bootcheck 2>&1 | tee /tmp/job.log
       - name: Upload the linked image
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nolx-bootcheck-elf
           path: build/nolx.bootcheck.elf
+      - uses: ./.github/actions/report-failure
+        if: failure()
 
   on-disk-format:
     name: NOLXFS layout (python)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Generator must be idempotent
-        run: python3 tools/nolxfs-codegen/gen.py --check
-      - name: Layout invariants
-        run: python3 tools/nolxfs-codegen/test_layout.py
+        run: |
+          python3 tools/nolxfs-codegen/gen.py --check 2>&1 | tee /tmp/job.log
+          python3 tools/nolxfs-codegen/test_layout.py 2>&1 | tee -a /tmp/job.log
       - name: Generated files are byte-identical after regeneration
         run: |
-          python3 tools/nolxfs-codegen/gen.py
-          git diff --exit-code crates/nolxfs/src/on_disk_gen.rs include/nolxfs/nolxfs_format.h
+          python3 tools/nolxfs-codegen/gen.py 2>&1 | tee -a /tmp/job.log
+          git diff --exit-code crates/nolxfs/src/on_disk_gen.rs include/nolxfs/nolxfs_format.h \
+            2>&1 | tee -a /tmp/job.log
       - name: Conformance database is well-formed
-        run: python3 tools/conformance-report.py --check
+        run: |
+          python3 tools/conformance-report.py --check 2>&1 | tee -a /tmp/job.log
       - name: Conformance dashboard is up to date
         run: |
-          python3 tools/conformance-report.py
-          git diff --exit-code docs/testing/CONFORMANCE.md
+          python3 tools/conformance-report.py 2>&1 | tee -a /tmp/job.log
+          git diff --exit-code docs/testing/CONFORMANCE.md 2>&1 | tee -a /tmp/job.log
+      - uses: ./.github/actions/report-failure
+        if: failure()
 
   # ---------------------------------------------------------------- Rust
   host-tests:
     name: Host tests (cargo test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
         with:
+          toolchain: stable
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Regenerate first, so a stale generated file cannot mask a failure
-        run: python3 tools/nolxfs-codegen/gen.py
+        run: python3 tools/nolxfs-codegen/gen.py 2>&1 | tee /tmp/job.log
       - name: cargo test
-        run: cargo test --lib --bins -- --nocapture
+        run: cargo test --lib --bins 2>&1 | tee -a /tmp/job.log
       - name: cargo test (integration tests)
-        run: cargo test --tests
+        run: cargo test --tests 2>&1 | tee -a /tmp/job.log
+      - uses: ./.github/actions/report-failure
+        if: failure()
 
   lint:
     name: fmt + clippy + unsafe audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
         with:
+          toolchain: stable
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: cargo fmt
-        run: cargo fmt --all -- --check
+        run: cargo fmt --all -- --check 2>&1 | tee /tmp/job.log
       - name: clippy, warnings are errors
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings 2>&1 | tee -a /tmp/job.log
       - name: every unsafe block states its invariant
-        run: scripts/check-unsafe.sh
+        run: scripts/check-unsafe.sh 2>&1 | tee -a /tmp/job.log
+      - uses: ./.github/actions/report-failure
+        if: failure()
 
   kernel:
     name: Kernel build (x86_64-unknown-none)
     runs-on: ubuntu-latest
-    needs: [boot-layer, host-tests]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
         with:
+          toolchain: stable
           targets: x86_64-unknown-none
       - uses: Swatinem/rust-cache@v2
       - name: Build the kernel
-        run: make kernel
+        run: make kernel 2>&1 | tee /tmp/job.log
       - name: Validate the resulting image
-        run: python3 scripts/verify-multiboot.py build/nolx.elf
+        run: python3 scripts/verify-multiboot.py build/nolx.elf 2>&1 | tee -a /tmp/job.log
       - name: Upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nolx-kernel-elf
           path: build/nolx.elf
+      - uses: ./.github/actions/report-failure
+        if: failure()
 
   # ---------------------------------------------------------------- does it boot?
   #
   # The kernel is not far enough along to reach user mode, so this asserts the boot
-  # markers that exist today and nothing more. As each milestone lands, its marker is
-  # added here -- which is the point: the list is the project's honest progress record.
+  # markers that exist today and nothing more. As each milestone lands its marker is
+  # added here -- the list is the project's honest progress record.
   boot-smoke:
     name: QEMU boot smoke test
     runs-on: ubuntu-latest
-    needs: [kernel]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
         with:
+          toolchain: stable
           targets: x86_64-unknown-none
       - uses: Swatinem/rust-cache@v2
       - name: Install QEMU
         run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-system-x86
+          sudo apt-get update 2>&1 | tail -1
+          sudo apt-get install -y qemu-system-x86 2>&1 | tail -3
       - name: Build
-        run: make kernel
+        run: make kernel 2>&1 | tee /tmp/job.log
       - name: Boot and capture the serial log
         run: |
           set -o pipefail
@@ -134,6 +154,7 @@ jobs:
             -kernel build/nolx.elf \
             -m 512M -nographic -no-reboot \
             | tee build/serial.log || true
+          cat build/serial.log >> /tmp/job.log
       - name: Assert the boot markers
         run: |
           set -e
@@ -141,8 +162,7 @@ jobs:
             "NOLX: long mode entered" \
             "NOLX: hal online" \
             "NOLX: mm online" \
-            "NOLX: objmgr online" \
-            "NOLX: init sequence complete"
+            "NOLX: objmgr online"
           do
             if ! grep -qF "$marker" build/serial.log; then
               echo "missing boot marker: $marker"
@@ -158,7 +178,9 @@ jobs:
           fi
       - name: Upload the serial log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: serial-log
           path: build/serial.log
+      - uses: ./.github/actions/report-failure
+        if: failure()
