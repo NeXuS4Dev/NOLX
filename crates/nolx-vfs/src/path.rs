@@ -129,6 +129,14 @@ pub fn resolve<R: Resolver + ?Sized>(
     // A trailing slash means the pathname must name a directory.
     let require_dir = path.len() > 1 && path[path.len() - 1] == b'/';
 
+    // Symlink targets are owned by the resolver, but the components the queue holds borrow
+    // from them, so each target has to outlive the walk rather than the loop iteration that
+    // found it. The number of entries is bounded by `SYMLOOP_MAX`, so this cannot grow
+    // without limit. Appending here may reallocate the outer vector; that moves the inner
+    // `Vec<u8>` headers but never the buffers they point at, so slices already handed to
+    // the queue stay valid.
+    let mut link_targets: Vec<Vec<u8>> = Vec::new();
+
     while let Some(component) = pending.pop_at_front() {
         let is_last = pending.is_empty();
 
@@ -168,17 +176,24 @@ pub fn resolve<R: Resolver + ?Sized>(
             if target.is_empty() {
                 return Err(errno::ENOENT);
             }
-            if target[0] == b'/' {
-                // Absolute target: restart from the root, keeping what is left of the
-                // original path behind the substituted components.
+            let starts_at_root = target[0] == b'/';
+
+            // Store first, then borrow from the stored copy: the queue's components must
+            // not point into a local that dies at the end of this iteration.
+            link_targets.push(target);
+            let stored: &[u8] = match link_targets.last() {
+                Some(bytes) => bytes,
+                None => return Err(errno::EIO),
+            };
+
+            let mut substituted = split_components(stored);
+            // Whatever is left of the original pathname comes after the substituted
+            // components, which is what makes a relative link resolve in its own directory
+            // and an absolute one restart from the root.
+            substituted.append_tail(pending.take_rest());
+            pending = substituted;
+            if starts_at_root {
                 current = vfs.start(true);
-                let mut substituted = split_components(&target);
-                substituted.append_tail(pending.take_rest());
-                pending = substituted;
-            } else {
-                let mut substituted = split_components(&target);
-                substituted.append_tail(pending.take_rest());
-                pending = substituted;
             }
             continue;
         }
