@@ -11,6 +11,13 @@
 
     .section .text
     .code64
+    .globl  nolx_probe
+    .type   nolx_probe, @function
+nolx_probe:
+    /* extern "C" fn nolx_probe() -- returns, unlike the real entry point. */
+    ret
+    .size   nolx_probe, . - nolx_probe
+
     .globl  nolx_kernel_main
     .type   nolx_kernel_main, @function
 nolx_kernel_main:
