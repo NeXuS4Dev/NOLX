@@ -51,11 +51,18 @@ pub const MULTIBOOT_BOOTLOADER_MAGIC: u32 = 0x2BAD_B002;
 // are none. Its contract is the one stated above, and the assembly upholds it.
 #[no_mangle]
 extern "C" fn nolx_kernel_main(mb_info: *const u8, magic: u32) -> ! {
+    // The very first thing the kernel does is prove it is running. This goes straight to
+    // COM1, before any static is read and before the framebuffer is assumed to be mapped,
+    // so if this line does not appear the failure is in the handoff and not in the kernel.
+    hal::console::raw_put_str("NOLX: nolx_kernel_main entered\n");
+
     let mut console = Console::new();
+    hal::console::raw_put_str("NOLX: console constructed\n");
 
     // The assembly already logged that long mode was entered. Everything from here on has
     // a real console, so this is the first line that can carry detail.
     let _ = writeln!(console, "NOLX {} starting", nolx_types::version_string());
+    hal::console::raw_put_str("NOLX: first writeln! completed\n");
 
     if magic == MULTIBOOT_BOOTLOADER_MAGIC {
         // SAFETY: the contract above guarantees `mb_info` is a valid Multiboot info

@@ -9,7 +9,7 @@ on:
 # The failure-log step below posts a comment on the pull request, because the
 # environment where this project is developed cannot reach the runner's log storage.
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 # GitHub's default Linux shell is `bash -e {0}` -- NO pipefail. Every step below pipes its
@@ -113,6 +113,35 @@ jobs:
           } > "$BODY"
           gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$BODY"
           rm -f "$BODY"
+      - uses: ./.github/actions/report-failure
+        if: failure()
+
+  # rustfmt is the one check this project cannot run where it is developed: there is no
+  # Rust toolchain there. So the formatting is applied here and pushed back, and `lint`
+  # then verifies it. Once the tree is formatted this job is a no-op on every run.
+  autofmt:
+    name: Apply rustfmt
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Format
+        run: |
+          cargo fmt --all 2>&1 | tee /tmp/job.log
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git commit -am "style: cargo fmt" && git push origin HEAD
+            echo "formatted and pushed"
+          else
+            echo "already formatted"
+          fi
       - uses: ./.github/actions/report-failure
         if: failure()
 

@@ -41,7 +41,6 @@
 use alloc::string::String;
 use alloc::vec;
 use alloc::string::ToString;
-use alloc::vec::Vec;
 
 use crate::btree::{BlockAllocator, BTree, KeyKind, Node};
 use crate::blockdev::BlockDevice;

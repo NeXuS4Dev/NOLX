@@ -5,7 +5,6 @@
 //! descriptors from separate `open` calls do not -- which is why the table stores a file
 //! identifier rather than the file itself.
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use nolx_types::errno;

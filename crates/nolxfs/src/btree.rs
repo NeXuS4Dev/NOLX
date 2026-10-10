@@ -236,7 +236,7 @@ impl Node {
         }
 
         // Entries must be strictly ordered, or a binary search will silently miss keys.
-        let kind = Self::key_kind_for(obj.subtype());
+        let kind = Self::key_kind_for(obj.header().subtype());
         for pair in entries.windows(2) {
             if compare_keys(kind, &pair[0].key, &pair[1].key) != Ordering::Less {
                 return Err(FsError::CorruptNode("entries are not in strictly increasing order"));

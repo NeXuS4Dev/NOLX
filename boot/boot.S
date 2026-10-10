@@ -81,6 +81,8 @@ msg_long_mode:
     .asciz  "NOLX: long mode entered\r\n"
 msg_bad_magic:
     .asciz  "NOLX: WARNING: multiboot magic mismatch\r\n"
+msg_handoff:
+    .asciz  "NOLX: calling nolx_kernel_main\r\n"
 msg_no_cpuid:
     .asciz  "NOLX: FATAL: CPUID is not supported\r\n"
 msg_no_long_mode:
@@ -245,6 +247,10 @@ long_mode_entry:
     call    serial_puts64
 
     /* extern "C" fn nolx_kernel_main(mb_info: *const u8, magic: u32) -> ! */
+    movl    mb_info_phys(%rip), %edi
+    movl    mb_magic(%rip), %esi
+    movl    $msg_handoff, %esi
+    call    serial_puts64
     movl    mb_info_phys(%rip), %edi
     movl    mb_magic(%rip), %esi
     call    nolx_kernel_main

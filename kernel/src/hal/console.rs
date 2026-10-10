@@ -46,6 +46,33 @@ pub struct Console {
 static VGA_ROW: SyncCell<usize> = SyncCell::new(0);
 static VGA_COL: SyncCell<usize> = SyncCell::new(0);
 
+/// Write a byte straight to COM1, waiting for the transmit register.
+///
+/// Exists separately from [`Console`] because the first thing the kernel needs to do is
+/// prove that it is running at all, before any static has been touched and before it is
+/// known whether the VGA framebuffer is even mapped. This is the most primitive output
+/// path in the system, and it is deliberately dumb.
+pub fn raw_put_byte(byte: u8) {
+    // SAFETY: COM1's line status register reads without side effects, and writing the data
+    // register transmits one byte, which is what this function is for.
+    unsafe {
+        while inb(COM1 + COM1_LSR) & LSR_THRE == 0 {
+            core::hint::spin_loop();
+        }
+        outb(COM1, byte);
+    }
+}
+
+/// Write a string straight to COM1.
+pub fn raw_put_str(text: &str) {
+    for byte in text.as_bytes() {
+        if *byte == b'\n' {
+            raw_put_byte(b'\r');
+        }
+        raw_put_byte(*byte);
+    }
+}
+
 impl Console {
     /// A handle to the console.
     #[must_use]
