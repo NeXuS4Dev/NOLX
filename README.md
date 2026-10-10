@@ -108,6 +108,16 @@ This repository is honest about which artifacts were executed and which were not
   asserts every boot marker, checks the wall clock advanced from its RTC anchor, boots the
   `#PF`/`#GP` fault images, and exercises the PIC/PIT fallback with the local APIC hidden.
   The eight HAL assertions that were `pending-T2` are now `tested-T2`.
+* **CI-verified (2026-10-10):** workflow run
+  [38088471560](https://github.com/NeXuS4Dev/NOLX/actions/runs/38088471560) on revision
+  `a025a42`, all six jobs green. Its boot smoke test asserts the frame allocator's markers
+  and, separately, requires the timer tick count to have advanced during the boot-time
+  allocation stress, which is what makes the stress a test *under interrupt load* rather
+  than one that happened to run before the clock started. In that run the kernel described
+  131040 frames, reserved 8916 for its own image and low memory, handed 122027 to the buddy
+  allocator, and then took and returned 52851 blocks across four ticks, auditing as it went,
+  with the free-frame count back at 122027. The four allocator assertions that were
+  `pending-T2` are now `tested-T2`.
 
 ## License
 

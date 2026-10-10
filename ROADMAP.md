@@ -121,6 +121,10 @@ Landed:
   running until the timer has ticked so the allocations demonstrably happen under interrupt
   load. It ends by requiring the free-frame count to return to where it started.
 
+The four allocator assertions that were `pending-T2` are now `tested-T2`, recorded against
+workflow run 38088471560 on revision `a025a42` -- the same bar M2 was held to: the claim, the
+marker that carries it, and the run that shows it happening.
+
 Still to do in M3:
 
 * page tables in the kernel (per-process address spaces over the frame allocator) and the

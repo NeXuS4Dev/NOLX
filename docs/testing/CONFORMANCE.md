@@ -12,19 +12,19 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 |---|---|---|
 | `unimplemented` | 12 | 100.0% |
 | `implemented` | 5 | 87.2% |
-| `tested-T1` | 65 | 77.7% |
-| `pending-T2` | 4 | — |
-| `tested-T2` | 8 | 8.5% |
+| `tested-T1` | 65 | 81.9% |
+| `pending-T2` | 0 | — |
+| `tested-T2` | 12 | 12.8% |
 | `tested-T3` | 0 | 0.0% |
 
-**73 of 94 assertions have a passing automated test; 4 are awaiting T2 results.**
+**77 of 94 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
 | Area | Assertions | Implemented | Tested (T1) | Pending (T2) | Tested (T2) | Tested (T3) |
 |---|---|---|---|---|---|---|
 | hal | 23 | 23 | 11 | 0 | 8 | 0 |
-| mm | 34 | 27 | 23 | 4 | 0 | 0 |
+| mm | 34 | 27 | 23 | 0 | 4 | 0 |
 | vfs | 37 | 32 | 31 | 0 | 0 | 0 |
 
 ## Unimplemented assertions (12)
@@ -54,14 +54,9 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | HAL-021 | I/O APIC routes: GSI windows and ISA overrides are validated, redirections start masked, and NMI sources use MADT polarity/trigger flags |
 | FD-005 | XSH dup2: if old and new are equal, nothing is closed and new is returned |
 
-## Pending T2 verification (4)
+## Pending T2 verification (0)
 
-| ID | Specification reference | Configured test |
-|---|---|---|
-| MM-024 | Frame map: firmware memory regions become per-frame states, with the kernel image, its BSS, the heap arena, and low memory reserved | .github/workflows/ci.yml boot-smoke serial marker `NOLX: frame allocator online` |
-| MM-025 | Physical allocator: the buddy allocator manages exactly the frames the frame map calls free, and its free lists live in the free frames themselves through the direct map | .github/workflows/ci.yml boot-smoke serial marker `NOLX: frame allocator online`; the `mm: buddy allocator:` line reports managed and free frames |
-| MM-026 | Physical allocator: the boot self-test allocates and frees single frames in both directions and mixed orders up to 256 frames, auditing the allocator as it goes | .github/workflows/ci.yml boot-smoke serial markers `NOLX: mm selftest: single-frame phase` and `NOLX: mm selftest: mixed-order phase` |
-| MM-027 | Physical allocator: the stress test runs under live timer interrupts, and the free-frame count returns to its starting value afterwards | .github/workflows/ci.yml boot-smoke regex `mm selftest: complete: [0-9]+ operations, audit ok, ticks=[1-9][0-9]*` |
+None.
 
 ## All assertions
 
@@ -125,10 +120,10 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | MM-021 | mm | Kernel heap: boundary-tagged blocks split on allocation and coalesce with both neighbours on free, and the size-class bins hold the blocks their sizes belong to | `tested-T1` | nolx-mm-core heap::tests::allocation_splits_a_block; heap::tests::free_coalesces_with_both_neighbours; heap::tests::a_free_block_sits_in_its_size_class |
 | MM-022 | mm | Kernel heap: a corrupted header, footer, or block list is detected by the integrity check instead of handing out overlapping blocks | `tested-T1` | nolx-mm-core heap::tests::a_corrupted_footer_is_detected; heap::tests::a_corrupted_size_is_detected; heap::tests::a_block_removed_from_its_bin_is_detected |
 | MM-023 | mm | Kernel heap: a randomized allocate/free workload keeps payload contents intact and agrees with a model on the tracked bytes | `tested-T1` | nolx-mm-core heap::tests::random_allocations_preserve_content_and_accounting |
-| MM-024 | mm | Frame map: firmware memory regions become per-frame states, with the kernel image, its BSS, the heap arena, and low memory reserved | `pending-T2` | .github/workflows/ci.yml boot-smoke serial marker `NOLX: frame allocator online` |
-| MM-025 | mm | Physical allocator: the buddy allocator manages exactly the frames the frame map calls free, and its free lists live in the free frames themselves through the direct map | `pending-T2` | .github/workflows/ci.yml boot-smoke serial marker `NOLX: frame allocator online`; the `mm: buddy allocator:` line reports managed and free frames |
-| MM-026 | mm | Physical allocator: the boot self-test allocates and frees single frames in both directions and mixed orders up to 256 frames, auditing the allocator as it goes | `pending-T2` | .github/workflows/ci.yml boot-smoke serial markers `NOLX: mm selftest: single-frame phase` and `NOLX: mm selftest: mixed-order phase` |
-| MM-027 | mm | Physical allocator: the stress test runs under live timer interrupts, and the free-frame count returns to its starting value afterwards | `pending-T2` | .github/workflows/ci.yml boot-smoke regex `mm selftest: complete: [0-9]+ operations, audit ok, ticks=[1-9][0-9]*` |
+| MM-024 | mm | Frame map: firmware memory regions become per-frame states, with the kernel image, its BSS, the heap arena, and low memory reserved | `tested-T2` | .github/workflows/ci.yml boot-smoke serial marker `NOLX: frame allocator online` and the `mm: frame map:` line -- 131040 frames described, 8916 taken back (CI run 38088471560, revision a025a42) |
+| MM-025 | mm | Physical allocator: the buddy allocator manages exactly the frames the frame map calls free, and its free lists live in the free frames themselves through the direct map | `tested-T2` | .github/workflows/ci.yml boot-smoke serial marker `NOLX: frame allocator online` and the `mm: buddy allocator:` line -- 122027 frames managed, 122027 free, largest free order 10 (CI run 38088471560, revision a025a42) |
+| MM-026 | mm | Physical allocator: the boot self-test allocates and frees single frames in both directions and mixed orders up to 256 frames, auditing the allocator as it goes | `tested-T2` | .github/workflows/ci.yml boot-smoke serial markers `NOLX: mm selftest: single-frame phase` (1024 + 1024 frames, audit ok) and `NOLX: mm selftest: mixed-order phase` (52851 operations, audit ok) (CI run 38088471560, revision a025a42) |
+| MM-027 | mm | Physical allocator: the stress test runs under live timer interrupts, and the free-frame count returns to its starting value afterwards | `tested-T2` | .github/workflows/ci.yml boot-smoke regex `mm selftest: complete: [0-9]+ operations, audit ok, ticks=[1-9][0-9]*` -- 52851 operations over 4 ticks, free frames 122027 -> 122027 (CI run 38088471560, revision a025a42) |
 | MM-028 | mm | VAD tree in the kernel: a process address space is described by a VAD tree whose regions carry protection, kind, and backing | `unimplemented` | nolx-mm-core::vad is the tree; no process address space exists yet |
 | MM-029 | mm | Page tables in the kernel: per-process address spaces are built over frames from the allocator | `unimplemented` | nolx-mm-core::paging is the walker; the kernel still runs on the boot layer's identity map |
 | MM-030 | mm | Higher-half kernel mapping: the kernel is linked in the top 2 GiB and the identity map is dropped | `unimplemented` | kernel/linker.ld links at 1 MiB; boot/boot.S records that M3 owns the switch |
