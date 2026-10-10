@@ -70,7 +70,7 @@ Milestone tracking lives in [ROADMAP.md](ROADMAP.md). Current state:
 | M0 — Architecture, ABI and on-disk formats frozen | **done** |
 | M1 — Boot layer: Multiboot → long mode → kernel entry | **done** — boot layer machine-verified, kernel entry reached under QEMU |
 | M2 — HAL: console, GDT, IDT, PIC/APIC, timer | **done** — ACPI/HPET discovery, xAPIC/x2APIC, I/O APIC routing, TPR/EOI, calibrated LAPIC/TSC-deadline paths with PIC/PIT fallback; every HAL T2 assertion now has a passing QEMU run |
-| M3 — Physical/virtual memory, kernel heap | **in progress** — frame map and allocator core |
+| M3 — Physical/virtual memory, kernel heap | **in progress** — frame map with kernel reservations, buddy allocator with per-CPU magazines, boot-time stress test under live interrupts; page tables, kernel heap, and the higher-half switch remain |
 | M4+ | planned |
 
 ### What has actually been verified
@@ -86,6 +86,14 @@ This repository is honest about which artifacts were executed and which were not
 * **Machine-verified here (2026-10-10):** `make bootcheck fscheck` passed, including
   assembly/linking of the boot layer and all 256 interrupt stubs, Multiboot validation,
   NOLXFS layout tests, and the conformance-database check.
+* **Machine-verified in the development sandbox (2026-10-10):** the memory-management core
+  (`crates/nolx-mm-core`) passes 78 host tests -- buddy split/coalesce and randomized traffic,
+  magazine conservation, paging arithmetic and the page-table walker, VAD split/coalesce and
+  randomized model comparison, commit and pool accounting, and heap integrity checks. The
+  kernel's own boot path was rehearsed against the same crate on the host: a simulated
+  512 MiB machine, the same store layout, the same reservations, and 200,000 mixed-order
+  allocations and frees with an audit every 4,096 operations, ending with the free-frame
+  count exactly where it started.
 * **Machine-verified in the development sandbox (2026-10-10):** a Rust 1.88 stable toolchain
   (rustc, cargo, clippy, rustfmt, and the `x86_64-unknown-none` standard library, assembled
   from the Rust distribution packages published to this sandbox's package registries) runs

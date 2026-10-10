@@ -1,0 +1,12 @@
+[package]
+name = "nolx-mm-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-testable memory-management primitives for NOLX: buddy allocator, VAD tree, paging arithmetic, heaps"
+readme = "../../README.md"
+publish = false
+
+[lib]
+path = "src/lib.rs"

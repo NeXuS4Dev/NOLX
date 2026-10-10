@@ -1,0 +1,49 @@
+# Assertions: memory management
+
+Source: NOLX M3 -- the memory-manager contract in `docs/architecture/03-memory-manager.md`
+and the invariant set in `crates/nolx-mm-core`. Rows marked `tested-T1` are exercised by
+`cargo test` on the host; rows marked `pending-T2` are asserted by the QEMU boot smoke test
+in `.github/workflows/ci.yml` and are promoted to `tested-T2` only once a workflow run on
+this revision has passed.
+
+The split matters here more than anywhere else. Every algorithm in the memory manager --
+splitting, coalescing, the VAD tree's balance, the heap's boundary tags -- lives in
+`crates/nolx-mm-core`, which has no hardware dependency and `forbid(unsafe_code)`. The
+kernel keeps only the parts that must touch a machine: the frame map, and the `BlockStore`
+implementation that reads and writes free-list links through the direct map. A `tested-T1`
+row therefore covers the same code the kernel runs, not a re-implementation of it.
+
+MM-001 | Buddy allocator: a region is carved into aligned power-of-two blocks, allocation splits the smallest block that fits, and alignment is preserved | tested-T1 | nolx-mm-core buddy::tests::a_region_is_carved_into_aligned_blocks; buddy::tests::allocation_splits_down_to_the_requested_order; buddy::tests::every_allocation_is_aligned_to_its_order
+MM-002 | Buddy allocator: freeing a block coalesces with its buddy, up to the largest aligned block the region can hold | tested-T1 | nolx-mm-core buddy::tests::free_coalesces_with_a_free_buddy; buddy::tests::freeing_a_whole_region_restores_one_block_per_order
+MM-003 | Buddy allocator: a misaligned block, an order above the ceiling, and a frame outside the managed range are refused and change nothing | tested-T1 | nolx-mm-core buddy::tests::misaligned_and_out_of_range_frees_are_refused
+MM-004 | Buddy allocator: an exhausted allocator reports failure and recovers when a frame is freed | tested-T1 | nolx-mm-core buddy::tests::exhaustion_is_reported_and_recovered
+MM-005 | Buddy allocator: randomized allocate/free traffic leaves every free list consistent and every allocated block non-overlapping | tested-T1 | nolx-mm-core buddy::tests::random_traffic_keeps_the_free_lists_consistent
+MM-006 | Frame magazines: a per-processor cache serves single frames LIFO, refills from the buddy allocator, and returns half of itself when full | tested-T1 | nolx-mm-core magazine::tests::a_magazine_serves_frames_lifo; magazine::tests::a_refill_takes_a_batch_from_the_buddy; magazine::tests::a_full_magazine_returns_half_to_the_buddy
+MM-007 | Frame magazines: frames are conserved across allocate/free/drain, so caching cannot lose or duplicate a frame | tested-T1 | nolx-mm-core magazine::tests::frames_are_conserved_across_a_random_workload; magazine::tests::draining_returns_every_cached_frame
+MM-008 | Zeroed-frame pool: only frames known to be zero are handed out, they are preferred over dirty frames, and a full pool returns the frame to the buddy allocator | tested-T1 | nolx-mm-core magazine::tests::the_zeroed_pool_is_preferred_and_bounded; magazine::tests::a_full_zeroed_pool_returns_the_frame_to_the_buddy
+MM-009 | Paging arithmetic: the four table indices cover 512 entries each, addresses are canonical in 48-bit form, and page, 2 MiB, and 1 GiB sizes align as the architecture requires | tested-T1 | nolx-mm-core paging::tests::index_arithmetic_covers_each_table; paging::tests::canonical_form_is_sign_extended_to_64_bits; paging::tests::page_sizes_align_to_their_own_boundaries
+MM-010 | Page-table entries: physical address bits, present/writable/user, NX, and the huge-page bit round-trip, and reserved bits are never set | tested-T1 | nolx-mm-core paging::tests::entry_round_trips_address_and_flags; paging::tests::protection_maps_to_writable_and_nx; paging::tests::reserved_bits_are_never_set
+MM-011 | Page-table walker: mapping, translating, and unmapping through a table store allocate and free intermediate tables, split existing 2 MiB pages, and refuse to overwrite a live mapping | tested-T1 | nolx-mm-core paging::tests::the_walker_maps_and_translates_a_page; paging::tests::mapping_over_a_huge_page_splits_it; paging::tests::a_live_mapping_is_not_overwritten
+MM-012 | Page-table walker: unmapping frees the tables that became empty and keeps the tables that did not | tested-T1 | nolx-mm-core paging::tests::unmapping_frees_only_empty_tables; paging::tests::unmapping_a_huge_page_leaves_the_directory
+MM-013 | VAD tree: a mapping is carved out of the hole that contains it, holes that remain are explicit, and a range that overlaps a live mapping is rejected | tested-T1 | nolx-mm-core vad::tests::a_mapping_is_carved_out_of_a_hole; vad::tests::the_remaining_holes_are_still_address_space; vad::tests::an_overlapping_range_is_rejected
+MM-014 | VAD tree: adjacent regions with identical attributes coalesce, and a split leaves two regions that do not | tested-T1 | nolx-mm-core vad::tests::identical_neighbours_coalesce; vad::tests::a_protection_change_splits_a_region
+MM-015 | VAD tree: the tree stays ordered and AVL-balanced after every operation, with no two regions overlapping | tested-T1 | nolx-mm-core vad::tests::the_invariants_hold_after_every_operation
+MM-016 | VAD tree: protection changes are refused when they exceed a region's maximum protection, and the tree is left unchanged | tested-T1 | nolx-mm-core vad::tests::protection_above_the_maximum_is_refused
+MM-017 | VAD tree: a hole search finds the lowest gap that fits above a floor, and refuses when nothing fits | tested-T1 | nolx-mm-core vad::tests::a_gap_search_finds_the_lowest_hole_that_fits
+MM-018 | VAD tree: randomized map/unmap/protect traffic agrees with a flat reference model after every operation | tested-T1 | nolx-mm-core vad::tests::random_operations_match_a_reference_model
+MM-019 | Commit charge: reservations are refused past the limit, successes and releases are accounted, and the peak is tracked | tested-T1 | nolx-mm-core commit::tests::a_reservation_past_the_limit_is_refused; commit::tests::a_release_returns_the_charge; commit::tests::the_peak_is_never_exceeded_by_the_current_charge
+MM-020 | Pool accounting: the nonpaged, paged, and system PTE pools are charged and released independently, and failed charges change nothing | tested-T1 | nolx-mm-core commit::tests::the_three_pools_are_independent; commit::tests::a_failed_charge_changes_nothing
+MM-021 | Kernel heap: boundary-tagged blocks split on allocation and coalesce with both neighbours on free, and the size-class bins hold the blocks their sizes belong to | tested-T1 | nolx-mm-core heap::tests::allocation_splits_a_block; heap::tests::free_coalesces_with_both_neighbours; heap::tests::a_free_block_sits_in_its_size_class
+MM-022 | Kernel heap: a corrupted header, footer, or block list is detected by the integrity check instead of handing out overlapping blocks | tested-T1 | nolx-mm-core heap::tests::a_corrupted_footer_is_detected; heap::tests::a_corrupted_size_is_detected; heap::tests::a_block_removed_from_its_bin_is_detected
+MM-023 | Kernel heap: a randomized allocate/free workload keeps payload contents intact and agrees with a model on the tracked bytes | tested-T1 | nolx-mm-core heap::tests::random_allocations_preserve_content_and_accounting
+MM-024 | Frame map: firmware memory regions become per-frame states, with the kernel image, its BSS, the heap arena, and low memory reserved | pending-T2 | .github/workflows/ci.yml boot-smoke serial marker `NOLX: frame allocator online`
+MM-025 | Physical allocator: the buddy allocator manages exactly the frames the frame map calls free, and its free lists live in the free frames themselves through the direct map | pending-T2 | .github/workflows/ci.yml boot-smoke serial marker `NOLX: frame allocator online`; the `mm: buddy allocator:` line reports managed and free frames
+MM-026 | Physical allocator: the boot self-test allocates and frees single frames in both directions and mixed orders up to 256 frames, auditing the allocator as it goes | pending-T2 | .github/workflows/ci.yml boot-smoke serial markers `NOLX: mm selftest: single-frame phase` and `NOLX: mm selftest: mixed-order phase`
+MM-027 | Physical allocator: the stress test runs under live timer interrupts, and the free-frame count returns to its starting value afterwards | pending-T2 | .github/workflows/ci.yml boot-smoke regex `mm selftest: complete: [0-9]+ operations, audit ok, ticks=[1-9][0-9]*`
+MM-028 | VAD tree in the kernel: a process address space is described by a VAD tree whose regions carry protection, kind, and backing | unimplemented | nolx-mm-core::vad is the tree; no process address space exists yet
+MM-029 | Page tables in the kernel: per-process address spaces are built over frames from the allocator | unimplemented | nolx-mm-core::paging is the walker; the kernel still runs on the boot layer's identity map
+MM-030 | Higher-half kernel mapping: the kernel is linked in the top 2 GiB and the identity map is dropped | unimplemented | kernel/linker.ld links at 1 MiB; boot/boot.S records that M3 owns the switch
+MM-031 | Kernel heap in the kernel: a `GlobalAlloc` over regions taken from the frame allocator, with the size-class bins from nolx-mm-core | unimplemented | nolx-mm-core::heap is the allocator; the kernel registers nothing yet
+MM-032 | Demand paging and copy-on-write: the four fault causes resolve against the VAD tree and the commit charge | unimplemented | docs/architecture/03-memory-manager.md fault table; no fault path allocates yet
+MM-033 | Pool accounting in the kernel: the pools are charged from the boot log and reported through the object manager | unimplemented | nolx-mm-core::commit is the accounting; nothing charges it yet
+MM-034 | NUMA node list: one buddy allocator per node and a zonelist that prefers the local node | unimplemented | the allocator is a single node today

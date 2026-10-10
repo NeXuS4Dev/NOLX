@@ -99,6 +99,36 @@ pull request, so the evidence can be read rather than trusted.
 - Tests: T1 buddy allocator + VAD tree property tests (split/coalesce invariants,
   fragmentation bounds, overlap rejection); T2 stress allocation under interrupt load.
 
+M3 is **in progress**. The algorithms are done and host-tested; the parts that need a
+machine to run on are partly wired up.
+
+### M3 progress checkpoint — 2026-10-10
+
+Landed:
+
+* `crates/nolx-mm-core` -- the buddy allocator, per-CPU frame magazines with a zeroed-frame
+  pool, the four-level paging arithmetic and page-table walker, the VAD tree, the commit and
+  pool accounting, and the boundary-tagged kernel heap. `no_std`, `forbid(unsafe_code)`, and
+  therefore the same code under `cargo test` on the host as in the kernel, reached through
+  the `BlockStore` and `TableStore` traits.
+* `kernel/src/mm` -- the frame map gains the reservations that make it honest (low memory,
+  the kernel image and BSS, the static heap arena, and frames outside the boot identity map),
+  the buddy allocator is built from runs of free frames, and the boot processor's magazine
+  sits in front of it. `kernel/src/mm/store.rs` is the `BlockStore` over the direct map: the
+  free-list links are written into the free frames themselves.
+* `kernel/src/mm/selftest.rs` -- the boot-time stress test: single frames in both
+  directions, then a deterministic mixed-order walk, audited every few thousand operations,
+  running until the timer has ticked so the allocations demonstrably happen under interrupt
+  load. It ends by requiring the free-frame count to return to where it started.
+
+Still to do in M3:
+
+* page tables in the kernel (per-process address spaces over the frame allocator) and the
+  higher-half switch, which `kernel/linker.ld` and `boot/boot.S` both reserve for M3;
+* the kernel heap registered as a `GlobalAlloc`, over regions taken from the frame allocator;
+* demand paging, copy-on-write, and the four fault causes from the memory-manager design;
+* NUMA node lists, and the pool accounting wired to the object manager.
+
 ## M4 — Object Manager and handles
 
 The centre of the design. Everything is an object; everything reachable is reachable

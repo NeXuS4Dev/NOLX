@@ -1,9 +1,19 @@
 //! Memory management.
 //!
-//! What is here in M3 is the part that has to exist before anything else can: a map of
-//! physical frames built from the firmware's description of memory, with the regions the
-//! kernel must never hand out marked unusable. The buddy allocator, the VAD tree, and the
-//! kernel heap land in the same milestone; see `docs/architecture/03-memory-manager.md`.
+//! Three things live here, in the order they depend on each other:
+//!
+//! * the **frame map** -- one state per physical frame, built from the firmware's
+//!   description of memory, with everything the kernel itself occupies marked unusable;
+//! * the **frame allocator** -- the buddy allocator from `nolx-mm-core` over the frames the
+//!   map calls free, with the boot processor's magazine in front of it, and its free-list
+//!   links written into the free frames themselves through [`store::DirectMapStore`];
+//! * the **self test** -- the stress run that proves the allocator still agrees with the
+//!   frame map after tens of thousands of allocations taken while interrupts are live.
+//!
+//! The page tables, the higher-half switch, the kernel heap, and the VAD tree are the rest
+//! of M3; see `docs/architecture/03-memory-manager.md`. The algorithms behind the allocator
+//! -- splitting, coalescing, the magazines, the commit accounting -- live in
+//! `crates/nolx-mm-core`, where they are tested on the host without a machine to boot.
 //!
 //! # Why the frame map is an array and not a structure
 //!
@@ -12,9 +22,34 @@
 //! which is the same bootstrap problem the object map has, and it is solved the same way:
 //! the thing that hands out memory cannot itself be handed out.
 
+pub mod selftest;
+pub mod store;
+
 use crate::hal::multiboot::BootInfo;
 use crate::sync::SyncCell;
 use nolx_hal_core::console::HalConsole;
+use nolx_mm_core::buddy::{Buddy, BuddyStats, Frame, FreeError, MAX_ORDER};
+use nolx_mm_core::magazine::{Allocated, FrameCache, FrameCacheStats};
+use store::{DirectMapStore, MAX_MANAGED_FRAMES};
+
+/// The boot processor's index into the per-processor structures.
+pub const BOOT_CPU: usize = 0;
+
+/// The buddy allocator over physical frames.
+static ALLOCATOR: SyncCell<Buddy> = SyncCell::new(Buddy::new());
+
+/// The boot processor's frame cache: a magazine of single frames in front of the allocator.
+///
+/// Sized for one processor today. The array is per-processor by construction, so bringing up
+/// a second processor is a matter of a real lock, not of rediscovering this structure.
+static FRAME_CACHE: SyncCell<FrameCache<1, 64>> = SyncCell::new(FrameCache::new());
+
+extern "C" {
+    /// The end of the static heap arena the linker script reserves after the image.
+    /// Defined in `kernel/linker.ld`; taking its address is how the kernel learns where it
+    /// itself ends without parsing its own ELF headers at runtime.
+    static _kernel_heap_end: u8;
+}
 
 /// Bytes in a physical page.
 pub const PAGE_SIZE: usize = 4096;
@@ -119,6 +154,8 @@ pub fn init(console: &mut dyn HalConsole, info: &BootInfo) {
         *FRAME_MAP_LEN.get() = len;
     }
 
+    finish_boot(console);
+
     let _ = writeln!(
         console,
         "mm: {} regions, {} MiB usable, {} MiB reserved, highest usable {:#x}",
@@ -164,7 +201,282 @@ pub fn init_without_firmware(console: &mut dyn HalConsole) {
         }
         *FRAME_MAP_LEN.get() = len;
     }
+    finish_boot(console);
     let _ = writeln!(console, "NOLX: mm online");
+}
+
+/// The shared tail of both frame-map paths: reserve what the kernel occupies, then hand the
+/// rest to the allocator, then say what happened.
+fn finish_boot(console: &mut dyn HalConsole) {
+    let reserved = reserve_kernel_memory();
+    let len = frame_map_len();
+    let managed = (MAX_MANAGED_FRAMES as usize).min(len);
+    let unmanageable = len - managed;
+    let added = build_allocator();
+
+    let stats = allocator_stats();
+    let _ = writeln!(
+        console,
+        "mm: frame map: {len} frames, {reserved} taken back for the kernel image and low \
+         memory, {added} handed to the allocator"
+    );
+    if unmanageable > 0 {
+        let _ = writeln!(
+            console,
+            "mm: WARNING {unmanageable} frames above {:#x} are outside the boot identity \
+             map and stay reserved",
+            store::MAX_MANAGED_BYTES
+        );
+    }
+    let _ = writeln!(
+        console,
+        "mm: buddy allocator: {} frames managed, {} free, largest free order {}",
+        stats.managed_frames,
+        free_frames(),
+        stats.largest_free_order().unwrap_or(0),
+    );
+    let _ = writeln!(console, "NOLX: frame allocator online");
+}
+
+/// Mark the frames the kernel itself occupies, and everything the loader used, unusable.
+///
+/// Returns how many frames that took back from the free pool.
+fn reserve_kernel_memory() -> usize {
+    let free_before = count_frames(FrameState::Free);
+
+    // The first megabyte holds the real-mode structures, the BIOS data area, and -- under
+    // the loaders this kernel is tested with -- the Multiboot information the frame map was
+    // just built from. None of it is ever allocatable.
+    let low_reserved = (1 << 20) / PAGE_SIZE;
+    reserve(0, low_reserved, FrameState::Reserved);
+
+    // The kernel image and its BSS, which holds this frame map and the allocator's front
+    // matter, plus the static heap arena the linker script reserves after `_end`. Writing a
+    // free-list link into any of that would overwrite the kernel.
+    let image_end = (kernel_image_end() as usize).div_ceil(PAGE_SIZE);
+    reserve(low_reserved, image_end, FrameState::Reserved);
+
+    // Frames the boot layer's identity map does not cover cannot hold free-list links, so
+    // they stay reserved rather than being described as free and then quietly skipped.
+    let len = frame_map_len();
+    reserve(
+        (MAX_MANAGED_FRAMES as usize).min(len),
+        len,
+        FrameState::Reserved,
+    );
+
+    free_before.saturating_sub(count_frames(FrameState::Free))
+}
+
+/// The address at which the kernel image, and the static heap arena after it, ends.
+fn kernel_image_end() -> u64 {
+    core::ptr::addr_of!(_kernel_heap_end) as u64
+}
+
+/// Put frames `[first, last)` into `state`, clamped to the populated part of the map.
+fn reserve(first: usize, last: usize, state: FrameState) {
+    // SAFETY: called during single-processor boot bring-up, in the window where the frame
+    // map exists but no frame has been handed out, so no other reader can observe the map
+    // while it is being written here.
+    unsafe {
+        let len = *FRAME_MAP_LEN.get();
+        for index in first.min(len)..last.min(len) {
+            (*FRAME_STATES.get())[index] = state;
+        }
+    }
+}
+
+/// Hand every free run of frames to the buddy allocator.
+///
+/// This is the last thing that reads the firmware's structures: the allocator writes its
+/// free-list links into the free frames themselves, and the loader's information may live in
+/// frames the firmware called usable. Building one run at a time from the completed frame
+/// map, rather than from the firmware regions again, means the two views cannot disagree
+/// about what is available.
+fn build_allocator() -> u64 {
+    let mut store = DirectMapStore::new();
+    let len = frame_map_len();
+    let mut first_free: Option<usize> = None;
+    let mut added = 0u64;
+
+    for index in 0..len {
+        match (frame_state(index), first_free) {
+            (FrameState::Free, None) => first_free = Some(index),
+            (FrameState::Free, Some(_)) => {}
+            (_, Some(start)) => {
+                added += add_frames(&mut store, start, index);
+                first_free = None;
+            }
+            (_, None) => {}
+        }
+    }
+    if let Some(start) = first_free {
+        added += add_frames(&mut store, start, len);
+    }
+    added
+}
+
+/// Add one run of free frames to the allocator.
+fn add_frames(store: &mut DirectMapStore, first: usize, end: usize) -> u64 {
+    // SAFETY: single boot processor with interrupts still disabled, and nothing else in the
+    // kernel can be running. `first` and `end` bound a run of frames the frame map marks
+    // free, so the links are written only into memory nobody else owns.
+    unsafe { (*ALLOCATOR.get()).add_region(store, first as Frame, end as Frame) }
+}
+
+/// Allocate one 4 KiB frame.
+pub fn allocate_frame() -> Option<usize> {
+    allocate_frames(0)
+}
+
+/// Allocate `2^order` contiguous frames, the first of which is aligned to the block.
+pub fn allocate_frames(order: usize) -> Option<usize> {
+    let mut store = DirectMapStore::new();
+    // SAFETY: the frame allocator runs on the boot processor. The timer interrupt is the
+    // only other code that can run, and its handler allocates nothing and touches no part of
+    // the memory manager. There is no second processor yet; when there is one, this becomes
+    // a lock and the magazines become per-processor for real.
+    unsafe {
+        let cache = &mut *FRAME_CACHE.get();
+        let buddy = &mut *ALLOCATOR.get();
+        let allocated = if order == 0 {
+            cache.allocate(BOOT_CPU, buddy, &mut store)
+        } else {
+            buddy.allocate(&mut store, order).map(|frame| Allocated {
+                frame,
+                zeroed: false,
+            })
+        }?;
+        // Every frame of the block, not just its first one: the frame map describes frames,
+        // and a block whose interior still reads as free is a block the allocator has
+        // already promised to somebody else.
+        let base = allocated.frame as usize;
+        for index in base..base + (1usize << order) {
+            mark_allocated(index);
+        }
+        Some(base)
+    }
+}
+
+/// Return one frame to the allocator.
+pub fn free_frame(frame: usize) -> Result<(), FreeError> {
+    free_block(frame, 0)
+}
+
+/// Return a block of `2^order` frames, starting at `frame`.
+pub fn free_block(frame: usize, order: usize) -> Result<(), FreeError> {
+    if order > MAX_ORDER {
+        return Err(FreeError::OrderTooLarge);
+    }
+    let count = 1usize << order;
+    let len = frame_map_len();
+    if frame % count != 0 {
+        return Err(FreeError::NotAligned);
+    }
+    if frame + count > len {
+        return Err(FreeError::NotManaged);
+    }
+
+    // The frame map is the authority on whether a frame may be freed at all: a frame that is
+    // reserved, already free, or was never handed out must not reach the allocator, where it
+    // would be a double free or an entry outside the managed range.
+    for index in frame..frame + count {
+        match frame_state(index) {
+            FrameState::Allocated | FrameState::PageTable | FrameState::Zeroed => {}
+            FrameState::Free => return Err(FreeError::AlreadyFree),
+            FrameState::Reserved => return Err(FreeError::NotManaged),
+        }
+    }
+
+    let mut store = DirectMapStore::new();
+    // SAFETY: as `allocate_frames`.
+    unsafe {
+        if order == 0 {
+            (*FRAME_CACHE.get()).free(BOOT_CPU, frame as Frame, &mut *ALLOCATOR.get(), &mut store);
+        } else {
+            (*ALLOCATOR.get()).free(&mut store, frame as Frame, order)?;
+        }
+    }
+
+    // Only now: an allocator that refused the block must not leave the frame map claiming
+    // the frames are free, or the next allocation could hand out a frame twice.
+    for index in frame..frame + count {
+        // SAFETY: as `reserve`; the block has just been handed back to the allocator.
+        unsafe { (*FRAME_STATES.get())[index] = FrameState::Free };
+    }
+    Ok(())
+}
+
+/// Mark one frame allocated, if it is inside the populated map.
+fn mark_allocated(frame: usize) {
+    // SAFETY: as `reserve`. The frame came from the allocator, so it is inside the map.
+    unsafe {
+        if frame < *FRAME_MAP_LEN.get() {
+            (*FRAME_STATES.get())[frame] = FrameState::Allocated;
+        }
+    }
+}
+
+/// Verify the allocator, the frame map, and the caches against each other.
+///
+/// The three are built from different information -- the allocator from the links it wrote
+/// into free frames, the frame map from the firmware's description, the magazines from what
+/// has been allocated lately -- so agreement between them is evidence rather than a
+/// restatement. The one deliberate asymmetry is the cache: a frame sitting in the boot
+/// processor's magazine is allocated as far as the allocator is concerned and free as far as
+/// the map is concerned, which is why the cached count is added back here.
+pub fn audit() -> Result<(), &'static str> {
+    let store = DirectMapStore::new();
+    // SAFETY: single boot processor; the allocator is only touched from it.
+    unsafe {
+        (*ALLOCATOR.get()).audit(&store)?;
+    }
+    let free_in_map = count_frames(FrameState::Free) as u64;
+    let free_in_allocator = allocator_stats().free_frames + cached_frames();
+    if free_in_map != free_in_allocator {
+        return Err("the frame map and the buddy allocator disagree about free frames");
+    }
+    Ok(())
+}
+
+/// The number of frames the frame map describes.
+#[must_use]
+pub fn frame_map_len() -> usize {
+    // SAFETY: `init` writes this once, before any reader exists.
+    unsafe { *FRAME_MAP_LEN.get() }
+}
+
+/// Frames the allocator manages, free or not.
+#[must_use]
+pub fn managed_frames() -> u64 {
+    allocator_stats().managed_frames
+}
+
+/// Frames available to allocate, counting the ones in the boot processor's magazine.
+#[must_use]
+pub fn free_frames() -> u64 {
+    allocator_stats().free_frames + cached_frames()
+}
+
+/// Frames sitting in the boot processor's magazine.
+#[must_use]
+pub fn cached_frames() -> u64 {
+    // SAFETY: single boot processor; the cache is only touched from it.
+    unsafe { (*FRAME_CACHE.get()).cached() }
+}
+
+/// The allocator's counters.
+#[must_use]
+pub fn allocator_stats() -> BuddyStats {
+    // SAFETY: single boot processor; the allocator is only touched from it.
+    unsafe { (*ALLOCATOR.get()).stats() }
+}
+
+/// The frame cache's counters.
+#[must_use]
+pub fn cache_stats() -> FrameCacheStats {
+    // SAFETY: as `cached_frames`.
+    unsafe { (*FRAME_CACHE.get()).stats() }
 }
 
 /// The state of one frame, by frame number.

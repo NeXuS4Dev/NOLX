@@ -56,8 +56,8 @@ A VAD carries:
 Why a tree: `mmap`/`munmap`/`mprotect`/`mincore`/`msync` are range operations, and POSIX
 requires `mprotect` to split an existing mapping. Range split/merge/coalesce on an AVL
 tree is `O(log n)` with well-defined invariants, and — importantly — those invariants are
-testable on the host (`crates/nolx-vfs` has no dependency on hardware, and the VAD tree
-lives behind a trait so `cargo test` exercises the real code with fake page tables).
+testable on the host: the tree lives in `crates/nolx-mm-core`, which has no hardware
+dependency and no `unsafe`, so `cargo test` exercises the same code the kernel runs.
 
 Invariants, all asserted in debug builds and property-tested in T1:
 
@@ -90,6 +90,18 @@ alignment/`msync` cases) or, for kernel-mode faults, a bug check with a full fra
   `getrusage` are read from these counters, so they cannot disagree.
 * **Working sets** — per-process trimming targets with an aged-page model; `mlock`/
   `mlockall` pin pages and are accounted against `RLIMIT_MEMLOCK`.
+
+## Where the code lives
+
+The parts that are pure logic live in `crates/nolx-mm-core`, where they run under
+`cargo test` on an ordinary host: `buddy` (the allocator), `magazine` (per-CPU frame caches
+and the zeroed-frame pool), `paging` (four-level arithmetic, entry encoding, and a walker
+over a `TableStore`), `vad` (the descriptor tree), `commit` (quota and pool accounting), and
+`heap` (the boundary-tagged kernel heap). The kernel keeps what must touch a machine: the
+frame map, the reservations that describe the kernel's own footprint, and the `BlockStore`
+implementation in `kernel/src/mm/store.rs`, which reaches the free-list links through the
+boot layer's identity map. `kernel/src/mm/selftest.rs` stresses the result at boot, with
+interrupts live, before anything else depends on it.
 
 ## Zeroing and security
 
