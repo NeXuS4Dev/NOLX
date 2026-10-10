@@ -1,0 +1,19 @@
+[package]
+name = "nolx-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The NOLX kernel: HAL, executive, and POSIX subsystem"
+readme = "../README.md"
+publish = false
+
+# A single binary target. There is deliberately no lib target: the crate is `#![no_std]`
+# and cannot be built for the host, so a host-visible library would only ever fail to
+# compile. The logic worth testing on the host lives in the crates this depends on.
+[[bin]]
+name = "nolx-kernel"
+path = "src/main.rs"
+
+[dependencies]
+nolx-types = { path = "../crates/nolx-types" }

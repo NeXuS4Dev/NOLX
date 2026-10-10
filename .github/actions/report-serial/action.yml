@@ -1,0 +1,47 @@
+name: Report the QEMU serial log to the pull request
+description: >
+  Posts the serial log captured during the boot smoke test as a comment on the pull
+  request, on success as well as failure.
+
+  The serial log is the only window into what the kernel actually did. The artifact
+  upload is not enough: the environment where NOLX is developed cannot reach the
+  runner's artifact storage, so an artifact is unreachable while a comment is not.
+  Without this, a boot that stops halfway looks identical to a boot that succeeded,
+  and every hypothesis about the entry point has to be argued from the ELF instead
+  of read off the machine's own output.
+
+runs:
+  using: composite
+  steps:
+    - name: Post the serial log
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        set -u
+        LOG=build/serial.log
+        BODY=$(mktemp)
+
+        {
+          echo "### QEMU serial log"
+          echo
+          echo "Commit \`${GITHUB_SHA:0:8}\`. This is the machine's own output, not a"
+          echo "summary of it."
+          echo
+          echo '```'
+          if [ -s "$LOG" ]; then
+            tail -c 20000 "$LOG"
+          else
+            echo "(the serial log is empty or missing)"
+          fi
+          echo '```'
+        } > "$BODY"
+
+        if [ -n "${PR_NUMBER:-}" ]; then
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$BODY"
+        else
+          echo "::warning::not a pull request; serial log follows"
+          cat "$BODY"
+        fi
+        rm -f "$BODY"

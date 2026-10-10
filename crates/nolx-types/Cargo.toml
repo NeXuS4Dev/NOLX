@@ -1,0 +1,13 @@
+[package]
+name = "nolx-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "POSIX scalar types, errno values, and the NOLX syscall numbering scheme"
+readme = "../../README.md"
+
+[dependencies]
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

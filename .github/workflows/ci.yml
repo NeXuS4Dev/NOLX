@@ -1,0 +1,261 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# The failure-log step below posts a comment on the pull request, because the
+# environment where this project is developed cannot reach the runner's log storage.
+permissions:
+  contents: read
+  pull-requests: write
+
+# GitHub's default Linux shell is `bash -e {0}` -- NO pipefail. Every step below pipes its
+# command through `tee` to capture the log, and without pipefail that pipe reports tee's
+# exit status, which is always 0. Two runs of this workflow reported green while cargo was
+# failing to compile. This is the fix for that.
+defaults:
+  run:
+    shell: bash --noprofile --norc -eo pipefail {0}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------- the checks that
+  # need no Rust toolchain. They run first, and they catch the two hardest-to-debug
+  # classes of bug here: a boot trampoline that does not link, and an on-disk layout
+  # that silently moved.
+  boot-layer:
+    name: Boot layer (as, ld, python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Show toolchain versions
+        run: |
+          as --version | head -1
+          ld --version | head -1
+          python3 --version
+      - name: Assemble, link, and validate the Multiboot header
+        run: make bootcheck 2>&1 | tee /tmp/job.log
+      - name: Upload the linked image
+        uses: actions/upload-artifact@v7
+        with:
+          name: nolx-bootcheck-elf
+          path: build/nolx.bootcheck.elf
+      - uses: ./.github/actions/report-failure
+        if: failure()
+
+  on-disk-format:
+    name: NOLXFS layout (python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Generator must be idempotent
+        run: |
+          python3 tools/nolxfs-codegen/gen.py --check 2>&1 | tee /tmp/job.log
+          python3 tools/nolxfs-codegen/test_layout.py 2>&1 | tee -a /tmp/job.log
+      - name: Generated files are byte-identical after regeneration
+        run: |
+          python3 tools/nolxfs-codegen/gen.py 2>&1 | tee -a /tmp/job.log
+          git diff --exit-code crates/nolxfs/src/on_disk_gen.rs include/nolxfs/nolxfs_format.h \
+            2>&1 | tee -a /tmp/job.log
+      - name: Conformance database is well-formed
+        run: |
+          python3 tools/conformance-report.py --check 2>&1 | tee -a /tmp/job.log
+      - name: Conformance dashboard is up to date
+        run: |
+          python3 tools/conformance-report.py 2>&1 | tee -a /tmp/job.log
+          git diff --exit-code docs/testing/CONFORMANCE.md 2>&1 | tee -a /tmp/job.log
+      - uses: ./.github/actions/report-failure
+        if: failure()
+
+  # ---------------------------------------------------------------- Rust
+  host-tests:
+    name: Host tests (cargo test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Regenerate first, so a stale generated file cannot mask a failure
+        run: python3 tools/nolxfs-codegen/gen.py 2>&1 | tee /tmp/job.log
+      - name: cargo test
+        run: cargo test --lib --bins 2>&1 | tee -a /tmp/job.log
+      - name: cargo test (integration tests)
+        run: cargo test --tests 2>&1 | tee -a /tmp/job.log
+      - name: Report the test totals to the PR
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -u
+          [ -n "${PR_NUMBER:-}" ] || exit 0
+          BODY=$(mktemp)
+          {
+            echo "### host test totals for \`${{ github.sha }}\`"
+            echo
+            echo '```'
+            echo "--- per-target results ---"
+            grep -E "^(     Running|   Doc-tests|test result:)" /tmp/job.log || echo "(none)"
+            echo "--- every error ---"
+            grep -E "^(error|warning)(\[|:)" /tmp/job.log | sort | uniq -c | sort -rn || echo "(none)"
+            echo "--- full log ---"
+            tail -c 55000 /tmp/job.log
+            echo '```'
+          } > "$BODY"
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$BODY"
+          rm -f "$BODY"
+      - uses: ./.github/actions/report-failure
+        if: failure()
+
+  lint:
+    name: fmt + clippy + unsafe audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt
+        run: cargo fmt --all -- --check 2>&1 | tee /tmp/job.log
+      - name: clippy, warnings are errors
+        run: cargo clippy --all-targets -- -D warnings 2>&1 | tee -a /tmp/job.log
+      - name: every unsafe block states its invariant
+        run: scripts/check-unsafe.sh 2>&1 | tee -a /tmp/job.log
+      - uses: ./.github/actions/report-failure
+        if: failure()
+
+  kernel:
+    name: Kernel build (x86_64-unknown-none)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy the kernel for its own target
+        run: |
+          cargo clippy --release --target x86_64-unknown-none -p nolx-kernel -- -D warnings \
+            2>&1 | tee /tmp/job.log
+      - name: Build the kernel
+        run: make kernel 2>&1 | tee -a /tmp/job.log
+      - name: Validate the resulting image
+        run: python3 scripts/verify-multiboot.py build/nolx.elf 2>&1 | tee -a /tmp/job.log
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: nolx-kernel-elf
+          path: build/nolx.elf
+      - uses: ./.github/actions/report-failure
+        if: failure()
+
+  # ---------------------------------------------------------------- does it boot?
+  #
+  # The kernel is not far enough along to reach user mode, so this asserts the boot
+  # markers that exist today and nothing more. As each milestone lands its marker is
+  # added here -- the list is the project's honest progress record.
+  boot-smoke:
+    name: QEMU boot smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install QEMU
+        run: |
+          sudo apt-get update 2>&1 | tail -1
+          sudo apt-get install -y qemu-system-x86 2>&1 | tail -3
+      - name: Build
+        run: make kernel 2>&1 | tee /tmp/job.log
+      - name: Inspect the kernel image
+        run: |
+          {
+            echo "--- size ---"; ls -l build/nolx.elf
+            echo "--- ELF header ---"; readelf -h build/nolx.elf
+            echo "--- sections ---"; readelf -SW build/nolx.elf
+            echo "--- key symbols ---"
+            nm -n build/nolx.elf | grep -Ei "nolx_kernel_main|nolx_probe|__start32|long_mode_entry|_sbss|_ebss|_edata|_end" || true
+            echo "--- first instructions of nolx_kernel_main ---"
+            objdump -d --no-show-raw-insn build/nolx.elf | sed -n '/<nolx_probe>:/,/^$/p' | head -20 || true
+            objdump -d --no-show-raw-insn build/nolx.elf | sed -n '/<nolx_kernel_main>:/,/^$/p' | head -20 || true
+            echo "--- every out/in instruction in the image ---"
+            objdump -d --no-show-raw-insn build/nolx.elf | grep -cE "\bout\b|\bin\b" || true
+          } 2>&1 | tee -a /tmp/job.log
+      - name: Boot and capture the serial log
+        run: |
+          set -o pipefail
+          timeout 30 qemu-system-x86_64 \
+            -kernel build/nolx.elf \
+            -m 512M -nographic -no-reboot \
+            | tee build/serial.log || true
+          cat build/serial.log >> /tmp/job.log
+      # These are the markers the kernel actually reaches today. The list is the project's
+      # honest progress record: a marker is added when the kernel emits it, not before.
+      - name: Assert the boot markers
+        run: |
+          set -e
+          for marker in \
+            "NOLX: boot layer entered (32-bit protected mode)" \
+            "NOLX: long mode entered" \
+            "NOLX: calling nolx_kernel_main" \
+            "NOLX: early exception handlers installed" \
+            "NOLX: nolx_probe0 returned" \
+            "NOLX: nolx_probe reached (Rust is callable)" \
+            "NOLX: nolx_kernel_main entered" \
+            "NOLX 0.1.0 starting" \
+            "NOLX: mm online" \
+            "NOLX: hal online" \
+            "NOLX: objmgr online" \
+            "NOLX: init sequence complete, halting the boot processor"
+          do
+            if ! grep -qF "$marker" build/serial.log; then
+              echo "missing boot marker: $marker"
+              exit 1
+            fi
+          done
+
+      # Every marker above is asserted, so this is a summary rather than a confession.
+      # It stays because the subsystem lines carry detail -- the memory map, the object
+      # type count, the syscall count -- that is worth reading rather than just passing.
+      - name: Report what the kernel said about itself
+        run: |
+          grep -E "^(multiboot|mm|obj|exec|psx|io):" build/serial.log || \
+            echo "::warning::no subsystem reported in"
+      - name: Assert nothing panicked
+        run: |
+          # `CPU exception` is the boot layer's own handler (boot/boot.S); the other two
+          # come from Rust. All three mean the same thing: the image is not booting
+          # cleanly, and a green run must not hide that.
+          if grep -qE "PANIC|BUGCHECK|CPU exception" build/serial.log; then
+            echo "the kernel reported a fault during boot:"
+            cat build/serial.log
+            exit 1
+          fi
+      - name: Upload the serial log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: serial-log
+          path: build/serial.log
+      # Posted on success as well as failure. The artifact above is the archive of
+      # record, but it is not reachable from everywhere this project is developed; the
+      # comment is.
+      - uses: ./.github/actions/report-serial
+        if: always()
+      - uses: ./.github/actions/report-failure
+        if: failure()

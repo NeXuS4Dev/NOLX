@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nolx-types",
+    "crates/nolx-syscall",
+    "crates/nolxfs",
+    "crates/nolx-vfs",
+    "kernel",
+    "tools/mkfs-nolxfs",
+]
+# `cargo test` with no `-p` and no `--workspace` uses these. The kernel is deliberately
+# excluded: it is a `no_std` staticlib with no test harness, and its testable logic lives in
+# the crates it depends on. Use `cargo build -p nolx-kernel --target x86_64-unknown-none`
+# to build it, or `make kernel`.
+default-members = [
+    "crates/nolx-types",
+    "crates/nolx-syscall",
+    "crates/nolxfs",
+    "crates/nolx-vfs",
+    "tools/mkfs-nolxfs",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "BSD-2-Clause"
+repository = "https://github.com/NeXuS4Dev/NOLX"
+authors = ["The NOLX Authors"]
+
+# Deliberately no `panic = "abort"` in these profiles: `cargo test` needs unwinding on the
+# host. The kernel's target (`x86_64-unknown-none`) already carries `panic-strategy:
+# abort`, so kernel code is abort-only regardless of what is set here.
+[profile.dev]
+debug = true
+overflow-checks = true
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+codegen-units = 1
+overflow-checks = true
+
+[profile.kernel]
+inherits = "release"
+opt-level = 2
+lto = "fat"
+codegen-units = 1
+panic = "abort"

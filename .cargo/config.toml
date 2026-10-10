@@ -1,0 +1,16 @@
+# Cargo configuration for NOLX.
+#
+# NB: `build.target` is intentionally NOT set here. Setting it would force the host-side
+# crates (crates/*, tools/*) onto the kernel target and break `cargo test`. The Makefile
+# passes `--target x86_64-unknown-none` for kernel builds instead.
+
+[target.x86_64-unknown-none]
+# The kernel links with its own script. The Makefile adds the absolute path via
+# RUSTFLAGS so the build does not depend on cargo's working directory.
+rustflags = [
+    "-C", "force-frame-pointers=yes",
+]
+
+[alias]
+# Host-side tests for every no_std crate. These run on the build machine; no QEMU needed.
+kerncheck = "test --workspace --lib --bins"

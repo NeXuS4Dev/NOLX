@@ -1,0 +1,11 @@
+[package]
+name = "nolx-syscall"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The NOLX user/kernel ABI: register mapping, marshalling, and the syscall macro"
+readme = "../../README.md"
+
+[dependencies]
+nolx-types = { path = "../nolx-types" }
