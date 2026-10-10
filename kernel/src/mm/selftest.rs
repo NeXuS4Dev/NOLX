@@ -179,7 +179,7 @@ fn mixed_order_phase(console: &mut dyn HalConsole) -> Result<u64, SelftestError>
 
     while timer::ticks().saturating_sub(start_ticks) < MIN_TICKS && operations < MAX_OPERATIONS {
         let roll = next_random(&mut random);
-        if roll % 4 != 0 || live_count == 0 {
+        if !roll.is_multiple_of(4) || live_count == 0 {
             if live_count < LIVE_BLOCKS {
                 let order = (roll >> 33) as usize % (MAX_TEST_ORDER + 1);
                 if let Some(frame) = mm::allocate_frames(order) {
@@ -198,7 +198,7 @@ fn mixed_order_phase(console: &mut dyn HalConsole) -> Result<u64, SelftestError>
         }
 
         operations += 1;
-        if operations % AUDIT_INTERVAL == 0 {
+        if operations.is_multiple_of(AUDIT_INTERVAL) {
             mm::audit().map_err(SelftestError::Inconsistent)?;
         }
     }

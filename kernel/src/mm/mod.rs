@@ -370,7 +370,7 @@ pub fn free_block(frame: usize, order: usize) -> Result<(), FreeError> {
     }
     let count = 1usize << order;
     let len = frame_map_len();
-    if frame % count != 0 {
+    if !frame.is_multiple_of(count) {
         return Err(FreeError::NotAligned);
     }
     if frame + count > len {

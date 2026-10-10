@@ -210,7 +210,9 @@ impl<'a> BoundaryHeap<'a> {
         let block = offset.checked_sub(HEADER).ok_or(HeapError::Corrupt(
             "the payload offset is not inside the region",
         ))?;
-        if block % ALIGNMENT != 0 || (block as usize) + MIN_BLOCK as usize > self.region.len() {
+        if !block.is_multiple_of(ALIGNMENT)
+            || (block as usize) + MIN_BLOCK as usize > self.region.len()
+        {
             return Err(HeapError::Corrupt(
                 "the payload offset is not a block start",
             ));
@@ -354,7 +356,7 @@ impl<'a> BoundaryHeap<'a> {
             let mut steps = 0u64;
             while current != NOT_FREE {
                 if (current as usize) + MIN_BLOCK as usize > self.region.len()
-                    || current % ALIGNMENT != 0
+                    || !current.is_multiple_of(ALIGNMENT)
                 {
                     return Err(HeapError::Corrupt("a free list holds a bad offset"));
                 }
@@ -458,7 +460,7 @@ impl<'a> BoundaryHeap<'a> {
 
     fn header_plausible(&self, block: u32, size: u32) -> bool {
         size >= MIN_BLOCK
-            && size % ALIGNMENT == 0
+            && size.is_multiple_of(ALIGNMENT)
             && (block as usize) + (size as usize) <= self.region.len()
     }
 
