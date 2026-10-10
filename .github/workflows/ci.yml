@@ -1,0 +1,164 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------- the checks that
+  # need no Rust toolchain. They run first and they are the ones that catch the two
+  # hardest-to-debug classes of bug in this project: a boot trampoline that does not
+  # link, and an on-disk layout that silently moved.
+  boot-layer:
+    name: Boot layer (as, ld, python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show toolchain versions
+        run: |
+          as --version | head -1
+          ld --version | head -1
+          python3 --version
+      - name: Assemble, link, and validate the Multiboot header
+        run: make bootcheck
+      - name: Upload the linked image
+        uses: actions/upload-artifact@v4
+        with:
+          name: nolx-bootcheck-elf
+          path: build/nolx.bootcheck.elf
+
+  on-disk-format:
+    name: NOLXFS layout (python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generator must be idempotent
+        run: python3 tools/nolxfs-codegen/gen.py --check
+      - name: Layout invariants
+        run: python3 tools/nolxfs-codegen/test_layout.py
+      - name: Generated files are byte-identical after regeneration
+        run: |
+          python3 tools/nolxfs-codegen/gen.py
+          git diff --exit-code crates/nolxfs/src/on_disk_gen.rs include/nolxfs/nolxfs_format.h
+      - name: Conformance database is well-formed
+        run: python3 tools/conformance-report.py --check
+      - name: Conformance dashboard is up to date
+        run: |
+          python3 tools/conformance-report.py
+          git diff --exit-code docs/testing/CONFORMANCE.md
+
+  # ---------------------------------------------------------------- Rust
+  host-tests:
+    name: Host tests (cargo test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Regenerate first, so a stale generated file cannot mask a failure
+        run: python3 tools/nolxfs-codegen/gen.py
+      - name: cargo test
+        run: cargo test --lib --bins -- --nocapture
+      - name: cargo test (integration tests)
+        run: cargo test --tests
+
+  lint:
+    name: fmt + clippy + unsafe audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+      - name: clippy, warnings are errors
+        run: cargo clippy --all-targets -- -D warnings
+      - name: every unsafe block states its invariant
+        run: scripts/check-unsafe.sh
+
+  kernel:
+    name: Kernel build (x86_64-unknown-none)
+    runs-on: ubuntu-latest
+    needs: [boot-layer, host-tests]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the kernel
+        run: make kernel
+      - name: Validate the resulting image
+        run: python3 scripts/verify-multiboot.py build/nolx.elf
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: nolx-kernel-elf
+          path: build/nolx.elf
+
+  # ---------------------------------------------------------------- does it boot?
+  #
+  # The kernel is not far enough along to reach user mode, so this asserts the boot
+  # markers that exist today and nothing more. As each milestone lands, its marker is
+  # added here -- which is the point: the list is the project's honest progress record.
+  boot-smoke:
+    name: QEMU boot smoke test
+    runs-on: ubuntu-latest
+    needs: [kernel]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86
+      - name: Build
+        run: make kernel
+      - name: Boot and capture the serial log
+        run: |
+          set -o pipefail
+          timeout 30 qemu-system-x86_64 \
+            -kernel build/nolx.elf \
+            -m 512M -nographic -no-reboot \
+            | tee build/serial.log || true
+      - name: Assert the boot markers
+        run: |
+          set -e
+          for marker in \
+            "NOLX: long mode entered" \
+            "NOLX: hal online" \
+            "NOLX: mm online" \
+            "NOLX: objmgr online" \
+            "NOLX: init sequence complete"
+          do
+            if ! grep -qF "$marker" build/serial.log; then
+              echo "missing boot marker: $marker"
+              exit 1
+            fi
+          done
+      - name: Assert nothing panicked
+        run: |
+          if grep -qE "PANIC|BUGCHECK" build/serial.log; then
+            echo "kernel panicked during boot:"
+            cat build/serial.log
+            exit 1
+          fi
+      - name: Upload the serial log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serial-log
+          path: build/serial.log

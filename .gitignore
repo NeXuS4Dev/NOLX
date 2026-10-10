@@ -1,0 +1,24 @@
+# Build artifacts
+/build/
+/target/
+
+# Never check in a generated file's editor backup, but DO check in the generated files
+# themselves: crates/nolxfs/src/on_disk_gen.rs and include/nolxfs/nolxfs_format.h are
+# committed on purpose so the tree builds without running the generator.
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Editors
+*.swp
+*~
+.idea/
+.vscode/
+
+# OS images and test fixtures
+*.iso
+*.img
+*.qcow2
+!tests/fixtures/*.img

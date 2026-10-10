@@ -1,0 +1,19 @@
+[package]
+name = "nolx-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The NOLX kernel: HAL, executive, and POSIX subsystem"
+readme = "../README.md"
+publish = false
+
+[lib]
+name = "nolx_kernel"
+path = "src/main.rs"
+# Built as a binary for x86_64-unknown-none and as a lib for host-side reasoning about the
+# pure-logic modules. `make kernel` builds the binary.
+crate-type = ["staticlib"]
+
+[dependencies]
+nolx-types = { path = "../crates/nolx-types" }

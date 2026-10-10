@@ -1,0 +1,17 @@
+[package]
+name = "mkfs-nolxfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "mkfs.nolxfs: create a NOLXFS container on a device or image file"
+readme = "../../README.md"
+default-run = "mkfs-nolxfs"
+
+[[bin]]
+name = "mkfs-nolxfs"
+path = "src/main.rs"
+
+[dependencies]
+nolxfs = { path = "../../crates/nolxfs" }
+nolx-types = { path = "../../crates/nolx-types" }

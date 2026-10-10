@@ -1,0 +1,11 @@
+[package]
+name = "nolx-vfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "NOLX VFS: pathname resolution, the mount table, and the descriptor table"
+readme = "../../README.md"
+
+[dependencies]
+nolx-types = { path = "../nolx-types" }
