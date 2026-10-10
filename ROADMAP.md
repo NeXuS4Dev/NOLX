@@ -39,7 +39,7 @@ Get from firmware to `nolx_kernel_main` in 64-bit long mode.
   services hand-off, Secure Boot–compatible PE layout).
 - Tests: T2 `NOLX: boot layer reached long mode`; T1 multiboot header validation.
 
-## M2 — HAL: console, tables, interrupts, time
+## M2 — HAL: console, tables, interrupts, time (done)
 
 - Serial (16550) + VGA text console behind one `HalConsole` trait; boot log from the first
   instruction that can print.
@@ -63,15 +63,26 @@ periodic LAPIC timer otherwise. The 8259/PIT remains a fallback when firmware, A
 calibration setup is unavailable. HPET also backs monotonic time (including extension of
 32-bit counter wraps); the RTC wall-clock anchor stores its matching monotonic baseline.
 
-The host assertion database covers portable ACPI/APIC parsing and timer arithmetic. CI is
-configured to boot the normal APIC/HPET timer path, assert 100 timer interrupts, exercise a
-separate PIC/PIT fallback boot with local APIC hidden, and boot `#PF`/`#GP` fault images.
-Those QEMU checks are still **pending** until this code revision has a passing workflow run.
-The HAL also retains the earlier verified console contract, TSS/IST stacks, complete IDT,
+The host assertion database covers portable ACPI/APIC parsing and timer arithmetic. CI boots
+the normal APIC/HPET timer path, asserts 100 timer interrupts, exercises a separate PIC/PIT
+fallback boot with local APIC hidden, and boots `#PF`/`#GP` fault images. Those QEMU checks
+are no longer pending: workflow run
+[38086516018](https://github.com/NeXuS4Dev/NOLX/actions/runs/38086516018) on revision
+`dc2d8d1` passed all six jobs -- boot layer, NOLXFS layout, host tests, fmt + clippy + unsafe
+audit, kernel build, and the QEMU boot smoke test -- and the eight HAL assertions that were
+`pending-T2` are recorded as `tested-T2` in `docs/testing/assertions/hal.md`. The HAL also
+retains the earlier verified console contract, TSS/IST stacks, complete IDT,
 register-preserving interrupt stubs, and bootstrap GS-based per-CPU block.
 
-M2 remains **in progress** pending host/build and QEMU verification of this extension; no
-current-revision Rust build or QEMU pass is claimed in this checkpoint.
+M2 is **done**: the code exists, its listed tests pass in CI, and its assertions are recorded
+in the database.
+
+### M2 verification checkpoint — 2026-10-10
+
+The revision named above is the first on which every M2 claim has a passing machine record
+behind it. The QEMU boot smoke test asserts the boot markers themselves -- not a summary of
+them -- and the serial log for each run is archived as a build artifact and posted on the
+pull request, so the evidence can be read rather than trusted.
 
 ## M3 — Memory management
 

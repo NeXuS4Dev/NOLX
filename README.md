@@ -68,9 +68,9 @@ Milestone tracking lives in [ROADMAP.md](ROADMAP.md). Current state:
 | Milestone | State |
 |---|---|
 | M0 — Architecture, ABI and on-disk formats frozen | **done** |
-| M1 — Boot layer: Multiboot → long mode → kernel entry | **code complete**, boot layer machine-verified |
-| M2 — HAL: console, GDT, IDT, PIC/APIC, timer | **in progress** — ACPI/HPET discovery, xAPIC/x2APIC, I/O APIC routing, TPR/EOI, and calibrated LAPIC/TSC-deadline paths are implemented with PIC/PIT fallback; current-revision CI/QEMU verification is pending |
-| M3 — Physical/virtual memory, kernel heap | **in progress** |
+| M1 — Boot layer: Multiboot → long mode → kernel entry | **done** — boot layer machine-verified, kernel entry reached under QEMU |
+| M2 — HAL: console, GDT, IDT, PIC/APIC, timer | **done** — ACPI/HPET discovery, xAPIC/x2APIC, I/O APIC routing, TPR/EOI, calibrated LAPIC/TSC-deadline paths with PIC/PIT fallback; every HAL T2 assertion now has a passing QEMU run |
+| M3 — Physical/virtual memory, kernel heap | **in progress** — frame map and allocator core |
 | M4+ | planned |
 
 ### What has actually been verified
@@ -86,11 +86,20 @@ This repository is honest about which artifacts were executed and which were not
 * **Machine-verified here (2026-10-10):** `make bootcheck fscheck` passed, including
   assembly/linking of the boot layer and all 256 interrupt stubs, Multiboot validation,
   NOLXFS layout tests, and the conformance-database check.
-* **Not executed in this sandbox:** Rust tooling and QEMU are unavailable, so no host Rust
-  tests, Clippy, freestanding kernel build, or QEMU boot is claimed for this revision. CI is
-  configured to verify the APIC/HPET timer path, a separate PIC/PIT fallback, the CMOS
-  wall-clock marker, and dedicated `#PF`/`#GP` exception reports; those checks remain pending
-  until a workflow run for this revision passes.
+* **Machine-verified in the development sandbox (2026-10-10):** a Rust 1.88 stable toolchain
+  (rustc, cargo, clippy, rustfmt, and the `x86_64-unknown-none` standard library, assembled
+  from the Rust distribution packages published to this sandbox's package registries) runs
+  `make check` — host tests for every crate — plus `make bootcheck fscheck`, `make kernel`
+  for the freestanding `x86_64-unknown-none` image, `scripts/verify-multiboot.py`,
+  `cargo fmt --check`, `cargo clippy -D warnings`, and `scripts/check-unsafe.sh` clean.
+  QEMU is still unavailable here, so boot tests remain CI-only.
+* **CI-verified (2026-10-10):** workflow run
+  [38086516018](https://github.com/NeXuS4Dev/NOLX/actions/runs/38086516018) on revision
+  `dc2d8d1` passed every job: boot layer, NOLXFS layout, host tests, fmt + clippy + unsafe
+  audit, kernel build, and the QEMU boot smoke test. That boot test boots the kernel,
+  asserts every boot marker, checks the wall clock advanced from its RTC anchor, boots the
+  `#PF`/`#GP` fault images, and exercises the PIC/PIT fallback with the local APIC hidden.
+  The eight HAL assertions that were `pending-T2` are now `tested-T2`.
 
 ## License
 
