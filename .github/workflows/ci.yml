@@ -212,7 +212,8 @@ jobs:
           for marker in \
             "NOLX: boot layer entered (32-bit protected mode)" \
             "NOLX: long mode entered" \
-            "NOLX: calling nolx_kernel_main"
+            "NOLX: calling nolx_kernel_main" \
+            "NOLX: early exception handlers installed"
           do
             if ! grep -qF "$marker" build/serial.log; then
               echo "missing boot marker: $marker"
@@ -248,8 +249,11 @@ jobs:
           echo "::warning::the kernel entry point does not yet execute; see the report above"
       - name: Assert nothing panicked
         run: |
-          if grep -qE "PANIC|BUGCHECK" build/serial.log; then
-            echo "kernel panicked during boot:"
+          # `CPU exception` is the boot layer's own handler (boot/boot.S); the other two
+          # come from Rust. All three mean the same thing: the image is not booting
+          # cleanly, and a green run must not hide that.
+          if grep -qE "PANIC|BUGCHECK|CPU exception" build/serial.log; then
+            echo "the kernel reported a fault during boot:"
             cat build/serial.log
             exit 1
           fi
@@ -259,5 +263,10 @@ jobs:
         with:
           name: serial-log
           path: build/serial.log
+      # Posted on success as well as failure. The artifact above is the archive of
+      # record, but it is not reachable from everywhere this project is developed; the
+      # comment is.
+      - uses: ./.github/actions/report-serial
+        if: always()
       - uses: ./.github/actions/report-failure
         if: failure()

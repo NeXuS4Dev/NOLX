@@ -109,7 +109,7 @@ impl DescriptorTable {
             return Err(errno::EMFILE);
         }
         let slot = (min..self.limit)
-            .find(|&i| self.slots.get(i).map_or(true, Option::is_none))
+            .find(|&i| self.slots.get(i).is_none_or(Option::is_none))
             .ok_or(errno::EMFILE)?;
         self.place(slot, descriptor);
         self.allocations += 1;
@@ -159,7 +159,7 @@ impl DescriptorTable {
     /// without failing.
     #[must_use]
     pub fn is_open(&self, fd: usize) -> bool {
-        self.slots.get(fd).map_or(false, Option::is_some)
+        self.slots.get(fd).is_some_and(Option::is_some)
     }
 
     /// Close `fd`.
@@ -191,7 +191,7 @@ impl DescriptorTable {
     pub fn close_on_exec(&mut self) -> Vec<Descriptor> {
         let mut closed = Vec::new();
         for slot in self.slots.iter_mut() {
-            if slot.map_or(false, |d| d.close_on_exec) {
+            if slot.is_some_and(|d| d.close_on_exec) {
                 if let Some(d) = slot.take() {
                     closed.push(d);
                 }
