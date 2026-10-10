@@ -244,3 +244,33 @@ Each wave is a numbered, testable set of System Interfaces functions.
 - Reading or referencing Linux source. NOLX is designed from the published specifications
   and from the FreeBSD and illumos codebases, plus Microsoft's published kernel-mode
   architecture guidance.
+
+---
+
+## Known defect: the kernel entry point does not yet execute
+
+Recorded 2026-10-10, M1.
+
+`boot/boot.S` brings the machine to long mode and calls `nolx_kernel_main`. Nothing comes
+back: no output, no panic message, no fault report. The image itself is verified correct --
+`readelf` places every section at its intended address, `nm` shows both entry points, and
+`objdump` shows the probe containing the port write that would print -- so the failure is in
+executing Rust code reached from the trampoline, not in building or loading it.
+
+What has been ruled out, with the evidence that ruled it out:
+
+| Hypothesis | Evidence |
+|---|---|
+| The Multiboot magic was lost | Fixed: `__start32` zeroed BSS with `xorl %eax,%eax` before saving the magic. The mismatch warning is gone. |
+| The boot code was never linked in | Fixed: `kernel/build.rs` now assembles `boot.S` into the kernel. |
+| The image is loaded at the wrong address | Ruled out: `readelf -SW` shows every section where the linker script put it. |
+| Port I/O was optimized away | Fixed: `options(nomem, preserves_flags)` licensed LLVM to delete an output-less `out`. That was a real bug; it was not this one. |
+| The entry symbol is missing | Ruled out: `nm` shows `nolx_probe` and `nolx_kernel_main`. |
+
+Still open: the interrupt descriptor table is never loaded, so any exception between the
+`call` and the first instruction is an unrecoverable triple fault rather than a message.
+That is the leading candidate and the first thing M4 should address -- a kernel that cannot
+report its own faults cannot be debugged from inside.
+
+The QEMU job reports these markers on every run rather than failing silently, so the gap
+cannot be mistaken for progress.
