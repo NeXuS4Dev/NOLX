@@ -405,6 +405,31 @@ impl<'d, D: BlockDevice, A: BlockAllocator> BTree<'d, D, A> {
         }
     }
 
+    /// Create an empty tree rooted at `root`, overwriting whatever was there.
+    ///
+    /// [`BTree::new`] opens a tree that already exists. This is what writes the first
+    /// one, and without it a new tree cannot be used at all: a block that has never been
+    /// written has no object header, so the first read reports `BadType` with `found: 0`,
+    /// which is indistinguishable from corruption. Every tree in a freshly formatted
+    /// volume goes through here.
+    ///
+    /// # Errors
+    ///
+    /// Device errors, or [`FsError::CorruptNode`] if a block is too small for a node
+    /// header.
+    pub fn create(
+        dev: &'d mut D,
+        alloc: &'d mut A,
+        root: u64,
+        kind: KeyKind,
+        subtype: u16,
+        xid: u64,
+    ) -> Result<Self> {
+        let mut tree = Self::new(dev, alloc, root, kind, subtype, xid);
+        tree.write_node(root, &Node::new_leaf(), true)?;
+        Ok(tree)
+    }
+
     /// The root block, which changes when the tree grows a level.
     #[must_use]
     pub const fn root_block(&self) -> u64 {
@@ -699,6 +724,14 @@ mod tests {
         BTree::new(dev, alloc, 0, KeyKind::JKey, gen::SUB_FSTREE as u16, 1)
     }
 
+    /// The first handle on a device: creates the empty root the others then open.
+    fn create_tree<'a>(
+        dev: &'a mut MemBlockDevice,
+        alloc: &'a mut Bump,
+    ) -> BTree<'a, MemBlockDevice, Bump> {
+        BTree::create(dev, alloc, 0, KeyKind::JKey, gen::SUB_FSTREE as u16, 1).unwrap()
+    }
+
     #[test]
     fn key_comparison_is_numeric_on_the_prefix() {
         let a = key("apple");
@@ -793,7 +826,7 @@ mod tests {
         let mut dev = MemBlockDevice::new(4096, 256);
         let mut alloc = Bump { next: 1, end: 256 };
         {
-            let mut tree = make_tree(&mut dev, &mut alloc);
+            let mut tree = create_tree(&mut dev, &mut alloc);
             tree.insert(&key("hello"), b"world").unwrap();
         }
         {
@@ -810,7 +843,7 @@ mod tests {
     fn insert_replaces_an_existing_key() {
         let mut dev = MemBlockDevice::new(4096, 256);
         let mut alloc = Bump { next: 1, end: 256 };
-        let mut tree = make_tree(&mut dev, &mut alloc);
+        let mut tree = create_tree(&mut dev, &mut alloc);
         tree.insert(&key("k"), b"first").unwrap();
         tree.insert(&key("k"), b"second").unwrap();
         assert_eq!(
@@ -828,7 +861,7 @@ mod tests {
         let mut names: Vec<String> = (0..count).map(|i| alloc::format!("name-{i:06}")).collect();
 
         {
-            let mut tree = make_tree(&mut dev, &mut alloc);
+            let mut tree = create_tree(&mut dev, &mut alloc);
             for n in &names {
                 tree.insert(&key(n), n.as_bytes()).unwrap();
             }
@@ -862,7 +895,7 @@ mod tests {
     fn search_floor_returns_the_predecessor() {
         let mut dev = MemBlockDevice::new(4096, 256);
         let mut alloc = Bump { next: 1, end: 256 };
-        let mut tree = make_tree(&mut dev, &mut alloc);
+        let mut tree = create_tree(&mut dev, &mut alloc);
         for n in ["a", "c", "e"] {
             tree.insert(&key(n), n.as_bytes()).unwrap();
         }
@@ -883,7 +916,7 @@ mod tests {
     fn remove_deletes_only_the_named_key() {
         let mut dev = MemBlockDevice::new(4096, 1024);
         let mut alloc = Bump { next: 1, end: 1024 };
-        let mut tree = make_tree(&mut dev, &mut alloc);
+        let mut tree = create_tree(&mut dev, &mut alloc);
         for n in ["a", "b", "c", "d"] {
             tree.insert(&key(n), n.as_bytes()).unwrap();
         }
@@ -905,7 +938,7 @@ mod tests {
         let mut dev = MemBlockDevice::new(4096, 64);
         // Only one spare block: the first split will exhaust the allocator.
         let mut alloc = Bump { next: 1, end: 2 };
-        let mut tree = make_tree(&mut dev, &mut alloc);
+        let mut tree = create_tree(&mut dev, &mut alloc);
         let mut hit_error = false;
         for i in 0..2000u32 {
             let k = key(&alloc::format!("n-{i:08}"));
@@ -926,7 +959,7 @@ mod tests {
         let mut dev = MemBlockDevice::new(4096, 16);
         let mut alloc = Bump { next: 1, end: 16 };
         {
-            let mut tree = make_tree(&mut dev, &mut alloc);
+            let mut tree = create_tree(&mut dev, &mut alloc);
             tree.insert(&key("a"), b"1").unwrap();
         }
         // Corrupt the table of contents so an entry points outside the block.

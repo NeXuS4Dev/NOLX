@@ -290,14 +290,16 @@ pub fn format<D: BlockDevice>(dev: &mut D, opts: &FormatOptions) -> Result<Layou
             next: layout.first_data_block,
             end: block_count,
         };
-        let mut fs_tree = BTree::new(
+        // `create`, not `new`: the block is blank until the empty root is written, and
+        // a tree whose root was never written cannot be opened at all.
+        let mut fs_tree = BTree::create(
             dev,
             &mut alloc,
             layout.fs_tree_root,
             KeyKind::JKey,
             gen::SUB_FSTREE as u16,
             1,
-        );
+        )?;
         let key = on_disk::pack_jkey(gen::DREC_TYPE_INODE, gen::ROOT_INO).to_le_bytes();
         fs_tree.insert(&key, inode_bytes)?;
     }

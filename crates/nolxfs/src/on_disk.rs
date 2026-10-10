@@ -456,14 +456,20 @@ mod tests {
     }
 
     #[test]
-    fn jkey_orders_by_inode_then_record_type() {
-        // Records for one inode must sort together, which is what makes a directory
-        // listing a range scan.
+    fn jkey_orders_by_record_type_then_inode() {
+        // The documented layout is `(type << 60) | inode`, so the record type is the
+        // primary key and the inode the secondary one. That is still what makes `readdir`
+        // a range scan: every directory entry shares type 9, and within it the parent
+        // inode occupies the low 60 bits, so one parent's entries are contiguous.
         let inode_a_dir = pack_jkey(gen::DREC_TYPE_DIR_REC, 10);
         let inode_a_ino = pack_jkey(gen::DREC_TYPE_INODE, 10);
         let inode_b_ino = pack_jkey(gen::DREC_TYPE_INODE, 11);
-        assert!(inode_a_dir < inode_a_ino);
+        // Same inode, different type: the lower record type comes first.
+        assert!(inode_a_ino < inode_a_dir);
+        // Same type, different inode: the lower inode comes first.
         assert!(inode_a_ino < inode_b_ino);
+        // And the type dominates, which is the whole point of putting it in the high bits.
+        assert!(pack_jkey(gen::DREC_TYPE_INODE, 1 << 59) < inode_a_dir);
     }
 
     #[test]

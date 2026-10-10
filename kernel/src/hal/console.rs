@@ -14,7 +14,17 @@ use super::{inb, outb};
 /// COM1's base I/O port.
 const COM1: u16 = 0x3F8;
 /// Offset of the line status register from the base port.
-const COM1_LSR: u16 = 3;
+///
+/// Five. Offset 3 is the FIFO control register, which is write-only on a 16550A: reading
+/// it reports nothing, so a transmit loop that waits on it waits forever. This is not a
+/// hypothetical -- `COM1_LSR` was three, and the effect was that the kernel's very first
+/// Rust function spun inside its first character write. No fault, no output, no way to
+/// tell from a serial log that anything had gone wrong.
+const COM1_LSR: u16 = 5;
+
+/// `boot/boot.S` waits on the same register using the absolute port `0x3FD`. The two have
+/// to agree, and this is checked while compiling rather than discovered while booting.
+const _: () = assert!(COM1 + COM1_LSR == 0x3FD, "COM1's line status register is at 0x3FD");
 /// The "transmit holding register empty" bit.
 const LSR_THRE: u8 = 1 << 5;
 

@@ -74,6 +74,20 @@ impl<'d, D: BlockDevice, A: BlockAllocator> ObjectMap<'d, D, A> {
         }
     }
 
+    /// Create an empty object map whose B-tree root is at `tree_root`.
+    ///
+    /// [`ObjectMap::open`] needs a tree that already exists; this writes the empty root it
+    /// would otherwise find missing. See [`BTree::create`].
+    ///
+    /// # Errors
+    ///
+    /// Device errors, or a block too small to hold a node header.
+    pub fn create(dev: &'d mut D, alloc: &'d mut A, tree_root: u64, xid: u64) -> Result<Self> {
+        Ok(Self {
+            tree: BTree::create(dev, alloc, tree_root, KeyKind::OMap, gen::SUB_OMAP as u16, xid)?,
+        })
+    }
+
     /// The B-tree root, which changes if the map grows a level.
     #[must_use]
     pub const fn tree_root(&self) -> u64 {
@@ -193,7 +207,7 @@ mod tests {
         let mut dev = MemBlockDevice::new(4096, 256);
         let mut alloc = Bump { next: 1, end: 256 };
         {
-            let mut omap = ObjectMap::open(&mut dev, &mut alloc, 0, 1);
+            let mut omap = ObjectMap::create(&mut dev, &mut alloc, 0, 1).unwrap();
             omap.set(7, 1, 100, 0).unwrap();
             omap.set(7, 5, 200, 0).unwrap();
             omap.set(7, 9, 300, 0).unwrap();
@@ -223,7 +237,7 @@ mod tests {
         let mut dev = MemBlockDevice::new(4096, 256);
         let mut alloc = Bump { next: 1, end: 256 };
         {
-            let mut omap = ObjectMap::open(&mut dev, &mut alloc, 0, 1);
+            let mut omap = ObjectMap::create(&mut dev, &mut alloc, 0, 1).unwrap();
             omap.set(5, 1, 111, 0).unwrap();
         }
         {
@@ -238,7 +252,7 @@ mod tests {
         let mut dev = MemBlockDevice::new(4096, 256);
         let mut alloc = Bump { next: 1, end: 256 };
         {
-            let mut omap = ObjectMap::open(&mut dev, &mut alloc, 0, 1);
+            let mut omap = ObjectMap::create(&mut dev, &mut alloc, 0, 1).unwrap();
             omap.set(3, 1, 42, 0).unwrap();
             omap.mark_missing(3, 2).unwrap();
         }
@@ -262,7 +276,7 @@ mod tests {
         let mut dev = MemBlockDevice::new(4096, 256);
         let mut alloc = Bump { next: 1, end: 256 };
         {
-            let mut omap = ObjectMap::open(&mut dev, &mut alloc, 0, 1);
+            let mut omap = ObjectMap::create(&mut dev, &mut alloc, 0, 1).unwrap();
             omap.mark_saved(9, 4, 77).unwrap();
         }
         {
@@ -277,7 +291,7 @@ mod tests {
         let mut dev = MemBlockDevice::new(4096, 4096);
         let mut alloc = Bump { next: 1, end: 4096 };
         {
-            let mut omap = ObjectMap::open(&mut dev, &mut alloc, 0, 1);
+            let mut omap = ObjectMap::create(&mut dev, &mut alloc, 0, 1).unwrap();
             for oid in 1..500u64 {
                 omap.set(oid, 1, oid * 10, 0).unwrap();
                 omap.set(oid, 2, oid * 20, 0).unwrap();
