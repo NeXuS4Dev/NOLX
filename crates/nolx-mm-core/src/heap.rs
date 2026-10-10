@@ -86,7 +86,10 @@ impl<'a> BoundaryHeap<'a> {
     /// most 4 GiB.
     pub fn new(region: &'a mut [u8]) -> Result<Self, HeapError> {
         let len = region.len();
-        if len < MIN_BLOCK as usize || len % ALIGNMENT as usize != 0 || len as u64 > MAX_REGION {
+        if len < MIN_BLOCK as usize
+            || !len.is_multiple_of(ALIGNMENT as usize)
+            || len as u64 > MAX_REGION
+        {
             return Err(HeapError::RegionTooSmall);
         }
         let mut heap = Self {

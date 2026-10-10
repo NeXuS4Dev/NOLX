@@ -781,10 +781,7 @@ impl<const NODES: usize> VadTree<NODES> {
         };
 
         // Merge with the successors while the attributes agree.
-        loop {
-            let Some(next) = self.successor(current) else {
-                break;
-            };
+        while let Some(next) = self.successor(current) {
             if !self.node(current).vad.merges_with(&self.node(next).vad) {
                 break;
             }
