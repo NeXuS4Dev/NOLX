@@ -95,22 +95,32 @@ pub fn init(console: &mut dyn HalConsole) {
                             let _ = writeln!(
                                 console,
                                 "apic: calibrated timer={} Hz tsc={:?} Hz",
-                                calibration.lapic_ticks_per_second,
-                                calibration.tsc_frequency_hz,
+                                calibration.lapic_ticks_per_second, calibration.tsc_frequency_hz,
                             );
                         }
                         Err(error) => {
-                            let _ = writeln!(console, "apic: timer calibration unavailable ({:?})", error);
+                            let _ = writeln!(
+                                console,
+                                "apic: timer calibration unavailable ({:?})",
+                                error
+                            );
                         }
                     }
                 }
             }
             Err(error) => {
-                let _ = writeln!(console, "apic: unavailable ({:?}); retaining PIC fallback", error);
+                let _ = writeln!(
+                    console,
+                    "apic: unavailable ({:?}); retaining PIC fallback",
+                    error
+                );
             }
         }
     } else {
-        let _ = writeln!(console, "acpi: no valid MADT found; retaining PIC/PIT fallback");
+        let _ = writeln!(
+            console,
+            "acpi: no valid MADT found; retaining PIC/PIT fallback"
+        );
     }
     let _ = writeln!(
         console,

@@ -3,7 +3,9 @@
 use core::ptr;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use nolx_hal_core::acpi::{IoApicNmiSource, InterruptOverride, Madt, MAX_IO_APICS, MAX_IO_APIC_NMIS};
+use nolx_hal_core::acpi::{
+    InterruptOverride, IoApicNmiSource, Madt, MAX_IO_APICS, MAX_IO_APIC_NMIS,
+};
 
 const IOAPIC_REGISTER_WINDOW: usize = 0x10;
 const IOAPIC_VERSION: u8 = 0x01;
@@ -126,10 +128,9 @@ pub fn init(madt: &Madt, destination_apic_id: u32) -> Result<(), IoApicError> {
     for irq in 0..LEGACY_IRQS {
         let (gsi, flags, has_override) = override_for_irq(madt, irq as u8);
         if !has_override
-            && madt
-                .interrupt_overrides()
-                .iter()
-                .any(|entry| entry.bus == 0 && entry.source != irq as u8 && entry.global_interrupt == gsi)
+            && madt.interrupt_overrides().iter().any(|entry| {
+                entry.bus == 0 && entry.source != irq as u8 && entry.global_interrupt == gsi
+            })
         {
             // Some firmware maps (notably IRQ0 -> GSI2) use a GSI that aliases a legacy
             // cascade input. Prefer the explicit ISA source and do not overwrite its vector
@@ -176,11 +177,8 @@ pub fn init(madt: &Madt, destination_apic_id: u32) -> Result<(), IoApicError> {
         {
             return Err(IoApicError::InvalidNmiSource);
         }
-        let Some((ioapic, pin)) = find_route(
-            &states,
-            descriptions.len(),
-            source.global_interrupt,
-        ) else {
+        let Some((ioapic, pin)) = find_route(&states, descriptions.len(), source.global_interrupt)
+        else {
             return Err(IoApicError::MissingNmiRoute);
         };
         let (active_low, level_triggered) =
@@ -220,7 +218,11 @@ pub fn init(madt: &Madt, destination_apic_id: u32) -> Result<(), IoApicError> {
         let Some(route) = route else {
             continue;
         };
-        ioapic_write(route.base, route.low_register + 1, destination_apic_id << 24);
+        ioapic_write(
+            route.base,
+            route.low_register + 1,
+            destination_apic_id << 24,
+        );
         ioapic_write(route.base, route.low_register, route.low_value);
         IRQ_ROUTE_BASE[irq].store(route.base, Ordering::Relaxed);
         IRQ_ROUTE_LOW_REGISTER[irq].store(u32::from(route.low_register), Ordering::Relaxed);
@@ -359,9 +361,6 @@ fn ioapic_write(base: u64, register: u8, value: u32) {
     // SAFETY: callers validate `base` against the statically mapped UC I/O APIC window.
     unsafe {
         ptr::write_volatile(base as usize as *mut u32, u32::from(register));
-        ptr::write_volatile(
-            (base as usize + IOAPIC_REGISTER_WINDOW) as *mut u32,
-            value,
-        );
+        ptr::write_volatile((base as usize + IOAPIC_REGISTER_WINDOW) as *mut u32, value);
     }
 }

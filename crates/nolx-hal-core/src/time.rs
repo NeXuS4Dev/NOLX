@@ -82,17 +82,17 @@ mod tests {
     #[test]
     fn counter_32bit_extension_tracks_wrap_and_ignores_stale_samples() {
         assert_eq!(extend_u32_counter(0xFFFF_FFF0, 5), 0x1_0000_0005);
-        assert_eq!(extend_u32_counter(0x1_0000_0005, 0xFFFF_FFF0), 0x1_0000_0005);
+        assert_eq!(
+            extend_u32_counter(0x1_0000_0005, 0xFFFF_FFF0),
+            0x1_0000_0005
+        );
         assert_eq!(extend_u32_counter(0xFFFF_FFF0, 0xFFFF_FFE0), 0xFFFF_FFF0);
         assert_eq!(extend_u32_counter(0x1_0000_0005, 0x20), 0x1_0000_0020);
     }
 
     #[test]
     fn counter_32bit_extension_saturates_at_the_u64_limit() {
-        assert_eq!(
-            extend_u32_counter(0xFFFF_FFFF_FFFF_FFF0, 5),
-            u64::MAX,
-        );
+        assert_eq!(extend_u32_counter(0xFFFF_FFFF_FFFF_FFF0, 5), u64::MAX,);
     }
 
     #[test]

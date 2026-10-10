@@ -244,6 +244,16 @@ jobs:
             echo "the calibrated local-APIC timer was not selected"
             exit 1
           fi
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          log = Path("build/serial.log").read_text(errors="replace")
+          base = re.search(r"wall-clock: CMOS RTC UTC epoch=(\d+)s", log)
+          current = re.search(r"realtime=Some\((\d+)\) ns", log)
+          if base is None or current is None or int(current.group(1)) <= int(base.group(1)) * 1_000_000_000:
+              raise SystemExit("wall clock did not advance from its RTC/monotonic anchor")
+          PY
 
       - name: Exercise the PIC/PIT fallback without local APIC support
         run: scripts/check-hal-pit-fallback.sh 2>&1 | tee -a /tmp/job.log

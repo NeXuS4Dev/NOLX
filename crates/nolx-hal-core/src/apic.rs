@@ -170,7 +170,10 @@ mod tests {
         assert_eq!(periodic_initial_count(u64::MAX, 1), None);
         assert_eq!(hpet_frequency_hz(100_000_000), Some(10_000_000));
         assert_eq!(hpet_frequency_hz(0), None);
-        assert_eq!(calibrated_frequency_hz(250_000, 10_000, 10_000_000), Some(250_000_000));
+        assert_eq!(
+            calibrated_frequency_hz(250_000, 10_000, 10_000_000),
+            Some(250_000_000)
+        );
         assert_eq!(calibrated_frequency_hz(0, 1, 1), None);
         assert_eq!(calibrated_frequency_hz(1, 0, 1), None);
     }

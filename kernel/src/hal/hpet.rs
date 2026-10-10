@@ -143,8 +143,8 @@ pub fn monotonic_ns() -> Option<u64> {
         extend_counter(raw as u32)
     };
     Some(
-        (u128::from(ticks) * 1_000_000_000 / u128::from(frequency))
-            .min(u128::from(u64::MAX)) as u64,
+        (u128::from(ticks) * 1_000_000_000 / u128::from(frequency)).min(u128::from(u64::MAX))
+            as u64,
     )
 }
 

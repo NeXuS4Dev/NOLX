@@ -84,7 +84,9 @@ pub fn init(madt: &Madt, features: CpuFeatures) -> Result<(), ApicError> {
     }
     let bsp_apic_id = bsp_apic_id(features);
     if bsp_apic_id > u8::MAX as u32 {
-        return Err(ApicError::IoApic(ioapic::IoApicError::UnsupportedDestination));
+        return Err(ApicError::IoApic(
+            ioapic::IoApicError::UnsupportedDestination,
+        ));
     }
     let processor = madt
         .local_apics()
@@ -251,10 +253,7 @@ pub fn calibrate_timers(
         nolx_hal_core::apic::reg::LVT_TIMER,
         APIC_LVT_MASKED | u32::from(LAPIC_TIMER_VECTOR),
     );
-    write_register(
-        nolx_hal_core::apic::reg::TIMER_INITIAL_COUNT,
-        u32::MAX,
-    );
+    write_register(nolx_hal_core::apic::reg::TIMER_INITIAL_COUNT, u32::MAX);
 
     let Some(hpet_start) = hpet::counter() else {
         write_register(nolx_hal_core::apic::reg::TIMER_INITIAL_COUNT, 0);
@@ -276,23 +275,17 @@ pub fn calibrate_timers(
 
     let hpet_delta = hpet::elapsed_ticks(hpet_start, hpet_end);
     let lapic_delta = u64::from(u32::MAX.wrapping_sub(remaining));
-    let lapic_ticks_per_second = calibrated_frequency_hz(
-        lapic_delta,
-        hpet_delta,
-        hpet_frequency,
-    )
-    .ok_or(ApicError::CalibrationUnavailable)?;
+    let lapic_ticks_per_second = calibrated_frequency_hz(lapic_delta, hpet_delta, hpet_frequency)
+        .ok_or(ApicError::CalibrationUnavailable)?;
     if periodic_initial_count(lapic_ticks_per_second, TIMER_RATE_HZ).is_none() {
         return Err(ApicError::CalibrationUnavailable);
     }
 
     let tsc_frequency_hz = if features.has_tsc() && features.has_invariant_tsc() {
         match (tsc_start, tsc_end) {
-            (Some(start), Some(end)) => calibrated_frequency_hz(
-                end.wrapping_sub(start),
-                hpet_delta,
-                hpet_frequency,
-            ),
+            (Some(start), Some(end)) => {
+                calibrated_frequency_hz(end.wrapping_sub(start), hpet_delta, hpet_frequency)
+            }
             _ => None,
         }
     } else {
@@ -339,10 +332,7 @@ pub fn start_local_timer() -> bool {
         nolx_hal_core::apic::reg::LVT_TIMER,
         u32::from(LAPIC_TIMER_VECTOR) | APIC_LVT_PERIODIC,
     );
-    write_register(
-        nolx_hal_core::apic::reg::TIMER_INITIAL_COUNT,
-        count,
-    );
+    write_register(nolx_hal_core::apic::reg::TIMER_INITIAL_COUNT, count);
     TIMER_MODE.store(TIMER_LAPIC_PERIODIC, Ordering::Release);
     true
 }
@@ -385,7 +375,10 @@ fn bsp_apic_id(features: CpuFeatures) -> u32 {
 
 fn lint_nmi_values(records: &[LocalApicNmi], processor_uid: u32) -> Result<[u32; 2], ApicError> {
     let mut values = [APIC_LVT_MASKED; 2];
-    for record in records.iter().filter(|record| record.applies_to(processor_uid)) {
+    for record in records
+        .iter()
+        .filter(|record| record.applies_to(processor_uid))
+    {
         if record.flags & !0x000F != 0 {
             return Err(ApicError::InvalidNmiConfiguration);
         }

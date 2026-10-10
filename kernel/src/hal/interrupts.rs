@@ -131,17 +131,16 @@ pub fn trigger_page_fault_test() -> ! {
     halt_after_exception()
 }
 
-/// Trigger a #GP with an architecturally reserved MSR in the T2 test build.
+/// Trigger a #GP with an invalid data-segment selector in the T2 test build.
 #[cfg(feature = "hal-fault-test-gp")]
 pub fn trigger_general_protection_test() -> ! {
-    // SAFETY: MSR 0xFFFF_FFFF is reserved and WRMSR is defined to raise #GP for it. This
-    // function exists only in the dedicated T2 fault-test image.
+    // SAFETY: selector 0xFFFF names an absent LDT/GDT entry; loading it into DS raises #GP.
+    // This function exists only in the dedicated T2 fault-test image.
     unsafe {
         asm!(
-            "wrmsr",
-            in("ecx") 0xFFFF_FFFFu32,
-            in("eax") 0u32,
-            in("edx") 0u32,
+            "mov ax, 0xffff",
+            "mov ds, ax",
+            out("ax") _,
             options(nostack),
         );
     }

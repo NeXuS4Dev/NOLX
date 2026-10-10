@@ -132,11 +132,13 @@ extern "C" fn nolx_kernel_main(mb_info: *const u8, magic: u32) -> ! {
             let ticks = hal::timer::ticks();
             if !timer_marker_reported && ticks >= 100 {
                 let elapsed_ns = hal::timer::monotonic_ns();
+                let realtime_ns = hal::rtc::unix_time_ns();
                 let _ = writeln!(
                     console,
-                    "NOLX: timer reached 100 ticks; nominal {} Hz, monotonic {} ns",
+                    "NOLX: timer reached 100 ticks; nominal {} Hz, monotonic {} ns, realtime={:?} ns",
                     hal::timer::frequency_hz(),
                     elapsed_ns,
+                    realtime_ns,
                 );
                 timer_marker_reported = true;
             }

@@ -54,7 +54,6 @@ pub struct Rsdp {
 
 impl Rsdp {
     /// Parse and checksum an RSDP from a byte slice beginning at its signature.
-    #[must_use]
     pub fn parse(bytes: &[u8]) -> Result<Self, AcpiError> {
         if bytes.len() < RSDP_V1_LEN {
             return Err(AcpiError::Truncated);
@@ -105,7 +104,6 @@ pub struct Sdt<'a> {
 
 impl<'a> Sdt<'a> {
     /// Validate the header, optional signature, declared length, and checksum of an SDT.
-    #[must_use]
     pub fn parse(bytes: &'a [u8], expected_signature: Option<[u8; 4]>) -> Result<Self, AcpiError> {
         if bytes.len() < SDT_HEADER_LEN {
             return Err(AcpiError::Truncated);
@@ -150,7 +148,6 @@ impl<'a> Sdt<'a> {
     }
 
     /// Iterate 32-bit physical addresses from an RSDT or 64-bit addresses from an XSDT.
-    #[must_use]
     pub fn root_entries(&self) -> Result<RootEntries<'a>, AcpiError> {
         let signature = self.signature();
         let entry_width = if signature == *b"RSDT" {
@@ -161,7 +158,7 @@ impl<'a> Sdt<'a> {
             return Err(AcpiError::NotRootTable);
         };
         let entries = self.payload();
-        if entries.len() % entry_width != 0 {
+        if entries.len() & (entry_width - 1) != 0 {
             return Err(AcpiError::InvalidLength);
         }
         Ok(RootEntries {
@@ -309,7 +306,6 @@ pub struct Madt {
 
 impl Madt {
     /// Parse MADT records, rejecting malformed entries and capacity overflow.
-    #[must_use]
     pub fn parse(bytes: &[u8]) -> Result<Self, AcpiError> {
         let table = Sdt::parse(bytes, Some(*b"APIC"))?;
         let bytes = table.bytes();
@@ -519,7 +515,6 @@ pub struct HpetInfo {
 
 impl HpetInfo {
     /// Parse the ACPI HPET table (signature `HPET`).
-    #[must_use]
     pub fn parse(bytes: &[u8]) -> Result<Self, AcpiError> {
         let table = Sdt::parse(bytes, Some(*b"HPET"))?;
         let bytes = table.bytes();
@@ -584,10 +579,7 @@ fn push_local_apic_nmi(madt: &mut Madt, entry: LocalApicNmi) -> Result<(), AcpiE
     Ok(())
 }
 
-fn push_io_apic_nmi(
-    madt: &mut Madt,
-    entry: IoApicNmiSource,
-) -> Result<(), AcpiError> {
+fn push_io_apic_nmi(madt: &mut Madt, entry: IoApicNmiSource) -> Result<(), AcpiError> {
     let slot = madt
         .io_apic_nmi_sources
         .get_mut(madt.io_apic_nmi_count)
@@ -721,10 +713,16 @@ mod tests {
             vec![0x1_2345_6789]
         );
 
-        assert_eq!(Sdt::parse(&rsdt, Some(*b"APIC")).err(), Some(AcpiError::BadSignature));
+        assert_eq!(
+            Sdt::parse(&rsdt, Some(*b"APIC")).err(),
+            Some(AcpiError::BadSignature)
+        );
         let mut corrupt = rsdt.clone();
         corrupt[SDT_HEADER_LEN] ^= 1;
-        assert_eq!(Sdt::parse(&corrupt, None).err(), Some(AcpiError::BadChecksum));
+        assert_eq!(
+            Sdt::parse(&corrupt, None).err(),
+            Some(AcpiError::BadChecksum)
+        );
     }
 
     #[test]
@@ -760,10 +758,7 @@ mod tests {
         x2_apic[8..12].copy_from_slice(&3u32.to_le_bytes());
         x2_apic[12..16].copy_from_slice(&0x55u32.to_le_bytes());
         append_madt_entry(&mut table, &x2_apic);
-        append_madt_entry(
-            &mut table,
-            &[10, 12, 0x0F, 0, 0x55, 0, 0, 0, 1, 0, 0, 0],
-        );
+        append_madt_entry(&mut table, &[10, 12, 0x0F, 0, 0x55, 0, 0, 0, 1, 0, 0, 0]);
 
         let table = finish_sdt(table);
         let madt = Madt::parse(&table).unwrap();
@@ -836,7 +831,7 @@ mod tests {
     fn hpet_table_decodes_gas_capabilities_and_timing_fields() {
         let mut table = vec![0u8; HPET_MIN_LEN];
         table[..4].copy_from_slice(b"HPET");
-        let block_id = 0x8086u32 << 16 | (1 << 14) | (2 << 8) | 3;
+        let block_id = 0x8086u32 << 16 | (1 << 14) | (1 << 13) | (2 << 8) | 3;
         table[36..40].copy_from_slice(&block_id.to_le_bytes());
         table[40..44].copy_from_slice(&[0, 64, 0, 0]);
         table[44..52].copy_from_slice(&0xFED0_0000u64.to_le_bytes());
