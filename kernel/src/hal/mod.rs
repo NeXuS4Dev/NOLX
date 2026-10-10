@@ -22,10 +22,17 @@ pub mod multiboot;
 #[inline]
 pub unsafe fn inb(port: u16) -> u8 {
     let value: u8;
-    // SAFETY: the caller asserts the port is valid. `in` touches no memory and the
-    // `"={al}"` constraint ties the result to the register the instruction writes.
+    // SAFETY: the caller asserts the port is valid, and the `out("al")` constraint ties the
+    // result to the register the instruction writes.
+    //
+    // The only option here is `nostack`. `nomem` and `preserves_flags` are deliberately
+    // absent: together with `nostack` they tell LLVM the block has no observable effect
+    // beyond its outputs, and for a port read that has no outputs LLVM is then free to
+    // hoist it out of a spin loop -- which turns `while inb(LSR) & THRE == 0 {}` into an
+    // infinite loop that reads the port exactly once. Port I/O is a side effect; the
+    // compiler must not be told otherwise.
     unsafe {
-        core::arch::asm!("in al, dx", out("al") value, in("dx") port, options(nomem, nostack, preserves_flags))
+        core::arch::asm!("in al, dx", out("al") value, in("dx") port, options(nostack))
     };
     value
 }
@@ -38,8 +45,14 @@ pub unsafe fn inb(port: u16) -> u8 {
 #[inline]
 pub unsafe fn outb(port: u16, value: u8) {
     // SAFETY: the caller asserts the port is valid and accepts the write.
+    //
+    // `nostack` only, and the reason is sharper here than for [`inb`]: this block has no
+    // output operands at all, so `nomem` plus `preserves_flags` plus `nostack` would
+    // describe it as an instruction with no observable effect whatsoever -- which licenses
+    // LLVM to delete it. A deleted port write is the quietest possible failure: the code
+    // runs, nothing faults, and nothing is ever transmitted.
     unsafe {
-        core::arch::asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags))
+        core::arch::asm!("out dx, al", in("dx") port, in("al") value, options(nostack))
     };
 }
 
@@ -54,14 +67,14 @@ pub unsafe fn rdmsr(msr: u32) -> u64 {
     let low: u32;
     let high: u32;
     // SAFETY: the caller asserts the MSR exists. `rdmsr` returns its result in edx:eax,
-    // which the two `out` constraints capture.
+    // which the two `out` constraints capture. `nostack` only, as [`inb`] explains.
     unsafe {
         core::arch::asm!(
             "rdmsr",
             in("ecx") msr,
             out("eax") low,
             out("edx") high,
-            options(nomem, nostack, preserves_flags),
+            options(nostack),
         )
     };
     (u64::from(high) << 32) | u64::from(low)
@@ -75,13 +88,15 @@ pub unsafe fn rdmsr(msr: u32) -> u64 {
 #[inline]
 pub unsafe fn wrmsr(msr: u32, value: u64) {
     // SAFETY: the caller asserts the MSR exists and that `value` is valid for it.
+    // `nostack` only: like [`outb`], this has no outputs, so claiming no other effect
+    // would license LLVM to delete a write that changes how the CPU behaves.
     unsafe {
         core::arch::asm!(
             "wrmsr",
             in("ecx") msr,
             in("eax") value as u32,
             in("edx") (value >> 32) as u32,
-            options(nomem, nostack, preserves_flags),
+            options(nostack),
         )
     };
 }

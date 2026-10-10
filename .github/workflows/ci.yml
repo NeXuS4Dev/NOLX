@@ -220,7 +220,10 @@ jobs:
             echo "--- key symbols ---"
             nm -n build/nolx.elf | grep -Ei "nolx_kernel_main|nolx_probe|__start32|long_mode_entry|_sbss|_ebss|_edata|_end" || true
             echo "--- first instructions of nolx_kernel_main ---"
-            objdump -d --no-show-raw-insn build/nolx.elf | sed -n '/<nolx_kernel_main>:/,/^$/p' | head -25
+            objdump -d --no-show-raw-insn build/nolx.elf | sed -n '/<nolx_probe>:/,/^$/p' | head -20 || true
+            objdump -d --no-show-raw-insn build/nolx.elf | sed -n '/<nolx_kernel_main>:/,/^$/p' | head -20 || true
+            echo "--- every out/in instruction in the image ---"
+            objdump -d --no-show-raw-insn build/nolx.elf | grep -cE "\bout\b|\bin\b" || true
           } 2>&1 | tee -a /tmp/job.log
       - name: Boot and capture the serial log
         run: |
