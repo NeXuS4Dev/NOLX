@@ -25,7 +25,12 @@ PYTHON     ?= python3
 
 # The kernel links with its own script. Pass the absolute path so the build does not
 # depend on the working directory cargo happens to pick.
-KERNEL_RUSTFLAGS := -C link-arg=-T$(CURDIR)/kernel/linker.ld -C link-arg=--build-id=none
+# `-no-pie` matters: rustc's default for this target produces a position-independent
+# executable, which is an ET_DYN with VMAs relative to zero. The Multiboot kludge fields in
+# boot/boot.S are absolute addresses and the linker script pins the image at 1 MiB, so a PIE
+# kernel would report addresses that are not where it actually loads.
+KERNEL_RUSTFLAGS := -C relocation-model=static -C link-arg=-T$(CURDIR)/kernel/linker.ld \
+                    -C link-arg=-no-pie -C link-arg=--build-id=none
 
 .PHONY: all check kernel bootcheck fscheck report iso run run-kernel mkfs fmt lint clean help \
         $(BUILD)

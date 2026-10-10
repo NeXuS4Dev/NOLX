@@ -12,6 +12,14 @@ permissions:
   contents: read
   pull-requests: write
 
+# GitHub's default Linux shell is `bash -e {0}` -- NO pipefail. Every step below pipes its
+# command through `tee` to capture the log, and without pipefail that pipe reports tee's
+# exit status, which is always 0. Two runs of this workflow reported green while cargo was
+# failing to compile. This is the fix for that.
+defaults:
+  run:
+    shell: bash --noprofile --norc -eo pipefail {0}
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -97,8 +105,10 @@ jobs:
             echo '```'
             echo "--- per-target results ---"
             grep -E "^(     Running|   Doc-tests|test result:)" /tmp/job.log || echo "(none)"
-            echo "--- tail of the log ---"
-            tail -40 /tmp/job.log
+            echo "--- every error ---"
+            grep -E "^(error|warning)(\[|:)" /tmp/job.log | sort | uniq -c | sort -rn || echo "(none)"
+            echo "--- full log ---"
+            tail -c 55000 /tmp/job.log
             echo '```'
           } > "$BODY"
           gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$BODY"
