@@ -31,9 +31,7 @@ pub unsafe fn inb(port: u16) -> u8 {
     //
     // SAFETY: the caller asserts the port is valid, and `out("al")` ties the result to the
     // register the instruction writes.
-    unsafe {
-        core::arch::asm!("in al, dx", out("al") value, in("dx") port, options(nostack))
-    };
+    unsafe { core::arch::asm!("in al, dx", out("al") value, in("dx") port, options(nostack)) };
     value
 }
 
@@ -51,9 +49,7 @@ pub unsafe fn outb(port: u16, value: u8) {
     // nothing is ever transmitted.
     //
     // SAFETY: the caller asserts the port is valid and accepts the write.
-    unsafe {
-        core::arch::asm!("out dx, al", in("dx") port, in("al") value, options(nostack))
-    };
+    unsafe { core::arch::asm!("out dx, al", in("dx") port, in("al") value, options(nostack)) };
 }
 
 /// Read a 32-bit model-specific register.
