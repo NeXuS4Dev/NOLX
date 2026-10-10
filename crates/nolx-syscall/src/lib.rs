@@ -234,7 +234,7 @@ pub unsafe fn syscall6(
 /// The kernel returns `-errno` for failure. libc's contract is `-1` with `errno` set, so
 /// this returns the pair and lets the caller store `errno` in its own TLS -- the kernel
 /// never touches `errno`, because it belongs to the thread's C runtime state.
-#[must_use]
+#[must_use = "a syscall return value that is dropped has not been checked for failure"]
 pub const fn decode(result: i64) -> Result<i64, i32> {
     if result < 0 {
         Err((-result) as i32)

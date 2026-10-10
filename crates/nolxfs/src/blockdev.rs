@@ -139,7 +139,7 @@ impl MemBlockDevice {
     #[must_use]
     pub fn new(block_size: usize, block_count: u64) -> Self {
         assert!(
-            block_size > 0 && block_size % 512 == 0,
+            block_size > 0 && block_size.is_multiple_of(512),
             "block_size must be a multiple of 512"
         );
         let total = block_size
@@ -162,7 +162,7 @@ impl MemBlockDevice {
     #[must_use]
     pub fn from_contents(block_size: usize, data: Vec<u8>) -> Self {
         assert!(
-            block_size > 0 && data.len() % block_size == 0,
+            block_size > 0 && data.len().is_multiple_of(block_size),
             "data is not block aligned"
         );
         let writes = 0;
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn wrong_buffer_length_is_reported_with_both_sizes() {
-        let mut dev = MemBlockDevice::new(4096, 4);
+        let dev = MemBlockDevice::new(4096, 4);
         let mut buf = vec![0u8; 512];
         assert_eq!(
             dev.read_block(0, &mut buf),

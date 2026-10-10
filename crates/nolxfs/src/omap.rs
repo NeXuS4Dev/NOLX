@@ -11,6 +11,13 @@ use crate::on_disk::{FsError, Result};
 use crate::on_disk_gen as gen;
 use crate::Pod;
 
+/// One object-map entry: the `(oid, xid)` pair it is keyed by, and the `(paddr, flags)`
+/// pair it resolves to.
+///
+/// A name rather than an inline tuple type because `fsck` and the tests both spell this
+/// out, and a four-field nested tuple is unreadable at every one of those sites.
+pub type Entry = ((u64, u64), (u64, u32));
+
 /// Encode an object-map key.
 #[must_use]
 pub fn encode_key(oid: u64, xid: u64) -> [u8; 16] {
@@ -135,7 +142,7 @@ impl<'d, D: BlockDevice, A: BlockAllocator> ObjectMap<'d, D, A> {
     /// # Errors
     ///
     /// Device or corruption errors.
-    pub fn all(&mut self) -> Result<alloc::vec::Vec<((u64, u64), (u64, u32))>> {
+    pub fn all(&mut self) -> Result<alloc::vec::Vec<Entry>> {
         let mut out = alloc::vec::Vec::new();
         for entry in self.tree.collect()? {
             let key = decode_key(&entry.key).ok_or(FsError::CorruptNode("bad omap key length"))?;

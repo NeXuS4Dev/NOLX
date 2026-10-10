@@ -575,6 +575,9 @@ mod tests {
 
     #[test]
     fn symlink_loop_limit_meets_the_standard_minimum() {
-        assert!(SYMLOOP_MAX >= 8);
+        // A const assert, not a runtime one: `SYMLOOP_MAX` is a constant, so a runtime
+        // `assert!` here can never fail and would only cost a branch. Spelled this way it
+        // is checked while compiling, which is when it can still stop a regression.
+        const _: () = assert!(SYMLOOP_MAX >= 8);
     }
 }

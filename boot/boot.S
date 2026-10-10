@@ -55,6 +55,11 @@
 
     .set BOOT_STACK_SIZE,       65536
 
+    .set EARLY_IDT_ENTRIES,     64         /* CPU exceptions are 0-31; headroom beyond */
+    .set EARLY_ISR_STRIDE,      16         /* fixed size of one early stub, see below  */
+    .set GATE_PRESENT,          1 << 7
+    .set GATE_INT64_DPL0,       0x0E       /* 64-bit interrupt gate, ring 0 only       */
+
 /* ================================================================== Multiboot header */
 
     .section .multiboot, "aw", @progbits
@@ -89,6 +94,18 @@ msg_no_long_mode:
     .asciz  "NOLX: FATAL: long mode is not supported by this CPU\r\n"
 msg_returned:
     .asciz  "NOLX: FATAL: kernel entry point returned\r\n"
+msg_idt:
+    .asciz  "NOLX: early exception handlers installed\r\n"
+msg_exc_head:
+    .asciz  "NOLX: FATAL: CPU exception, vector "
+msg_exc_err:
+    .asciz  " error "
+msg_exc_rip:
+    .asciz  " rip "
+msg_exc_cr2:
+    .asciz  " cr2 "
+msg_exc_tail:
+    .asciz  "\r\nNOLX: this is a bug check; the machine has stopped\r\n"
 
 /* ================================================================== 32-bit entry */
 
@@ -246,6 +263,52 @@ long_mode_entry:
     movl    $msg_long_mode, %esi
     call    serial_puts64
 
+    /*
+     * Install the early interrupt descriptor table before doing anything else.
+     *
+     * Without this, `lidt` has never run, the IDT base and limit are both zero, and the
+     * first exception of any kind -- including one raised by the very first Rust
+     * instruction -- cascades through a double fault into a triple fault. The CPU then
+     * shuts down. Nothing is printed, nothing is logged, and from inside the guest there
+     * is no way at all to tell what happened. That is precisely the failure this boot
+     * layer spent M1 bring-up chasing.
+     *
+     * These handlers are assembly, on purpose: they have to work in the situation where
+     * calling Rust is itself the thing that is broken. The kernel replaces this table
+     * with its own (kernel/src/hal/trap.rs) once it is far enough along to have a
+     * console and a formatter.
+     */
+    leaq    early_idt(%rip), %rdi
+    xorl    %ecx, %ecx
+1:  movq    $0, (%rdi,%rcx,8)            /* zero both halves of every entry       */
+    movq    $0, 8(%rdi,%rcx,8)
+    incq    %rcx
+    cmpq    $(EARLY_IDT_ENTRIES * 2), %rcx
+    jb      1b
+
+    leaq    early_isr_base(%rip), %r8    /* stub addresses are a fixed stride apart */
+    xorl    %ecx, %ecx
+2:  movq    %r8, %rax                    /* %rcx counts qwords, so (%rdi,%rcx,8)    */
+                                         /* is this entry's byte offset             */
+    movw    %ax, (%rdi,%rcx,8)           /* offset bits 0-15                        */
+    movw    $0x0008, 2(%rdi,%rcx,8)      /* kernel code segment, matches gdt64      */
+    movb    $0x00, 4(%rdi,%rcx,8)        /* IST 0: do not switch stacks             */
+    movb    $(GATE_PRESENT | GATE_INT64_DPL0), 5(%rdi,%rcx,8)
+    shrq    $16, %rax
+    movw    %ax, 6(%rdi,%rcx,8)          /* offset bits 16-31                       */
+    shrq    $16, %rax
+    movl    %eax, 8(%rdi,%rcx,8)         /* offset bits 32-63                       */
+    movl    $0, 12(%rdi,%rcx,8)          /* reserved                                */
+    addq    $EARLY_ISR_STRIDE, %r8
+    addq    $2, %rcx                     /* next entry, in qwords                   */
+    cmpq    $(EARLY_IDT_ENTRIES * 2), %rcx
+    jb      2b
+
+    lidt    early_idt_ptr(%rip)
+
+    movl    $msg_idt, %esi
+    call    serial_puts64
+
     /* extern "C" fn nolx_kernel_main(mb_info: *const u8, magic: u32) -> ! */
     movl    mb_info_phys(%rip), %edi
     movl    mb_magic(%rip), %esi
@@ -362,6 +425,143 @@ serial_puts64:
 2:  popq    %rsi
     ret
 
+    .type serial_puthex64, @function
+/*
+ * serial_puthex64: %r8 = value. Prints all sixteen hex digits.
+ *
+ * Fixed width on purpose: a boot log where a value's width changes with its magnitude is
+ * hard to scan, and the whole point of this function is to be readable in a crash dump.
+ * Clobbers %rax, %rcx, %rdx, %cl, %r8.
+ */
+serial_puthex64:
+    pushq   %rax
+    pushq   %rcx
+    pushq   %rdx
+    pushq   %r9
+    movl    $60, %r9d
+1:  movq    %r8, %rax
+    movl    %r9d, %ecx
+    shrq    %cl, %rax
+    andl    $0x0f, %eax
+    cmpb    $10, %al
+    jb      3f
+    addb    $('a' - '0' - 10), %al
+3:  addb    $'0', %al
+    movb    %al, %cl
+    call    serial_putc64
+    subl    $4, %r9d
+    jns     1b
+    popq    %r9
+    popq    %rdx
+    popq    %rcx
+    popq    %rax
+    ret
+
+/* ================================================================== early traps */
+
+/*
+ * The early exception stubs.
+ *
+ * One stub per vector, all exactly EARLY_ISR_STRIDE bytes apart, generated in a single
+ * `.rept` so the code that fills the descriptor table above and the stubs themselves
+ * cannot drift out of step. The fixed stride is what lets the fill loop compute each
+ * stub's address by adding a constant.
+ *
+ * Each stub normalises the stack and joins the common handler:
+ *
+ *   - Vectors the CPU does not push an error code for get a zero placeholder pushed, so
+ *     every vector arrives with the same shape and one handler can serve all of them.
+ *   - Vectors the CPU does push an error code for (8, 10-14, 17, 21, 29, 30) must not get
+ *     one. Getting this wrong shifts the stack by eight bytes on exactly those vectors,
+ *     so the handler reads the return address from the wrong slot and reports a
+ *     plausible-looking but nonsense instruction pointer -- worse than no handler.
+ *
+ * The stubs are encoded as raw bytes because the stride has to be exact, and the
+ * assembler is free to shorten `jmp rel32` to `jmp rel8` when the target happens to be
+ * close. Hand-encoding removes that freedom. The trailing nops pad to the stride.
+ */
+    .p2align 4
+    .globl early_isr_base
+early_isr_base:
+.set v, 0
+.rept EARLY_IDT_ENTRIES
+    .if (v == 8) || (v >= 10 && v <= 14) || v == 17 || v == 21 || v == 29 || v == 30
+    .byte 0x6a, v                        /* pushq $v                        (2 bytes) */
+    .byte 0xe9
+    .long early_exception_common - (. + 4)  /* jmp rel32                     (5 bytes) */
+    .byte 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90
+    .else
+    .byte 0x6a, 0x00                     /* pushq $0 -- placeholder error code (2)    */
+    .byte 0x6a, v                        /* pushq $v                           (2)    */
+    .byte 0xe9
+    .long early_exception_common - (. + 4)  /* jmp rel32                      (5)     */
+    .byte 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90
+    .endif
+    /*
+     * The stride is load-bearing: long_mode_entry computes each stub's address by adding
+     * EARLY_ISR_STRIDE. A stub that came out a different size would silently point half
+     * the descriptor table at the middle of an instruction. Make the assembler refuse
+     * rather than let that ship.
+     */
+    .if (. - early_isr_base) != ((v + 1) * EARLY_ISR_STRIDE)
+    .err
+    .endif
+.set v, v+1
+.endr
+
+    .type early_exception_common, @function
+/*
+ * The early exception handler. Prints the vector, the error code, the faulting
+ * instruction pointer and CR2, then stops the machine.
+ *
+ * It does not attempt recovery. There is no scheduler to return to and no signal to
+ * raise at this point in boot; a fault here means the kernel is wrong, and continuing
+ * would only move the corruption somewhere harder to find.
+ */
+early_exception_common:
+    /*
+     * Stack on entry, after the stub:
+     *   (%rsp) vector  (+8) error code  (+16) rip  (+24) cs
+     *   (+32) rflags   (+40) rsp        (+48) ss
+     * The seven pushes below shift those by 56 bytes.
+     */
+    pushq   %rax
+    pushq   %rcx
+    pushq   %rdx
+    pushq   %rsi
+    pushq   %rdi
+    pushq   %r8
+    pushq   %r9
+
+    movl    $msg_exc_head, %esi
+    call    serial_puts64
+    movq    56(%rsp), %r8
+    call    serial_puthex64
+
+    movl    $msg_exc_err, %esi
+    call    serial_puts64
+    movq    64(%rsp), %r8
+    call    serial_puthex64
+
+    movl    $msg_exc_rip, %esi
+    call    serial_puts64
+    movq    72(%rsp), %r8
+    call    serial_puthex64
+
+    /* CR2 is only meaningful for a page fault, but reading it is harmless elsewhere and
+     * one unconditional read keeps this handler small enough to audit by eye. */
+    movl    $msg_exc_cr2, %esi
+    call    serial_puts64
+    movq    %cr2, %r8
+    call    serial_puthex64
+
+    movl    $msg_exc_tail, %esi
+    call    serial_puts64
+
+    cli
+1:  hlt
+    jmp     1b
+
 /* ================================================================== GDT */
 
     .section .rodata
@@ -406,7 +606,21 @@ mb_magic:
 
 /* ================================================================== boot BSS */
 
+    .section .rodata
+    .align 8
+    .globl early_idt_ptr
+/* 10-byte pseudo-descriptor: 16-bit limit (size minus one) then the 64-bit base. */
+early_idt_ptr:
+    .word   EARLY_IDT_ENTRIES * 16 - 1
+    .quad   early_idt
+
     .section .bss, "aw", @nobits
+    .align 16
+    .globl early_idt
+/* Zeroed and filled at runtime by long_mode_entry, so it needs no initialiser. */
+early_idt:
+    .space  EARLY_IDT_ENTRIES * 16
+
     .align 4096
     .globl pml4
 pml4:

@@ -74,14 +74,14 @@ pub fn fletcher64(words: &[u32]) -> u64 {
 /// padding the tail would hide it.
 #[must_use]
 pub fn fletcher64_bytes(bytes: &[u8]) -> Option<u64> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return None;
     }
     let mut sum1: u64 = 0;
     let mut sum2: u64 = 0;
     let mut count = 0usize;
 
-    for chunk in bytes.chunks_exact(4) {
+    for chunk in bytes.as_chunks().0 {
         let w = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         sum1 += u64::from(w);
         sum2 += sum1;
@@ -123,7 +123,7 @@ pub fn verify(object: &[u8], stored: u64) -> bool {
     let mut scratch_sum2: u64 = 0;
     let mut count = 0usize;
 
-    for (index, chunk) in object.chunks_exact(4).enumerate() {
+    for (index, chunk) in object.as_chunks().0.iter().enumerate() {
         let mut word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         if index < 2 {
             // The checksum occupies bytes 0..8, i.e. the first two words.
@@ -151,14 +151,14 @@ pub fn verify(object: &[u8], stored: u64) -> bool {
 /// counterpart to [`verify`]; writers call this, readers call that.
 #[must_use]
 pub fn compute(object: &[u8]) -> Option<u64> {
-    if object.len() % 4 != 0 {
+    if !object.len().is_multiple_of(4) {
         return None;
     }
     let mut sum1: u64 = 0;
     let mut sum2: u64 = 0;
     let mut count = 0usize;
 
-    for (index, chunk) in object.chunks_exact(4).enumerate() {
+    for (index, chunk) in object.as_chunks().0.iter().enumerate() {
         let word = if index < 2 {
             0
         } else {

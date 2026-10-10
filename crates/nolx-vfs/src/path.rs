@@ -131,7 +131,6 @@ pub fn resolve<R: Resolver + ?Sized>(
     // A trailing slash means the pathname must name a directory.
     let require_dir = path.len() > 1 && path[path.len() - 1] == b'/';
 
-
     while let Some(comp) = pending.pop_at_front() {
         let is_last = pending.is_empty();
         // `comp` is owned by this iteration, so borrowing its bytes does not borrow
@@ -254,8 +253,12 @@ enum Comp<'a> {
 impl Comp<'_> {
     /// The component's bytes, whichever variant holds them.
     fn as_bytes(&self) -> &[u8] {
+        // Two arms rather than one or-pattern: a binding has to have the same type in
+        // every alternative of an or-pattern, and `&[u8]` and `Box<[u8]>` are not the
+        // same type even though both coerce to `&[u8]` on the way out.
         match self {
-            Self::Borrowed(b) | Self::Owned(b) => b,
+            Self::Borrowed(bytes) => bytes,
+            Self::Owned(bytes) => bytes,
         }
     }
 }
@@ -271,7 +274,9 @@ struct Queue<'a> {
 impl<'a> Queue<'a> {
     /// A queue over already-split components.
     fn from_parts(parts: Vec<Comp<'a>>) -> Self {
-        Self { items: parts.into() }
+        Self {
+            items: parts.into(),
+        }
     }
 
     /// Take the next component, or `None` when exhausted.

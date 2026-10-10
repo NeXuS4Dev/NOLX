@@ -159,7 +159,7 @@ pub fn plan(block_size: u32, block_count: u64) -> Result<Layout> {
         return Err(FsError::InvalidField("block_size"));
     }
     let xp_desc_base = 2;
-    let xp_data_base = u64::from(xp_desc_base) + u64::from(CHECKPOINT_DESC_BLOCKS);
+    let xp_data_base = xp_desc_base + u64::from(CHECKPOINT_DESC_BLOCKS);
     let mut next = xp_data_base + u64::from(CHECKPOINT_DATA_BLOCKS);
 
     let take = |l: &mut u64| {
@@ -247,7 +247,7 @@ pub fn format<D: BlockDevice>(dev: &mut D, opts: &FormatOptions) -> Result<Layou
             "volume name exceeds MAX_VOLUME_NAME_LEN",
         ));
     }
-    if name_bytes.iter().any(|&b| b == 0) {
+    if name_bytes.contains(&0) {
         return Err(FsError::InvalidField("volume name contains a NUL"));
     }
 

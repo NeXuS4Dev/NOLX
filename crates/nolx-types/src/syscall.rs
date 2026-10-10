@@ -920,7 +920,9 @@ mod tests {
     fn numbers_fit_in_the_register_convention() {
         // rax carries the number; u16 keeps the dispatch table a reasonable size and
         // leaves room for a 256-entry-per-subsystem table if we ever shard it.
-        assert!(TABLE.iter().all(|(n, _)| *n <= u16::MAX));
+        // `Number` *is* `u16`, so asserting the bound on the values would be a tautology.
+        // Assert the thing that would actually break instead: the width of the type.
+        const _: () = assert!(core::mem::size_of::<Number>() == 2);
         assert!(TABLE.len() < 4096, "dispatch table is getting large");
     }
 }

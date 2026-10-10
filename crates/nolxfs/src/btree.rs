@@ -171,7 +171,7 @@ impl Node {
     }
 
     /// Index of `key`, or the index at which it should be inserted.
-    #[must_use]
+    #[must_use = "ignoring where a key sorts discards the only result worth having"]
     pub fn find(&self, kind: KeyKind, key: &[u8]) -> core::result::Result<usize, usize> {
         let mut lo = 0usize;
         let mut hi = self.entries.len();

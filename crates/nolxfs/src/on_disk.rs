@@ -416,7 +416,7 @@ pub const fn supported_features() -> u64 {
 /// its declared end, or is not valid UTF-8. POSIX does not require names to be UTF-8, but
 /// NOLXFS stores them that way and `mkfs` enforces it, so a non-UTF-8 name means
 /// corruption.
-pub fn decode_name<'a>(buffer: &'a [u8], declared_len: usize) -> Result<&'a str> {
+pub fn decode_name(buffer: &[u8], declared_len: usize) -> Result<&str> {
     if declared_len > buffer.len() {
         return Err(FsError::InvalidField("name length exceeds the record"));
     }
@@ -424,7 +424,7 @@ pub fn decode_name<'a>(buffer: &'a [u8], declared_len: usize) -> Result<&'a str>
         return Err(FsError::InvalidField("name exceeds NAME_MAX"));
     }
     let name = &buffer[..declared_len];
-    if name.iter().any(|&b| b == 0) {
+    if name.contains(&0) {
         return Err(FsError::InvalidField("name contains an embedded NUL"));
     }
     core::str::from_utf8(name).map_err(|_| FsError::InvalidField("name is not valid UTF-8"))
