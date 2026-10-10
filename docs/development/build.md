@@ -40,9 +40,9 @@ RUSTFLAGS="-C link-arg=-T$PWD/kernel/linker.ld" \
 ```
 
 `cargo test` with no arguments builds only the workspace's `default-members`, which excludes
-the kernel: a `no_std` staticlib cannot build a test harness, and its testable logic lives in
-the crates it depends on. That exclusion is in the root `Cargo.toml` with a comment saying
-why.
+the kernel: the freestanding `no_std` binary targets `x86_64-unknown-none` and has no host
+test harness. The object-safe HAL console contract, descriptor layouts, and clock
+calculations live in `crates/nolx-hal-core`, which is included in the host tests.
 
 
 ## Make targets
@@ -51,7 +51,9 @@ why.
 |---|---|
 | `make check` | `cargo test` for the host-testable crates (T1) |
 | `make kernel` | build `build/nolx.elf` for `x86_64-unknown-none` |
-| `make bootcheck` | assemble + link the boot layer and validate the Multiboot header |
+| `make kernel KERNEL_FEATURES=hal-fault-test-pf` | build the dedicated `#PF` test image |
+| `scripts/check-hal-faults.sh` | run the dedicated `#PF` and `#GP` QEMU tests |
+| `make bootcheck` | assemble + link the boot layer; validate the Multiboot header and 256 ISR entries |
 | `make fscheck` | regenerate NOLXFS layouts and run the layout invariant tests |
 | `make iso` | `build/nolx.iso` via `grub-mkrescue` |
 | `make run` | QEMU with `-kernel build/nolx.elf -serial stdio` |
@@ -73,14 +75,20 @@ Boot log markers used by CI:
 
 | Marker | Meaning |
 |---|---|
-| `NOLX: long mode entered` | M1 complete |
-| `NOLX: hal online` | M2 complete |
-| `NOLX: mm online` | M3 complete |
+| `NOLX: long mode entered` | M1 boot hand-off reached long mode |
+| `NOLX: hal online` | M2 single-CPU GDT/TSS/IDT and firmware-selected interrupt/timer setup initialized |
+| `hal: active clock source=` | The selected calibrated LAPIC/TSC-deadline or PIT/PIC timer backend |
+| `NOLX: timer reached 100 ticks` | T2 confirmed 100 periodic timer interrupts and a monotonic-clock read |
+| `wall-clock: CMOS RTC UTC epoch=` | T2 confirmed the CMOS source was decoded and reported during boot |
+| `NOLX: mm online` | M3 memory-map bootstrap initialized |
 | `NOLX: objmgr online` | M4 complete |
 | `NOLX: init started` | user mode reached |
 
-CI's smoke test boots QEMU, waits for `NOLX: mm online`, and fails on any `PANIC` or
-`BUGCHECK` in the log.
+CI's normal QEMU smoke test asserts ACPI, HPET, APIC calibration, HAL, memory, and subsystem
+markers and waits for 100 selected-backend timer interrupts. A second boot hides local-APIC
+support and verifies that the 8259/PIT fallback still reaches 100 ticks. CI then boots two
+fault-test images to verify that `#PF` and `#GP` print register state and halt. Any `PANIC`,
+`BUGCHECK`, or unexpected CPU exception in the normal boot log fails the job.
 
 ## Layout conventions
 

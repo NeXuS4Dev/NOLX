@@ -11,7 +11,7 @@
  *   2. Zero BSS, stash the Multiboot info pointer, bring up COM1 so there is a log from
  *      the very first instruction that can produce one.
  *   3. Verify CPUID and long mode support.
- *   4. Identity map the first 1 GiB with 2 MiB pages.
+ *   4. Identity map the first 2 GiB with 2 MiB pages, plus uncached APIC/HPET MMIO windows.
  *   5. Enable PAE, set EFER.LME, enable paging, and far-jump into 64-bit mode.
  *   6. Load the 64-bit GDT and a real stack, then call the Rust entry point.
  *
@@ -37,9 +37,12 @@
 
     .set PAGE_PRESENT,          1 << 0
     .set PAGE_WRITABLE,         1 << 1
+    .set PAGE_PWT,              1 << 3
+    .set PAGE_PCD,              1 << 4
     .set PAGE_HUGE,             1 << 7
     .set PAGE_TABLE_FLAGS,      PAGE_PRESENT | PAGE_WRITABLE
     .set PAGE_HUGE_FLAGS,       PAGE_PRESENT | PAGE_WRITABLE | PAGE_HUGE
+    .set PAGE_MMIO_FLAGS,       PAGE_HUGE_FLAGS | PAGE_PWT | PAGE_PCD
 
     .set MSR_EFER,              0xC0000080
     .set EFER_LME,              1 << 8
@@ -178,8 +181,10 @@ __start32:
     testl   $CPUID_FEAT_LM, %edx
     jz      fatal_no_long_mode
 
-    /* --- identity map the first 1 GiB with 2 MiB pages.
-     * pml4[0] -> pdpt, pdpt[0] -> pd0, pdpt[1] -> pd1, each pd holding 512 huge pages. */
+    /* --- identity map the first 2 GiB with 2 MiB pages, then add the standard
+     * APIC/HPET MMIO windows. pml4[0] -> pdpt; pdpt[0..1] -> RAM page directories;
+     * pdpt[3] -> a sparse page directory for 0xFEC00000 (IOAPIC/HPET) and
+     * 0xFEE00000 (local APIC). The MMIO huge pages select PAT index 3 (UC). */
     movl    $pml4, %edi
     movl    $pdpt, %eax
     orl     $PAGE_TABLE_FLAGS, %eax
@@ -192,6 +197,9 @@ __start32:
     movl    $pd1, %eax
     orl     $PAGE_TABLE_FLAGS, %eax
     movl    %eax, 8(%edi)
+    movl    $pd3, %eax
+    orl     $PAGE_TABLE_FLAGS, %eax
+    movl    %eax, 24(%edi)
 
     movl    $pd0, %edi
     xorl    %eax, %eax              /* physical address of the next 2 MiB page */
@@ -202,6 +210,18 @@ __start32:
     addl    $0x200000, %eax
     addl    $8, %edi
     loop    1b
+
+    /* 0xFEC00000..0xFEDFFFFF contains the usual IOAPIC/HPET bases. */
+    movl    $pd3, %edi
+    movl    $0xFEC00000, %eax
+    orl     $PAGE_MMIO_FLAGS, %eax
+    movl    %eax, 4016(%edi)         /* pd3[502] = 0xFEC00000 */
+    movl    $0, 4020(%edi)
+    /* 0xFEE00000..0xFEFFFFFF contains the usual local-APIC base. */
+    movl    $0xFEE00000, %eax
+    orl     $PAGE_MMIO_FLAGS, %eax
+    movl    %eax, 4024(%edi)         /* pd3[503] = 0xFEE00000 */
+    movl    $0, 4028(%edi)
 
     /* --- PAE, then EFER.LME, then paging. Order matters. */
     movl    $pml4, %eax
@@ -639,7 +659,7 @@ early_exception_common:
 
 /* ================================================================== GDT */
 
-    .section .rodata
+    .section .data
     .align 8
     .globl gdt64
 gdt64:
@@ -653,6 +673,7 @@ tss_desc_placeholder:
     .quad 0x0000000000000000            /* 0x30 TSS high                  */
 gdt64_end:
 
+    .section .rodata
     .align 8
     .globl gdt64_ptr
 /*
@@ -708,6 +729,9 @@ pd0:
     .space 4096
     .globl pd1
 pd1:
+    .space 4096
+    .globl pd3
+pd3:
     .space 4096
 
     .align 16

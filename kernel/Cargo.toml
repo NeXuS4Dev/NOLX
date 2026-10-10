@@ -8,12 +8,20 @@ description = "The NOLX kernel: HAL, executive, and POSIX subsystem"
 readme = "../README.md"
 publish = false
 
-# A single binary target. There is deliberately no lib target: the crate is `#![no_std]`
-# and cannot be built for the host, so a host-visible library would only ever fail to
-# compile. The logic worth testing on the host lives in the crates this depends on.
+# Fault injection is compiled only for the dedicated T2 exception-path checks. A normal
+# image has neither probe and always enters the kernel's idle path after initialization.
+[features]
+default = []
+hal-fault-test-pf = []
+hal-fault-test-gp = []
+
+# A single binary target. There is deliberately no lib target: the crate is `no_std` and
+# cannot be built for a host test harness. Pure HAL layouts and calculations live in
+# nolx-hal-core, which is part of the normal host-test suite.
 [[bin]]
 name = "nolx-kernel"
 path = "src/main.rs"
 
 [dependencies]
+nolx-hal-core = { path = "../crates/nolx-hal-core" }
 nolx-types = { path = "../crates/nolx-types" }

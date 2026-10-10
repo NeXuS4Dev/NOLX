@@ -8,9 +8,7 @@
 //! In M3 this is the dispatch skeleton. The table exists first, deliberately, because it is
 //! the contract: libc, the tests, and the conformance dashboard are all written against it.
 
-use core::fmt::Write;
-
-use crate::hal::console::Console;
+use nolx_hal_core::console::HalConsole;
 use nolx_types::errno;
 use nolx_types::syscall;
 
@@ -84,7 +82,7 @@ fn unimplemented(_args: SyscallArgs) -> SysResult {
 }
 
 /// Report what the subsystem can and cannot do.
-pub fn init(console: &mut Console) {
+pub fn init(console: &mut dyn HalConsole) {
     let _ = writeln!(
         console,
         "psx: {} syscall numbers assigned, {} implemented, the rest return ENOSYS",

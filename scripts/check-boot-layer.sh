@@ -5,9 +5,10 @@
 # This is the one part of NOLX that can be machine-verified with nothing but binutils and
 # Python, so it is wired into CI as a hard gate. It proves that:
 #
-#   * boot/boot.S assembles cleanly with GNU as;
-#   * it links against the real kernel/linker.ld, including every symbol the script
-#     defines and asserts on;
+#   * boot/boot.S and the 256-vector interrupt stubs assemble cleanly with GNU as;
+#   * the ISR object exports exactly 256 stubs and a 256-entry pointer table;
+#   * the boot trampoline links against the real kernel/linker.ld, including every symbol
+#     the script defines and asserts on;
 #   * the result is an ELF64 whose Multiboot header is valid, correctly placed, and whose
 #     a.out kludge fields agree with the linker script.
 #
@@ -24,6 +25,7 @@ mkdir -p "$OUT"
 
 AS="${AS:-as}"
 LD="${LD:-ld}"
+NM="${NM:-nm}"
 OBJDUMP="${OBJDUMP:-objdump}"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -38,6 +40,16 @@ echo
 
 echo "-- assembling boot/boot.S"
 "$AS" --64 --fatal-warnings -o "$OUT/boot.o" "$REPO/boot/boot.S"
+
+echo "-- assembling the x86-64 interrupt stubs"
+"$AS" --64 --fatal-warnings -o "$OUT/interrupts.o" "$REPO/kernel/src/hal/interrupts.S"
+stub_count=$("$NM" -g --defined-only "$OUT/interrupts.o" \
+    | awk '$3 ~ /^nolx_isr_[0-9]+$/ { count++ } END { print count + 0 }')
+[[ "$stub_count" -eq 256 ]] || fail "interrupt assembly exports $stub_count stubs, expected 256"
+table_size=$("$NM" -S --format=posix "$OUT/interrupts.o" \
+    | awk '$1 == "nolx_isr_stub_table" { print $4 }')
+[[ "$table_size" == "800" ]] || fail "ISR pointer table is ${table_size:-missing}, expected 0x800 bytes"
+echo "  ok   256 interrupt stubs and a 2048-byte pointer table"
 
 echo "-- assembling the test-only kernel entry stub"
 "$AS" --64 --fatal-warnings -o "$OUT/boot-stub.o" "$REPO/scripts/boot-stub.s"
@@ -55,7 +67,6 @@ echo
 # The entry point is 32-bit code inside a 64-bit ELF, so it has to be disassembled with
 # -m i386. Decoding it as x86-64 (objdump's default here) silently misreads instructions
 # -- which is a trap worth naming, because the misreading looks plausible.
-NM="${NM:-nm}"
 START32="0x$("$NM" "$OUT/nolx.bootcheck.elf" | awk '/ __start32$/ {print $1}')"
 MODE64="0x$("$NM" "$OUT/nolx.bootcheck.elf" | awk '/ long_mode_entry$/ {print $1}')"
 

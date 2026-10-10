@@ -1,14 +1,8 @@
-//! Assembles the boot trampoline and hands it to the linker.
+//! Assembles the boot trampoline and interrupt stubs for the freestanding kernel target.
 //!
-//! `boot/boot.S` is what the Multiboot loader jumps to: the header, the switch from
-//! protected mode to long mode, the GDT, and the initial page tables. Without it the kernel
-//! is an ELF file with nowhere to start, and `kernel/linker.ld` will refuse to link it --
-//! the script asserts that `.multiboot` is present precisely so that this cannot be
-//! forgotten.
-//!
-//! Assembling it here rather than in a separate `make` step means there is exactly one
-//! kernel image and it is always complete. `scripts/check-boot-layer.sh` still assembles it
-//! separately, because that check has to run on a machine with no Rust toolchain at all.
+//! The assembly is kept out of the Rust host-test path: `make bootcheck` assembles the
+//! Multiboot trampoline without Rust, while this script only adds hardware entry code to the
+//! x86-64 kernel image.
 
 use std::env;
 use std::path::PathBuf;
@@ -17,33 +11,42 @@ use std::process::Command;
 fn main() {
     let target = env::var("TARGET").unwrap_or_default();
     if target != "x86_64-unknown-none" {
-        // A host build has no use for a trampoline, and `as --64` output would not link.
+        // Host tests exercise nolx-hal-core and do not need privileged machine code.
         return;
     }
 
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let source = manifest.join("../boot/boot.S");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
-    let object = out_dir.join("boot.o");
+    let sources = [
+        manifest.join("../boot/boot.S"),
+        manifest.join("src/hal/interrupts.S"),
+    ];
 
-    println!("cargo:rerun-if-changed={}", source.display());
-    println!("cargo:rerun-if-changed=linker.ld");
+    for source in sources {
+        let name = source
+            .file_stem()
+            .expect("assembly source has a file name")
+            .to_string_lossy();
+        let object = out_dir.join(format!("{name}.o"));
 
-    // GAS syntax, assembled 64-bit. The file carries its own `.code32`/`.code64`
-    // directives, so the whole trampoline -- including the part that runs before long mode
-    // exists -- comes out of one object file.
-    let status = Command::new("as")
-        .arg("--64")
-        .arg("-o")
-        .arg(&object)
-        .arg(&source)
-        .status()
-        .expect("failed to run `as`; binutils is required to build the kernel");
-    if !status.success() {
-        panic!("`as` could not assemble {}", source.display());
+        println!("cargo:rerun-if-changed={}", source.display());
+        println!("cargo:rerun-if-changed=linker.ld");
+
+        let status = Command::new("as")
+            .arg("--64")
+            .arg("--fatal-warnings")
+            .arg("-o")
+            .arg(&object)
+            .arg(&source)
+            .status()
+            .expect("failed to run `as`; binutils is required to build the kernel");
+        if !status.success() {
+            panic!("`as` could not assemble {}", source.display());
+        }
+
+        // Each object is linked directly into the kernel binary. `.multiboot` remains
+        // retained by the linker script's KEEP rule; ISR stubs are retained because the
+        // live IDT references their addresses through `nolx_isr_stub_table`.
+        println!("cargo:rustc-link-arg={}", object.display());
     }
-
-    // Appended to the link line. Order does not matter for correctness because
-    // `linker.ld` marks `.multiboot` as KEEP, so the garbage collector cannot drop it.
-    println!("cargo:rustc-link-arg={}", object.display());
 }

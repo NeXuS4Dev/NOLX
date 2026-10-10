@@ -204,7 +204,7 @@ def main(argv: list[str]) -> int:
         ok("ELF entry point is __start32")
 
         for name, align in (("pml4", PAGE_SIZE), ("pdpt", PAGE_SIZE),
-                            ("pd0", PAGE_SIZE), ("pd1", PAGE_SIZE),
+                            ("pd0", PAGE_SIZE), ("pd1", PAGE_SIZE), ("pd3", PAGE_SIZE),
                             ("boot_stack_top", 16), ("boot_stack_bottom", 16)):
             value = elf.symbols.get(name)
             check(value is not None, f"{name} is not defined")

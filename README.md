@@ -36,6 +36,7 @@ resolved in one place only: `kernel/src/psx/` (see
 | `boot/` | Machine-code entry: Multiboot header, 32→64-bit transition, bootstrap paging |
 | `kernel/` | The kernel: HAL, executive, POSIX subsystem (`no_std` binary) |
 | `crates/nolx-types/` | POSIX scalar types, `errno`, syscall numbers — kernel/user shared |
+| `crates/nolx-hal-core/` | Host-testable HAL console contract, ACPI/APIC parsing and arithmetic, x86-64 descriptors, PIC vectors, RTC decoding, and clock primitives |
 | `crates/nolx-syscall/` | The user↔kernel ABI: register mapping, marshalling, dispatch table |
 | `crates/nolxfs/` | NOLXFS on-disk format, Fletcher-64, B-tree, mkfs/fsck logic |
 | `crates/nolx-vfs/` | Pathname resolution, mount table, descriptor table |
@@ -47,8 +48,8 @@ resolved in one place only: `kernel/src/psx/` (see
 
 ## Build
 
-Prerequisites: `rustup` (nightly, with `rust-src`), GNU `binutils`, `qemu-system-x86_64`,
-`xorriso` + `grub-mkrescue` for ISO images.
+Prerequisites: stable Rust via `rustup` (plus the `x86_64-unknown-none` target), GNU
+`binutils`, `qemu-system-x86_64`, and optionally `xorriso` + `grub-mkrescue` for ISO images.
 
 ```sh
 make check     # host-side unit tests (crates/*) — no kernel needed
@@ -68,7 +69,7 @@ Milestone tracking lives in [ROADMAP.md](ROADMAP.md). Current state:
 |---|---|
 | M0 — Architecture, ABI and on-disk formats frozen | **done** |
 | M1 — Boot layer: Multiboot → long mode → kernel entry | **code complete**, boot layer machine-verified |
-| M2 — HAL: console, GDT, IDT, PIC, timer | **code complete**, unverified on hardware |
+| M2 — HAL: console, GDT, IDT, PIC/APIC, timer | **in progress** — ACPI/HPET discovery, xAPIC/x2APIC, I/O APIC routing, TPR/EOI, and calibrated LAPIC/TSC-deadline paths are implemented with PIC/PIT fallback; current-revision CI/QEMU verification is pending |
 | M3 — Physical/virtual memory, kernel heap | **in progress** |
 | M4+ | planned |
 
@@ -76,17 +77,20 @@ Milestone tracking lives in [ROADMAP.md](ROADMAP.md). Current state:
 
 This repository is honest about which artifacts were executed and which were not.
 
-* **Machine-verified here:** `boot/boot.S` assembles with GNU `as`, links with the real
-  `kernel/linker.ld`, produces a valid ELF64 with the expected entry point and section
-  layout, and carries a Multiboot header whose magic/flags/checksum are validated by
-  `scripts/verify-multiboot.py`. Reproduce with `make bootcheck`.
+* **Machine-verified here:** `boot/boot.S` and all 256 interrupt stubs assemble with GNU
+  `as`; the Multiboot trampoline links with the real `kernel/linker.ld`, and the check
+  validates its ELF layout, entry point, header, and the ISR-table size. Reproduce with
+  `make bootcheck`.
 * **Machine-verified here:** the NOLXFS layout generator and its offset/alignment
   invariants (`tools/nolxfs-codegen/test_layout.py`). Reproduce with `make fscheck`.
-* **Not verified here:** all Rust sources. The build sandbox for this repository has no
-  Rust toolchain and no network route to `static.rust-lang.org` or `static.crates.io`, so
-  `cargo` cannot run. `.github/workflows/ci.yml` runs `cargo test`, `cargo build` for the
-  kernel target, and a QEMU boot smoke test on every push. Treat "code complete" as
-  "written and reviewed", not "compiler-clean", until CI is green.
+* **Machine-verified here (2026-10-10):** `make bootcheck fscheck` passed, including
+  assembly/linking of the boot layer and all 256 interrupt stubs, Multiboot validation,
+  NOLXFS layout tests, and the conformance-database check.
+* **Not executed in this sandbox:** Rust tooling and QEMU are unavailable, so no host Rust
+  tests, Clippy, freestanding kernel build, or QEMU boot is claimed for this revision. CI is
+  configured to verify the APIC/HPET timer path, a separate PIC/PIT fallback, the CMOS
+  wall-clock marker, and dedicated `#PF`/`#GP` exception reports; those checks remain pending
+  until a workflow run for this revision passes.
 
 ## License
 

@@ -1,0 +1,12 @@
+[package]
+name = "nolx-hal-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure x86-64 HAL layout and timing primitives for NOLX"
+readme = "../../README.md"
+publish = false
+
+[lib]
+path = "src/lib.rs"

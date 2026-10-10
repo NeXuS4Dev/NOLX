@@ -9,8 +9,155 @@
 //! hardware cannot be done in safe Rust, and pretending otherwise by hiding the `unsafe`
 //! in a "safe" wrapper would be worse.
 
+pub mod acpi;
+pub mod apic;
 pub mod console;
+pub mod cpu;
+pub mod hpet;
+pub mod interrupts;
+pub mod ioapic;
 pub mod multiboot;
+pub mod pic;
+pub mod rtc;
+pub mod tables;
+pub mod timer;
+
+use nolx_hal_core::console::HalConsole;
+
+/// Initialize processor state, descriptor tables, firmware discovery, and timer controllers.
+///
+/// Maskable interrupts remain disabled throughout initialization. The selected timer source is
+/// armed separately after the rest of the kernel's one-time initialization is complete.
+pub fn init(console: &mut dyn HalConsole) {
+    let features = cpu::init();
+    tables::init();
+    pic::init();
+    timer::init();
+
+    let _ = writeln!(
+        console,
+        "cpu: max leaf {:#x}, syscall={}, nx={}, xsave={}, rdrand={}, tsc={}, invariant-tsc={}, apic={}, x2apic={}, tsc-deadline={}, gs-cpu={}",
+        features.max_leaf,
+        features.has_syscall(),
+        features.has_nx(),
+        features.has_xsave(),
+        features.has_rdrand(),
+        features.has_tsc(),
+        features.has_invariant_tsc(),
+        features.has_apic(),
+        features.has_x2apic(),
+        features.has_tsc_deadline(),
+        cpu::current_cpu_id(),
+    );
+    let _ = writeln!(console, "hal: GDT/TSS loaded; 256-entry IDT installed");
+    let _ = writeln!(
+        console,
+        "hal: 8259 PIC remapped to vectors 32..47; all IRQs masked"
+    );
+
+    if let Some(platform) = acpi::discover() {
+        let _ = writeln!(
+            console,
+            "acpi: RSDP revision={} root={} local-apics={} io-apics={}",
+            platform.rsdp_revision,
+            if platform.used_xsdt { "XSDT" } else { "RSDT" },
+            platform.madt.local_apics().len(),
+            platform.madt.io_apics().len(),
+        );
+        let hpet_frequency = match platform.hpet {
+            Some(info) => match hpet::init(&info) {
+                Ok(frequency) => {
+                    let _ = writeln!(console, "hpet: counter enabled at {} Hz", frequency);
+                    Some(frequency)
+                }
+                Err(error) => {
+                    let _ = writeln!(console, "hpet: unavailable ({:?})", error);
+                    None
+                }
+            },
+            None => {
+                let _ = writeln!(console, "hpet: firmware table absent");
+                None
+            }
+        };
+
+        match apic::init(&platform.madt, features) {
+            Ok(()) => {
+                let _ = writeln!(
+                    console,
+                    "apic: {} enabled; BSP id={} IOAPIC IRQ routes initialized masked",
+                    apic::mode_name(),
+                    apic::current_apic_id(),
+                );
+                if let Some(frequency) = hpet_frequency {
+                    match apic::calibrate_timers(frequency, features) {
+                        Ok(calibration) => {
+                            let _ = writeln!(
+                                console,
+                                "apic: calibrated timer={} Hz tsc={:?} Hz",
+                                calibration.lapic_ticks_per_second, calibration.tsc_frequency_hz,
+                            );
+                        }
+                        Err(error) => {
+                            let _ = writeln!(
+                                console,
+                                "apic: timer calibration unavailable ({:?})",
+                                error
+                            );
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                let _ = writeln!(
+                    console,
+                    "apic: unavailable ({:?}); retaining PIC fallback",
+                    error
+                );
+            }
+        }
+    } else {
+        let _ = writeln!(
+            console,
+            "acpi: no valid MADT found; retaining PIC/PIT fallback"
+        );
+    }
+    let _ = writeln!(
+        console,
+        "hal: timer fallback prepared at {} Hz; source starts after kernel initialization",
+        timer::frequency_hz()
+    );
+}
+
+/// Sample the CMOS clock as late as possible before starting the monotonic timer.
+///
+/// The wall-clock anchor is paired with the current monotonic counter; taking this snapshot
+/// after slow one-time initialization avoids excluding that boot work from elapsed realtime.
+pub fn init_wall_clock(console: &mut dyn HalConsole) {
+    if let Some(time) = rtc::init() {
+        let _ = writeln!(
+            console,
+            "wall-clock: CMOS RTC UTC epoch={}s ({:04}-{:02}-{:02} {:02}:{:02}:{:02})",
+            time.unix_seconds(),
+            time.year(),
+            time.month(),
+            time.day(),
+            time.hour(),
+            time.minute(),
+            time.second(),
+        );
+    } else {
+        let _ = writeln!(
+            console,
+            "wall-clock: CMOS RTC unavailable or invalid; realtime unavailable"
+        );
+    }
+}
+
+/// Enable the periodic clock interrupt after all boot-time subsystem setup is complete.
+pub fn start_timer() {
+    timer::start();
+}
 
 /// Read a byte from an I/O port.
 ///
@@ -111,6 +258,8 @@ pub struct CpuFeatures {
     pub feature_edx: u32,
     /// Feature bits from leaf 1, `ecx`.
     pub feature_ecx: u32,
+    /// Invariant-TSC capability bits from leaf `0x8000_0007`, `edx`.
+    pub power_edx: u32,
     /// The largest standard CPUID leaf supported.
     pub max_leaf: u32,
     /// The largest extended CPUID leaf supported.
@@ -135,12 +284,19 @@ impl CpuFeatures {
             } else {
                 (0, 0, 0, 0)
             };
+        let (_, _, _, power_edx) = if max_ext_leaf >= 0x8000_0007 {
+            // SAFETY: the extended power-management leaf is supported, per the check above.
+            unsafe { cpuid(0x8000_0007) }
+        } else {
+            (0, 0, 0, 0)
+        };
         let _ = (extended_eax, extended_ebx);
         Self {
             extended_edx,
             extended_ecx,
             feature_edx,
             feature_ecx,
+            power_edx,
             max_leaf,
             max_ext_leaf,
         }
@@ -162,6 +318,36 @@ impl CpuFeatures {
     #[must_use]
     pub const fn has_1gib_pages(&self) -> bool {
         self.extended_edx & (1 << 26) != 0
+    }
+
+    /// `true` if the CPU supports the timestamp counter (CPUID.01H:EDX[4]).
+    #[must_use]
+    pub const fn has_tsc(&self) -> bool {
+        self.feature_edx & (1 << 4) != 0
+    }
+
+    /// `true` if the timestamp counter runs at a constant rate (CPUID.80000007H:EDX[8]).
+    #[must_use]
+    pub const fn has_invariant_tsc(&self) -> bool {
+        self.power_edx & (1 << 8) != 0
+    }
+
+    /// `true` if the CPU supports the local APIC (CPUID.01H:EDX[9]).
+    #[must_use]
+    pub const fn has_apic(&self) -> bool {
+        self.feature_edx & (1 << 9) != 0
+    }
+
+    /// `true` if the CPU supports x2APIC register access (CPUID.01H:ECX[21]).
+    #[must_use]
+    pub const fn has_x2apic(&self) -> bool {
+        self.feature_ecx & (1 << 21) != 0
+    }
+
+    /// `true` if the CPU supports the TSC-deadline local APIC timer mode (CPUID.01H:ECX[24]).
+    #[must_use]
+    pub const fn has_tsc_deadline(&self) -> bool {
+        self.feature_ecx & (1 << 24) != 0
     }
 
     /// `true` if the CPU supports `rdrand`.

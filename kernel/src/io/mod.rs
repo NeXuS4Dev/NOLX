@@ -5,10 +5,8 @@
 //! `docs/architecture/04-io-manager-drivers.md`, which is itself modelled on Microsoft's
 //! published kernel-mode driver architecture.
 
-use core::fmt::Write;
-
-use crate::hal::console::Console;
 use crate::obj::ObjectHeader;
+use nolx_hal_core::console::HalConsole;
 
 /// The highest major function code, so dispatch tables are a fixed size.
 pub const MAJOR_FUNCTION_COUNT: usize = 16;
@@ -203,7 +201,7 @@ pub struct DeviceObject {
 }
 
 /// Register the I/O manager.
-pub fn init(console: &mut Console) {
+pub fn init(console: &mut dyn HalConsole) {
     let _ = writeln!(
         console,
         "io: I/O manager online, {MAJOR_FUNCTION_COUNT} major function codes, \

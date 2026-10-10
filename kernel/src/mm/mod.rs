@@ -12,11 +12,9 @@
 //! which is the same bootstrap problem the object map has, and it is solved the same way:
 //! the thing that hands out memory cannot itself be handed out.
 
-use core::fmt::Write;
-
-use crate::hal::console::Console;
 use crate::hal::multiboot::BootInfo;
 use crate::sync::SyncCell;
+use nolx_hal_core::console::HalConsole;
 
 /// Bytes in a physical page.
 pub const PAGE_SIZE: usize = 4096;
@@ -76,7 +74,7 @@ pub struct MemoryStats {
 }
 
 /// Build the frame map from the firmware's memory map.
-pub fn init(console: &mut Console, info: &BootInfo) {
+pub fn init(console: &mut dyn HalConsole, info: &BootInfo) {
     // SAFETY: `info` was produced by the boot hand-off, which validated the Multiboot
     // magic. `memory_map` bounds-checks every read against the map's own length.
     let map = unsafe { info.memory_map() };
@@ -144,7 +142,7 @@ pub fn init(console: &mut Console, info: &BootInfo) {
 ///
 /// Uses `mem_upper`, which undercounts because it stops at the first hole above 1 MiB. The
 /// kernel boots, with less memory than the machine has, and says so.
-pub fn init_without_firmware(console: &mut Console) {
+pub fn init_without_firmware(console: &mut dyn HalConsole) {
     let _ = writeln!(
         console,
         "mm: no firmware memory map; assuming a conservative 64 MiB. \
