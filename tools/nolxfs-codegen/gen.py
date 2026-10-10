@@ -86,10 +86,15 @@ def emit_rust() -> str:
         w(f"// ------------------------------------------------------------------ {title}")
         for row in rows:
             value, name = row[0], row[1]
-            note = ""
+            # The explanation goes on its own line as a doc comment, never as a trailing
+            # comment. A trailing comment is the one thing in this file rustfmt reflows --
+            # it re-aligns the spacing before `//` -- which put the generator and `cargo
+            # fmt` in permanent disagreement over a file only one of them is allowed to
+            # write. Doc comments are stable under rustfmt and they reach rustdoc, which a
+            # trailing comment never would.
             if docs and name in docs:
-                note = f"  // {docs[name]}"
-            w(f"pub const {prefix}{name}: u32 = 0x{value:X};{note}")
+                w(f"/// {docs[name]}")
+            w(f"pub const {prefix}{name}: u32 = 0x{value:X};")
         w("")
 
     table("object types (nolx_obj_phys_t.type)", "OBJ_", F.OBJECT_TYPES)
