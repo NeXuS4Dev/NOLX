@@ -228,7 +228,22 @@ def emit_c() -> str:
     return "\n".join(o) + "\n"
 
 
-EMITTERS = {"rust": (emit_rust, OUT_RUST), "c": (emit_c, OUT_C)}
+def finish(text: str) -> str:
+    """Normalise generated output to the form the formatters leave it in.
+
+    Exactly one trailing newline. rustfmt collapses a run of blank lines at end of file,
+    so an emitter that produces two puts this generator and `cargo fmt` in permanent
+    disagreement over a file only this generator may write. The rule lives here, in the one
+    function every consumer calls, rather than at each call site -- duplicating it is how
+    the CLI and `test_layout.py` came to disagree in the first place.
+    """
+    return text.rstrip("\n") + "\n"
+
+
+EMITTERS = {
+    "rust": (lambda: finish(emit_rust()), OUT_RUST),
+    "c": (lambda: finish(emit_c()), OUT_C),
+}
 
 
 def main(argv: list[str]) -> int:
@@ -245,11 +260,7 @@ def main(argv: list[str]) -> int:
 
     stale: list[str] = []
     for name, (fn, path) in EMITTERS.items():
-        # Exactly one trailing newline. rustfmt collapses a run of blank lines at end of
-        # file, so an emitter that produces two puts the generator and `cargo fmt` back in
-        # disagreement over a file that only the generator is allowed to write -- which is
-        # the same argument as the doc-comment change, applied to the file's last byte.
-        text = fn().rstrip("\n") + "\n"
+        text = fn()
         if a.check:
             if not path.exists():
                 stale.append(f"{path} (missing)")
