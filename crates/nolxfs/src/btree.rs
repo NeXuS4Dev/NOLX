@@ -9,6 +9,11 @@
 //! +0     node header (nolx_btree_node_phys_t, 56 bytes)
 //! +56    table of contents: key_count entries of (key_off, key_len, val_off, val_len)
 //!        keys, packed forward from the end of the ToC
+//!
+//! Both offsets are the **start** of the thing they describe, relative to the end of the
+//! node header. Keys grow forward and values backward, so the two offsets run toward each
+//! other; the free space is whatever is between the last key's end and the first value's
+//! start.
 //!        ... free space ...
 //!        values, packed backward from the end of the block
 //! ```
@@ -313,6 +318,11 @@ impl Node {
             if entry.key.len() > u16::MAX as usize || entry.val.len() > u16::MAX as usize {
                 return Err(FsError::CorruptNode("a key or value exceeds 65535 bytes"));
             }
+            // `key_off` is the offset the next key starts at, so what goes in the table of
+            // contents is the value *before* it advances. Storing the end offset instead
+            // reads back every key shifted by one entry -- the last one out of the key
+            // area entirely -- and the node then fails its own ordering check on read.
+            let key_start = key_off;
             key_off = key_off
                 .checked_add(entry.key.len())
                 .ok_or(FsError::CorruptNode(
@@ -325,14 +335,14 @@ impl Node {
                 return Err(FsError::CorruptNode("keys and values collided"));
             }
             let entry_toc = gen::nolx_btree_node_toc_entry_t {
-                key_off: key_off as u16,
+                key_off: key_start as u16,
                 key_len: entry.key.len() as u16,
                 val_off: val_off as u16,
                 val_len: entry.val.len() as u16,
             };
             toc.extend_from_slice(entry_toc.as_bytes());
 
-            block[NODE_HEADER_SIZE + key_off - entry.key.len()..NODE_HEADER_SIZE + key_off]
+            block[NODE_HEADER_SIZE + key_start..NODE_HEADER_SIZE + key_off]
                 .copy_from_slice(&entry.key);
             block[NODE_HEADER_SIZE + val_off..NODE_HEADER_SIZE + val_off + entry.val.len()]
                 .copy_from_slice(&entry.val);

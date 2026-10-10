@@ -164,6 +164,10 @@ Node layout inside one block:
        values packed backward from the end of the block
 ```
 
+* `key_off` and `val_off` are both the **start** of what they describe, in bytes from the
+  end of the node header. Keys grow forward and values backward, so the offsets run toward
+  each other and the free space is the gap between them. Recording a key's *end* instead
+  shifts every key read back by one entry, which is silent on write and fatal on read.
 * Leaf nodes may be **index** nodes or **fixed-key-size** nodes; the flag tells the reader
   which.
 * Middle nodes store `(key, child_block_address)`.
