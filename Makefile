@@ -21,6 +21,7 @@ KERNEL_ELF := $(BUILD)/nolx.elf
 ISO        := $(BUILD)/nolx.iso
 QEMU       ?= qemu-system-x86_64
 QEMU_ARGS  ?=
+KERNEL_FEATURES ?=
 PYTHON     ?= python3
 
 # The kernel links with its own script. Pass the absolute path so the build does not
@@ -70,7 +71,8 @@ kernel: | $(BUILD)
 	rustup target list --installed | grep -q '^$(TARGET)$$' || \
 		rustup target add $(TARGET)
 	RUSTFLAGS="$(KERNEL_RUSTFLAGS)" \
-		cargo build --release --target $(TARGET) -p nolx-kernel
+		cargo build --release --target $(TARGET) -p nolx-kernel \
+			$(if $(KERNEL_FEATURES),--features $(KERNEL_FEATURES),)
 	cp target/$(TARGET)/release/nolx-kernel $(KERNEL_ELF)
 	@echo "kernel: $(KERNEL_ELF)"
 	@rustc --version --verbose > $(BUILD)/buildinfo.txt

@@ -8,11 +8,10 @@
 //! This module is a skeleton in M3: the object header layout and the type table, which are
 //! the parts everything else depends on. Handle tables and the namespace land in M4.
 
-use core::fmt::Write;
 use core::sync::atomic::{AtomicI32, AtomicU16, Ordering};
 
-use crate::hal::console::Console;
 use crate::sync::SyncCell;
+use nolx_hal_core::console::HalConsole;
 
 /// The object header, prefixed to every object body.
 ///
@@ -155,7 +154,7 @@ static BUILTIN_TYPES: &[ObjectType] = &[
 ];
 
 /// Register the built-in object types.
-pub fn init(console: &mut Console) {
+pub fn init(console: &mut dyn HalConsole) {
     // SAFETY: `init` runs once on the boot processor before any other code reads the
     // table. There is no concurrent reader to race with.
     unsafe {

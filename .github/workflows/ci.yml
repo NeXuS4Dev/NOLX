@@ -218,16 +218,35 @@ jobs:
             "NOLX: nolx_probe reached (Rust is callable)" \
             "NOLX: nolx_kernel_main entered" \
             "NOLX 0.1.0 starting" \
-            "NOLX: mm online" \
+            "cpu: max leaf" \
+            "gs-cpu=0" \
+            "hal: GDT/TSS loaded; 256-entry IDT installed" \
+            "hal: 8259 PIC remapped to vectors 32..47; all IRQs masked" \
+            "acpi: RSDP revision=" \
+            "hpet: counter enabled at" \
+            "apic: x" \
+            "apic: calibrated timer=" \
+            "hal: timer fallback prepared at 100 Hz; source starts after kernel initialization" \
+            "hal: active clock source=" \
+            "wall-clock: CMOS RTC UTC epoch=" \
             "NOLX: hal online" \
+            "NOLX: mm online" \
             "NOLX: objmgr online" \
-            "NOLX: init sequence complete, halting the boot processor"
+            "NOLX: init sequence complete, halting the boot processor" \
+            "NOLX: timer reached 100 ticks; nominal 100 Hz"
           do
             if ! grep -qF "$marker" build/serial.log; then
               echo "missing boot marker: $marker"
               exit 1
             fi
           done
+          if ! grep -Eq 'hal: active clock source=(calibrated LAPIC|TSC deadline)' build/serial.log; then
+            echo "the calibrated local-APIC timer was not selected"
+            exit 1
+          fi
+
+      - name: Exercise the PIC/PIT fallback without local APIC support
+        run: scripts/check-hal-pit-fallback.sh 2>&1 | tee -a /tmp/job.log
 
       # Every marker above is asserted, so this is a summary rather than a confession.
       # It stays because the subsystem lines carry detail -- the memory map, the object
@@ -246,12 +265,16 @@ jobs:
             cat build/serial.log
             exit 1
           fi
+      - name: Exercise #PF and #GP handlers under QEMU
+        run: scripts/check-hal-faults.sh 2>&1 | tee -a /tmp/job.log
       - name: Upload the serial log
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: serial-log
-          path: build/serial.log
+          path: |
+            build/serial.log
+            build/hal-*.serial.log
       # Posted on success as well as failure. The artifact above is the archive of
       # record, but it is not reachable from everywhere this project is developed; the
       # comment is.

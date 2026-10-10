@@ -1,0 +1,149 @@
+//! Common assembly-to-Rust interrupt boundary and fatal exception reporting.
+
+use core::arch::asm;
+
+use crate::hal::console::Console;
+use crate::hal::{apic, cpu, pic, timer};
+use nolx_hal_core::console::HalConsole;
+use nolx_hal_core::ipl::Ipl;
+
+pub use nolx_hal_core::interrupt::InterruptFrame;
+
+/// Entry called by `interrupts.S`. It is not a Rust API; the assembly stubs are its only
+/// caller and provide a pointer to a live [`InterruptFrame`].
+#[no_mangle]
+extern "C" fn nolx_interrupt_dispatch(frame: *mut InterruptFrame) {
+    // SAFETY: each assembly stub pushes the complete frame immediately before calling this
+    // function and does not alter its contents. The stack remains live until IRETQ.
+    let frame = unsafe { &mut *frame };
+    let vector = frame.vector as u8;
+
+    if apic::is_spurious_vector(vector) {
+        return;
+    }
+
+    if apic::is_enabled() && apic::handles_vector(vector) {
+        // Interrupt gates clear IF. APIC TPR and the per-CPU software IPL are both raised
+        // until after the local APIC EOI, then restored in that order.
+        if let Some(previous_ipl) = cpu::raise_ipl(Ipl::DEVICE_MIN) {
+            if vector == 32 || vector == nolx_hal_core::apic::LAPIC_TIMER_VECTOR {
+                timer::on_interrupt(vector);
+            }
+            apic::end_of_interrupt();
+            cpu::restore_ipl(previous_ipl);
+        } else {
+            apic::end_of_interrupt();
+        }
+        return;
+    }
+
+    if pic::irq_for(vector).is_some() {
+        // The legacy path has no hardware priority register. Keep software IPL recorded until
+        // the 8259 has received EOI, then restore the previous level.
+        if let Some(previous_ipl) = cpu::raise_ipl(Ipl::DEVICE_MIN) {
+            if vector == 32 {
+                timer::on_interrupt(vector);
+            }
+            pic::end_of_interrupt(vector);
+            cpu::restore_ipl(previous_ipl);
+        } else {
+            pic::end_of_interrupt(vector);
+        }
+        return;
+    }
+
+    let mut console = Console::new();
+    report_exception(frame, &mut console);
+    halt_after_exception();
+}
+
+fn report_exception(frame: &InterruptFrame, console: &mut dyn HalConsole) {
+    let cr2 = if frame.vector == 14 { read_cr2() } else { 0 };
+    let _ = writeln!(
+        console,
+        "NOLX: CPU exception vector={} error={:#018x} rip={:#018x} cs={:#06x} rflags={:#018x} rsp={:#018x} ss={:#06x} cr2={:#018x}",
+        frame.vector,
+        frame.error_code,
+        frame.instruction_pointer,
+        frame.code_segment,
+        frame.flags,
+        frame.stack_pointer,
+        frame.stack_segment,
+        cr2,
+    );
+    let _ = writeln!(
+        console,
+        "NOLX: registers rax={:#018x} rbx={:#018x} rcx={:#018x} rdx={:#018x}",
+        frame.rax, frame.rbx, frame.rcx, frame.rdx,
+    );
+    let _ = writeln!(
+        console,
+        "NOLX: registers rsi={:#018x} rdi={:#018x} rbp={:#018x} r8={:#018x}",
+        frame.rsi, frame.rdi, frame.rbp, frame.r8,
+    );
+    let _ = writeln!(
+        console,
+        "NOLX: registers r9={:#018x} r10={:#018x} r11={:#018x} r12={:#018x}",
+        frame.r9, frame.r10, frame.r11, frame.r12,
+    );
+    let _ = writeln!(
+        console,
+        "NOLX: registers r13={:#018x} r14={:#018x} r15={:#018x}",
+        frame.r13, frame.r14, frame.r15,
+    );
+    let _ = writeln!(console, "NOLX: fatal exception; processor halted");
+    console.flush();
+}
+
+fn read_cr2() -> u64 {
+    let address: u64;
+    // SAFETY: CR2 is defined on every x86-64 processor and this path is entered only from
+    // the page-fault vector, where it contains the faulting linear address.
+    unsafe {
+        asm!(
+            "mov {}, cr2",
+            out(reg) address,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    address
+}
+
+fn halt_after_exception() -> ! {
+    // SAFETY: the current interrupt gate has IF clear; CLI also prevents any later maskable
+    // interrupt from returning to a faulting context. HLT is the fatal kernel stop state.
+    unsafe { asm!("cli", options(nomem, nostack)) };
+    loop {
+        // SAFETY: the kernel has deliberately stopped after reporting an unrecoverable CPU
+        // exception. There is no scheduler or recovery path at this milestone.
+        unsafe { asm!("hlt", options(nomem, nostack)) };
+    }
+}
+
+/// Trigger the deliberate out-of-map read used by the T2 page-fault test build.
+#[cfg(feature = "hal-fault-test-pf")]
+pub fn trigger_page_fault_test() -> ! {
+    // The bootstrap page tables map the first 2 GiB; this canonical address is just beyond
+    // that range and has no valid translation.
+    // SAFETY: this function exists only in the dedicated T2 fault-test image. The resulting
+    // #PF must be caught by the installed IDT and terminate in `report_exception`.
+    let _ = unsafe { core::ptr::read_volatile(0x8000_0000usize as *const u8) };
+    halt_after_exception()
+}
+
+/// Trigger a #GP with an architecturally reserved MSR in the T2 test build.
+#[cfg(feature = "hal-fault-test-gp")]
+pub fn trigger_general_protection_test() -> ! {
+    // SAFETY: MSR 0xFFFF_FFFF is reserved and WRMSR is defined to raise #GP for it. This
+    // function exists only in the dedicated T2 fault-test image.
+    unsafe {
+        asm!(
+            "wrmsr",
+            in("ecx") 0xFFFF_FFFFu32,
+            in("eax") 0u32,
+            in("edx") 0u32,
+            options(nostack),
+        );
+    }
+    halt_after_exception()
+}

@@ -16,7 +16,9 @@ it becomes a marketing claim. Three things make it explicit:
 
 ## The assertion database
 
-`docs/testing/assertions/` holds one file per specification area. Each line is:
+`docs/testing/assertions/` holds one file per POSIX specification area plus separately
+labeled platform contracts such as the x86-64 HAL. The platform rows use the same schema,
+but they are not POSIX conformance claims. Each line is:
 
 ```
 ID | specification reference | status | test
@@ -30,14 +32,15 @@ RD-005 | XSH read() RETURN VALUE      | implemented | kernel/src/psx/read.rs
 RD-006 | XSH read() ERRORS EINTR      | unimplemented | -
 ```
 
-Statuses, in increasing order of confidence:
+Statuses record implementation, verified test tiers, and pending hardware tests:
 
 | Status | Meaning |
 |---|---|
 | `unimplemented` | Not written. |
-| `implemented` | Written and reviewed; no automated test yet. |
-| `tested-T1` | Covered by a host-side unit test. |
-| `tested-T2` | Covered by a test that boots the kernel in QEMU. |
+| `implemented` | Written and reviewed; no passing automated result is recorded yet. |
+| `tested-T1` | Covered by a passing host-side unit test. |
+| `pending-T2` | A QEMU boot test is configured, but no passing run is recorded yet; this is not a tested claim. |
+| `tested-T2` | Covered by a passing test that boots the kernel in QEMU. |
 | `tested-T3` | Covered by an external conformance or functional suite running on NOLX. |
 
 `tools/conformance-report.py` turns those files into `docs/testing/CONFORMANCE.md`. It is

@@ -34,92 +34,117 @@ use core::fmt::Write;
 use core::panic::PanicInfo;
 
 use hal::console::Console;
+use nolx_hal_core::console::HalConsole;
 
 /// The Multiboot magic value a compliant loader passes in `eax`.
 pub const MULTIBOOT_BOOTLOADER_MAGIC: u32 = 0x2BAD_B002;
 
-/// The kernel entry point, called from `boot/boot.S` in 64-bit long mode.
-///
-/// # Safety
-///
-/// Called exactly once, with interrupts disabled, on the boot stack, with `mb_info`
-/// pointing at a Multiboot information structure that is valid for as long as the kernel
-/// runs, or null if `magic` is not [`MULTIBOOT_BOOTLOADER_MAGIC`].
-/// A trivial Rust entry point, called from `boot/boot.S` before the real one.
-///
-/// It exists to answer one question: can the trampoline call into Rust at all? It has no
-/// frame worth speaking of and touches nothing, so if this prints and `nolx_kernel_main`
-/// does not, the fault is in the kernel entry point rather than in the handoff. It is
-/// cheap to keep, and it is the first thing to look at when a future change to the entry
-/// path breaks booting.
-/// An empty Rust function, called from `boot/boot.S` before [`nolx_probe`].
-///
-/// It answers one question and nothing else: can the trampoline enter Rust and come back?
-/// If this returns and `nolx_probe` does not, the handoff is fine and whatever is wrong is
-/// in what `nolx_probe` touches -- one port read and one port write.
+/// A no-op Rust function called by the boot trampoline before the full entry point.
 #[no_mangle]
 extern "C" fn nolx_probe0() {}
 
+/// Prove that the trampoline can call a Rust function that writes to COM1.
 #[no_mangle]
 extern "C" fn nolx_probe() {
     hal::console::raw_put_str("NOLX: nolx_probe reached (Rust is callable)\n");
 }
 
-// Deliberately not `pub`: this is called from `boot/boot.S` and from nowhere in Rust, so it
-// is not an API. Keeping it private is also what makes clippy's
-// `not_unsafe_ptr_arg_deref` rule inapplicable -- the rule protects Rust callers, and there
-// are none. Its contract is the one stated above, and the assembly upholds it.
+#[cfg(all(feature = "hal-fault-test-pf", feature = "hal-fault-test-gp"))]
+compile_error!("enable at most one HAL fault-test feature at a time");
+
+/// The kernel entry point, called from `boot/boot.S` in 64-bit long mode.
+///
+/// # Safety
+///
+/// Called exactly once, with interrupts disabled, on the boot stack. If `magic` is
+/// [`MULTIBOOT_BOOTLOADER_MAGIC`], `mb_info` must point to a valid Multiboot information
+/// structure that remains mapped during the kernel's initial parse.
 #[no_mangle]
 extern "C" fn nolx_kernel_main(mb_info: *const u8, magic: u32) -> ! {
     // The very first thing the kernel does is prove it is running. This goes straight to
-    // COM1, before any static is read and before the framebuffer is assumed to be mapped,
-    // so if this line does not appear the failure is in the handoff and not in the kernel.
+    // COM1, before any static is read and before the framebuffer is assumed to be mapped.
     hal::console::raw_put_str("NOLX: nolx_kernel_main entered\n");
 
     let mut console = Console::new();
     hal::console::raw_put_str("NOLX: console constructed\n");
 
-    // The assembly already logged that long mode was entered. Everything from here on has
-    // a real console, so this is the first line that can carry detail.
     let _ = writeln!(console, "NOLX {} starting", nolx_types::version_string());
     hal::console::raw_put_str("NOLX: first writeln! completed\n");
 
-    if magic == MULTIBOOT_BOOTLOADER_MAGIC {
-        // SAFETY: the contract above guarantees `mb_info` is a valid Multiboot info
-        // structure whenever the magic matches. `BootInfo::parse` bounds-checks every
-        // field it reads against the structure's own length.
-        let info = unsafe { hal::multiboot::BootInfo::parse(mb_info) };
-        let _ = writeln!(console, "multiboot: {info}");
-        mm::init(&mut console, &info);
-    } else {
-        let _ = writeln!(
-            console,
-            "multiboot: magic {magic:#010x} is not {MULTIBOOT_BOOTLOADER_MAGIC:#010x}; \
-             continuing without firmware information"
-        );
-        mm::init_without_firmware(&mut console);
-    }
-
+    // Install the full exception/interrupt path before parsing firmware structures or
+    // initializing other subsystems. The PIC stays masked until the final idle path.
+    hal::init(&mut console);
     let _ = writeln!(console, "NOLX: hal online");
 
-    obj::init(&mut console);
-    let _ = writeln!(console, "NOLX: objmgr online");
+    #[cfg(any(feature = "hal-fault-test-pf", feature = "hal-fault-test-gp"))]
+    let _ = (mb_info, magic);
 
-    exec::init(&mut console);
-    psx::init(&mut console);
-    io::init(&mut console);
+    #[cfg(feature = "hal-fault-test-pf")]
+    hal::interrupts::trigger_page_fault_test();
+    #[cfg(feature = "hal-fault-test-gp")]
+    hal::interrupts::trigger_general_protection_test();
 
-    let _ = writeln!(
-        console,
-        "NOLX: init sequence complete, halting the boot processor"
-    );
+    #[cfg(not(any(feature = "hal-fault-test-pf", feature = "hal-fault-test-gp")))]
+    {
+        if magic == MULTIBOOT_BOOTLOADER_MAGIC {
+            // SAFETY: the boot contract guarantees `mb_info` is valid when the magic
+            // matches. `BootInfo::parse` bounds-checks every field it reads.
+            let info = unsafe { hal::multiboot::BootInfo::parse(mb_info) };
+            let _ = writeln!(console, "multiboot: {info}");
+            mm::init(&mut console, &info);
+        } else {
+            let _ = writeln!(
+                console,
+                "multiboot: magic {magic:#010x} is not {MULTIBOOT_BOOTLOADER_MAGIC:#010x}; \
+                 continuing without firmware information"
+            );
+            mm::init_without_firmware(&mut console);
+        }
 
-    // There is no scheduler to hand off to yet (M5). Halt with interrupts enabled so an
-    // NMI or a debugger can still get in.
-    loop {
-        // SAFETY: `hlt` on the boot processor with no runnable work is the intended idle
-        // state; it does not modify memory and returns on any interrupt.
-        unsafe { core::arch::asm!("hlt") };
+        obj::init(&mut console);
+        let _ = writeln!(console, "NOLX: objmgr online");
+
+        exec::init(&mut console);
+        psx::init(&mut console);
+        io::init(&mut console);
+
+        hal::init_wall_clock(&mut console);
+        let _ = writeln!(
+            console,
+            "NOLX: init sequence complete, halting the boot processor"
+        );
+
+        // Start the selected periodic source after every one-time initializer has finished.
+        // The interrupt path only increments a counter; output stays in this idle context.
+        hal::start_timer();
+        let _ = writeln!(
+            console,
+            "hal: active clock source={} nominal {} Hz",
+            hal::timer::backend_name(),
+            hal::timer::frequency_hz(),
+        );
+        // SAFETY: the complete IDT and selected timer route are live. Do not let the compiler
+        // move initialization across STI.
+        unsafe { core::arch::asm!("sti", options(nostack)) };
+
+        let mut timer_marker_reported = false;
+        loop {
+            let ticks = hal::timer::ticks();
+            if !timer_marker_reported && ticks >= 100 {
+                let elapsed_ns = hal::timer::monotonic_ns();
+                let _ = writeln!(
+                    console,
+                    "NOLX: timer reached 100 ticks; nominal {} Hz, monotonic {} ns",
+                    hal::timer::frequency_hz(),
+                    elapsed_ns,
+                );
+                timer_marker_reported = true;
+            }
+
+            // SAFETY: this boot processor has no runnable work. The selected periodic timer
+            // interrupt wakes HLT; NMI remains available to a debugger or platform monitor.
+            unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+        }
     }
 }
 
@@ -136,6 +161,7 @@ fn panic(info: &PanicInfo) -> ! {
         "NOLX has stopped. The filesystem is consistent up to the last checkpoint; \
          reboot to continue."
     );
+    console.flush();
 
     // Disable interrupts so a timer cannot fire into a half-torn-down kernel.
     // SAFETY: `cli` only clears the interrupt flag; no memory is touched.

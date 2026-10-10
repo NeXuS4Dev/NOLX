@@ -4,10 +4,8 @@
 //! in order to describe a process at all. The scheduler itself is M5; the model below is
 //! what it will schedule.
 
-use core::fmt::Write;
-
-use crate::hal::console::Console;
 use crate::obj::ObjectHeader;
+use nolx_hal_core::console::HalConsole;
 
 /// Number of priority levels. Matches `docs/architecture/06-scheduler.md`.
 pub const PRIORITY_LEVELS: u8 = 32;
@@ -161,7 +159,7 @@ pub struct Process {
 }
 
 /// Register the process and thread types and report the priority model.
-pub fn init(console: &mut Console) {
+pub fn init(console: &mut dyn HalConsole) {
     let (min, max) = priority_range(Policy::Fifo);
     let _ = writeln!(
         console,

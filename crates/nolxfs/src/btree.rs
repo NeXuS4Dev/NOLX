@@ -457,7 +457,9 @@ impl<'d, D: BlockDevice, A: BlockAllocator> BTree<'d, D, A> {
             let node = self.read_node(block)?;
             let index = match node.find(self.kind, key) {
                 Ok(i) => i,
-                Err(_) => return Ok(None),
+                Err(_) if node.is_leaf() => return Ok(None),
+                Err(0) => return Ok(None),
+                Err(i) => i - 1,
             };
             if node.is_leaf() {
                 return Ok(Some(node.entries[index].val.clone()));

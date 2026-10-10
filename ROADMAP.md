@@ -32,7 +32,7 @@ Freeze the decisions that are expensive to change later.
 Get from firmware to `nolx_kernel_main` in 64-bit long mode.
 
 - Multiboot 1 header (QEMU `-kernel` fast path) + ELF loading.
-- 32-bit entry → identity-map first 1 GiB with 2 MiB pages → PAE → `EFER.LME` → paging →
+- 32-bit entry → identity-map first 2 GiB with 2 MiB pages → PAE → `EFER.LME` → paging →
   far jump to 64-bit → 64-bit GDT → stack → call Rust.
 - Multiboot info parsing: memory map (`mmap`), module list (initrd), command line.
 - **M1b:** Multiboot 2 + native UEFI (EFI stub, GOP framebuffer, UEFI memory map, RT
@@ -50,6 +50,28 @@ Get from firmware to `nolx_kernel_main` in 64-bit long mode.
 - CPU feature detection (CPUID), `MSR` accessors, per-CPU data area (`gs` base).
 - Tests: T2 timer ticks logged at expected rate; T2 `#PF`/`#GP` handler prints a register
   dump and halts cleanly.
+
+### M2 implementation checkpoint — 2026-10-10
+
+The single-CPU HAL now discovers ACPI RSDP/root tables, MADT topology, and HPET metadata; it
+initializes the HPET counter when its register block is in the early uncached mapping; and it
+programs the local APIC in xAPIC or x2APIC mode plus validated I/O APIC routes. MADT NMI
+routes and ISA overrides are decoded, legacy redirections start masked, and the local APIC
+TPR follows software IPL while APIC EOI is issued before IPL restoration. The APIC timer is
+calibrated against HPET; an invariant-TSC deadline source is selected when available, with a
+periodic LAPIC timer otherwise. The 8259/PIT remains a fallback when firmware, APIC, or
+calibration setup is unavailable. HPET also backs monotonic time (including extension of
+32-bit counter wraps); the RTC wall-clock anchor stores its matching monotonic baseline.
+
+The host assertion database covers portable ACPI/APIC parsing and timer arithmetic. CI is
+configured to boot the normal APIC/HPET timer path, assert 100 timer interrupts, exercise a
+separate PIC/PIT fallback boot with local APIC hidden, and boot `#PF`/`#GP` fault images.
+Those QEMU checks are still **pending** until this code revision has a passing workflow run.
+The HAL also retains the earlier verified console contract, TSS/IST stacks, complete IDT,
+register-preserving interrupt stubs, and bootstrap GS-based per-CPU block.
+
+M2 remains **in progress** pending host/build and QEMU verification of this extension; no
+current-revision Rust build or QEMU pass is claimed in this checkpoint.
 
 ## M3 — Memory management
 

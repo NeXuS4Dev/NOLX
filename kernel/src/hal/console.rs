@@ -8,6 +8,7 @@
 use core::fmt;
 
 use crate::sync::SyncCell;
+use nolx_hal_core::console::HalConsole;
 
 use super::{inb, outb};
 
@@ -30,6 +31,8 @@ const _: () = assert!(
 );
 /// The "transmit holding register empty" bit.
 const LSR_THRE: u8 = 1 << 5;
+/// The transmitter and holding register are both empty.
+const LSR_TEMT: u8 = 1 << 6;
 
 /// The VGA text-mode framebuffer: 80x25 cells of (character, attribute) at `0xB8000`.
 const VGA_BUFFER: usize = 0x000B_8000;
@@ -225,5 +228,20 @@ impl fmt::Write for Console {
             self.put_byte(*byte);
         }
         Ok(())
+    }
+}
+
+impl HalConsole for Console {
+    fn flush(&mut self) {
+        // VGA writes are volatile stores and are complete before `write_str` returns. For
+        // COM1, THRE only says the holding register is empty; TEMT additionally waits for
+        // the final byte to leave the shift register, which is required before a fatal halt.
+        // SAFETY: the 16550-compatible line-status register is readable without side
+        // effects; polling it until TEMT is the documented transmitter-drain operation.
+        unsafe {
+            while inb(COM1 + COM1_LSR) & LSR_TEMT == 0 {
+                core::hint::spin_loop();
+            }
+        }
     }
 }

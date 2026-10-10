@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/nolx-types",
+    "crates/nolx-hal-core",
     "crates/nolx-syscall",
     "crates/nolxfs",
     "crates/nolx-vfs",
@@ -9,11 +10,11 @@ members = [
     "tools/mkfs-nolxfs",
 ]
 # `cargo test` with no `-p` and no `--workspace` uses these. The kernel is deliberately
-# excluded: it is a `no_std` staticlib with no test harness, and its testable logic lives in
-# the crates it depends on. Use `cargo build -p nolx-kernel --target x86_64-unknown-none`
-# to build it, or `make kernel`.
+# excluded: it is a `no_std` binary with no host test harness, and its testable HAL layouts
+# and calculations live in `nolx-hal-core`.
 default-members = [
     "crates/nolx-types",
+    "crates/nolx-hal-core",
     "crates/nolx-syscall",
     "crates/nolxfs",
     "crates/nolx-vfs",

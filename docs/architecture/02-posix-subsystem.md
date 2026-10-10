@@ -138,6 +138,7 @@ tested once.
 
 `docs/testing/assertions/` holds one file per specification area. Each assertion is a
 line: `ID | spec reference | status | test`. Statuses: `unimplemented`, `implemented`,
-`tested-T1`, `tested-T2`, `tested-T3`. The dashboard in `docs/testing/CONFORMANCE.md` is
+`tested-T1`, `pending-T2`, `tested-T2`, `tested-T3`. A pending T2 row has a configured
+QEMU test but no recorded passing run. The dashboard in `docs/testing/CONFORMANCE.md` is
 generated from those files by `tools/conformance-report.py`, so it cannot drift from the
 data.

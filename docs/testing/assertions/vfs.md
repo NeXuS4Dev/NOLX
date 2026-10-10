@@ -3,7 +3,7 @@
 Source: *The Open Group Base Specifications, Issue 8*, System Interfaces volume.
 
 Rows are pipe-delimited: `ID | specification reference | status | test`.
-Statuses: `unimplemented`, `implemented`, `tested-T1`, `tested-T2`, `tested-T3`.
+Statuses: `unimplemented`, `implemented`, `tested-T1`, `pending-T2`, `tested-T2`, `tested-T3`.
 A `tested-*` row that names no test is rejected by the generator.
 
 PN-001 | XBD 4.12 Pathname Resolution: a pathname beginning with a slash resolves against the root | tested-T1 | crates/nolx-vfs path::tests::leading_slash_ignores_the_start_node
