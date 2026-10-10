@@ -96,6 +96,10 @@ msg_returned:
     .asciz  "NOLX: FATAL: kernel entry point returned\r\n"
 msg_idt:
     .asciz  "NOLX: early exception handlers installed\r\n"
+msg_probe_at:
+    .asciz  "NOLX: calling nolx_probe at 0x"
+msg_probe_back:
+    .asciz  "\r\nNOLX: nolx_probe returned\r\n"
 msg_exc_head:
     .asciz  "NOLX: FATAL: CPU exception, vector "
 msg_exc_err:
@@ -315,10 +319,22 @@ long_mode_entry:
     movl    $msg_handoff, %esi
     call    serial_puts64
 
-    /* Bisecting probe: a Rust function that does nothing but print. If this line appears
-     * and the kernel's own entry point does not, the handoff is fine and the fault is in
-     * nolx_kernel_main. */
+    /*
+     * Bisecting probe: a Rust function that does nothing but print.
+     *
+     * The address is printed as well as the markers, because "the call did not happen"
+     * and "the call went somewhere else" look identical on a serial console and the
+     * answer is one `lea` away.
+     */
+    movl    $msg_probe_at, %esi
+    call    serial_puts64
+    leaq    nolx_probe(%rip), %r8
+    call    serial_puthex64
+
     call    nolx_probe
+
+    movl    $msg_probe_back, %esi
+    call    serial_puts64
 
     movl    mb_info_phys(%rip), %edi
     movl    mb_magic(%rip), %esi
