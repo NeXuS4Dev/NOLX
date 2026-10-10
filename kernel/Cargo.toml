@@ -8,12 +8,12 @@ description = "The NOLX kernel: HAL, executive, and POSIX subsystem"
 readme = "../README.md"
 publish = false
 
-[lib]
-name = "nolx_kernel"
+# A single binary target. There is deliberately no lib target: the crate is `#![no_std]`
+# and cannot be built for the host, so a host-visible library would only ever fail to
+# compile. The logic worth testing on the host lives in the crates this depends on.
+[[bin]]
+name = "nolx-kernel"
 path = "src/main.rs"
-# Built as a binary for x86_64-unknown-none and as a lib for host-side reasoning about the
-# pure-logic modules. `make kernel` builds the binary.
-crate-type = ["staticlib"]
 
 [dependencies]
 nolx-types = { path = "../crates/nolx-types" }

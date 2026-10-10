@@ -7,6 +7,8 @@
 
 use core::fmt;
 
+use crate::sync::SyncCell;
+
 use super::{inb, outb};
 
 /// COM1's base I/O port.
@@ -40,10 +42,9 @@ pub struct Console {
 /// The VGA cursor, kept in a static so every `Console` instance agrees.
 ///
 /// A spinlock would be the right answer once there is more than one CPU (M15). Until then a
-/// single boot processor writes here, and a `static mut` with disciplined access is honest
-/// about the assumption.
-static mut VGA_ROW: usize = 0;
-static mut VGA_COL: usize = 0;
+/// single boot processor writes here, and [`SyncCell`] names that assumption in one place.
+static VGA_ROW: SyncCell<usize> = SyncCell::new(0);
+static VGA_COL: SyncCell<usize> = SyncCell::new(0);
 
 impl Console {
     /// A handle to the console.
@@ -51,7 +52,7 @@ impl Console {
     pub fn new() -> Self {
         // SAFETY: reading two `usize` statics that only this module writes, on the single
         // boot processor, cannot tear. See the note on [`VGA_ROW`].
-        let (row, col) = unsafe { (VGA_ROW, VGA_COL) };
+        let (row, col) = unsafe { (*VGA_ROW.get(), *VGA_COL.get()) };
         Self { row, col }
     }
 
@@ -121,8 +122,8 @@ impl Console {
 
         // SAFETY: single boot processor; see the note on [`VGA_ROW`].
         unsafe {
-            VGA_ROW = self.row;
-            VGA_COL = self.col;
+            *VGA_ROW.get() = self.row;
+            *VGA_COL.get() = self.col;
         }
     }
 

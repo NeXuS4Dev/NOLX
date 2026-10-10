@@ -28,6 +28,7 @@ pub mod io;
 pub mod mm;
 pub mod obj;
 pub mod psx;
+mod sync;
 
 use core::fmt::Write;
 use core::panic::PanicInfo;

@@ -82,6 +82,25 @@ jobs:
         run: cargo test --lib --bins 2>&1 | tee -a /tmp/job.log
       - name: cargo test (integration tests)
         run: cargo test --tests 2>&1 | tee -a /tmp/job.log
+      - name: Report the test totals to the PR
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -u
+          [ -n "${PR_NUMBER:-}" ] || exit 0
+          BODY=$(mktemp)
+          {
+            echo "### host test totals for `${GITHUB_SHA:0:8}`"
+            echo
+            echo '```'
+            grep -E "^(test result:|running [0-9]+ test| *Running |error|warning: unused)" /tmp/job.log \
+              || echo "(no test output captured)"
+            echo '```'
+          } > "$BODY"
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$BODY"
+          rm -f "$BODY"
       - uses: ./.github/actions/report-failure
         if: failure()
 
@@ -114,8 +133,12 @@ jobs:
           toolchain: stable
           targets: x86_64-unknown-none
       - uses: Swatinem/rust-cache@v2
+      - name: Clippy the kernel for its own target
+        run: |
+          cargo clippy --release --target x86_64-unknown-none -p nolx-kernel -- -D warnings \
+            2>&1 | tee /tmp/job.log
       - name: Build the kernel
-        run: make kernel 2>&1 | tee /tmp/job.log
+        run: make kernel 2>&1 | tee -a /tmp/job.log
       - name: Validate the resulting image
         run: python3 scripts/verify-multiboot.py build/nolx.elf 2>&1 | tee -a /tmp/job.log
       - name: Upload

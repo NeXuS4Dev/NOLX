@@ -63,7 +63,7 @@ pub unsafe fn syscall0(number: Number) -> i64 {
             inlateout("rax") u64::from(number) => result,
             lateout("rcx") _,
             lateout("r11") _,
-            options!("nostack"),
+            options(nostack),
         );
     }
     result
@@ -86,7 +86,7 @@ pub unsafe fn syscall1(number: Number, a0: u64) -> i64 {
             in("rdi") a0,
             lateout("rcx") _,
             lateout("r11") _,
-            options!("nostack"),
+            options(nostack),
         );
     }
     result
@@ -109,7 +109,7 @@ pub unsafe fn syscall2(number: Number, a0: u64, a1: u64) -> i64 {
             in("rsi") a1,
             lateout("rcx") _,
             lateout("r11") _,
-            options!("nostack"),
+            options(nostack),
         );
     }
     result
@@ -133,7 +133,7 @@ pub unsafe fn syscall3(number: Number, a0: u64, a1: u64, a2: u64) -> i64 {
             in("rdx") a2,
             lateout("rcx") _,
             lateout("r11") _,
-            options!("nostack"),
+            options(nostack),
         );
     }
     result
@@ -162,7 +162,7 @@ pub unsafe fn syscall4(number: Number, a0: u64, a1: u64, a2: u64, a3: u64) -> i6
             in("r10") a3,
             lateout("rcx") _,
             lateout("r11") _,
-            options!("nostack"),
+            options(nostack),
         );
     }
     result
@@ -188,7 +188,7 @@ pub unsafe fn syscall5(number: Number, a0: u64, a1: u64, a2: u64, a3: u64, a4: u
             in("r8") a4,
             lateout("rcx") _,
             lateout("r11") _,
-            options!("nostack"),
+            options(nostack),
         );
     }
     result
@@ -223,7 +223,7 @@ pub unsafe fn syscall6(
             in("r9") a5,
             lateout("rcx") _,
             lateout("r11") _,
-            options!("nostack"),
+            options(nostack),
         );
     }
     result

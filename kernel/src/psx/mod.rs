@@ -5,10 +5,8 @@
 //! here. If a behaviour is specified in *The Open Group Base Specifications, Issue 8*, its
 //! code lives in this module -- not in the I/O manager, not in a filesystem driver.
 //!
-//! In M3 this is the dispatch skeleton: a table that maps syscall numbers to handlers, with
-//! every handler returning `ENOSYS` until its milestone implements it. The table exists
-//! first, deliberately, because it is the contract: libc, the tests, and the conformance
-//! dashboard are all written against it.
+//! In M3 this is the dispatch skeleton. The table exists first, deliberately, because it is
+//! the contract: libc, the tests, and the conformance dashboard are all written against it.
 
 use core::fmt::Write;
 
@@ -41,6 +39,14 @@ pub struct SyscallArgs {
     pub a5: u64,
 }
 
+impl SyscallArgs {
+    /// The arguments as a slice, for handlers that walk them generically.
+    #[must_use]
+    pub const fn as_slice(&self) -> [u64; 6] {
+        [self.a0, self.a1, self.a2, self.a3, self.a4, self.a5]
+    }
+}
+
 /// A syscall handler.
 ///
 /// Takes the arguments and returns either a value or a negative `errno`. Handlers run at
@@ -49,85 +55,72 @@ pub struct SyscallArgs {
 pub type Handler = fn(SyscallArgs) -> SysResult;
 
 /// One row of the dispatch table.
+#[derive(Clone, Copy)]
 pub struct Entry {
-    /// The syscall number.
+    /// The syscall number this row answers.
     pub number: syscall::Number,
-    /// The handler, or `None` for a number that is reserved but not implemented.
-    pub handler: Option<Handler>,
+    /// The handler.
+    pub handler: Handler,
 }
 
-/// The number of rows the dispatch table holds.
+/// The implemented handlers.
 ///
-/// One slot per possible number would be 65536 entries; the table is sparse-indexed instead
-/// and searched, because syscalls are not so hot that a linear scan of ~200 entries is the
-/// bottleneck, and a dense table would be mostly `None` and mostly cache misses.
-pub const MAX_ENTRIES: usize = 512;
+/// A `&'static` slice, not a table built at boot. That choice buys four things at once: no
+/// `static mut` and therefore no `Sync` assumption to justify, no initialisation order to
+/// get wrong, no capacity limit, and no way for a number that is absent from
+/// [`syscall::TABLE`] to acquire a handler.
+///
+/// It is empty in M3 because nothing is implemented yet. Rows are added as milestones land,
+/// which is what makes the growth of this slice a usable progress measure.
+static HANDLERS: &[Entry] = &[];
 
-static mut DISPATCH: [Option<Entry>; MAX_ENTRIES] = [None; MAX_ENTRIES];
-static mut DISPATCH_LEN: usize = 0;
-
-/// `ENOSYS` for every number, which is the correct answer for anything unimplemented.
+/// The answer for every syscall that has no handler yet.
+///
+/// `ENOSYS` is the correct POSIX response to an unimplemented function, and it is the
+/// response `configure` scripts and `libc` probes expect, so returning anything else would
+/// actively mislead a program that is testing for support.
 fn unimplemented(_args: SyscallArgs) -> SysResult {
     -i64::from(errno::ENOSYS)
 }
 
-/// Register the dispatch table.
+/// Report what the subsystem can and cannot do.
 pub fn init(console: &mut Console) {
-    // SAFETY: runs once on the boot processor before user mode exists, so there is no
-    // concurrent reader. After this returns the table is read-only.
-    unsafe {
-        let mut count = 0usize;
-        let mut index = 0usize;
-        while index < syscall::TABLE.len() && count < MAX_ENTRIES {
-            let (number, _name) = syscall::TABLE[index];
-            DISPATCH[count] = Some(Entry { number, handler: Some(unimplemented) });
-            count += 1;
-            index += 1;
-        }
-        DISPATCH_LEN = count;
-        let _ = writeln!(
-            console,
-            "psx: dispatch table has {count} entries, {} assigned numbers, all returning \
-             ENOSYS until their milestone lands",
-            syscall::TABLE.len()
-        );
-    }
+    let _ = writeln!(
+        console,
+        "psx: {} syscall numbers assigned, {} implemented, the rest return ENOSYS",
+        syscall::TABLE.len(),
+        HANDLERS.len()
+    );
 }
 
 /// Dispatch a syscall.
 ///
-/// The single entry point from the `syscall` trap handler. Anything that is not a known
-/// number gets `ENOSYS`, never a guess and never a panic: a bad number is a user-space bug,
-/// and the kernel's job is to report it.
+/// The single entry point from the `syscall` trap handler. Anything with no handler gets
+/// `ENOSYS`, never a guess and never a panic: a bad number is a user-space bug, and the
+/// kernel's job is to report it.
 #[must_use]
 pub fn dispatch(number: syscall::Number, args: SyscallArgs) -> SysResult {
-    // SAFETY: the table is written once in `init` and read-only afterwards.
-    let handler = unsafe {
-        DISPATCH
-            .iter()
-            .take(DISPATCH_LEN)
-            .find_map(|slot| slot.as_ref())
-            .filter(|entry| entry.number == number)
-            .and_then(|entry| entry.handler)
-    };
-
-    match handler {
-        Some(f) => f(args),
-        None => -i64::from(errno::ENOSYS),
+    match HANDLERS.iter().find(|entry| entry.number == number) {
+        Some(entry) => (entry.handler)(args),
+        None => unimplemented(args),
     }
 }
 
-/// `true` if `number` is a known syscall, whether or not it is implemented.
+/// `true` if `number` names a syscall POSIX assigns, whether or not NOLX implements it.
+///
+/// This distinction matters: `ENOSYS` says "not implemented", which is a legitimate answer
+/// a program can act on, while an unassigned number means the caller's ABI assumptions are
+/// wrong. Both get `ENOSYS` from `dispatch`, because POSIX defines no other error for it,
+/// but only one of them is a missing feature.
 #[must_use]
-pub fn is_known(number: syscall::Number) -> bool {
-    // SAFETY: as [`dispatch`].
-    unsafe {
-        DISPATCH
-            .iter()
-            .take(DISPATCH_LEN)
-            .find_map(|slot| slot.as_ref())
-            .is_some_and(|entry| entry.number == number)
-    }
+pub fn is_assigned(number: syscall::Number) -> bool {
+    syscall::name_of(number).is_some()
+}
+
+/// `true` if `number` has a handler in this kernel.
+#[must_use]
+pub fn is_implemented(number: syscall::Number) -> bool {
+    HANDLERS.iter().any(|entry| entry.number == number)
 }
 
 /// Whether a blocking call that was interrupted should return `EINTR` or be restarted.

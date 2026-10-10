@@ -12,6 +12,7 @@ use core::fmt::Write;
 use core::sync::atomic::{AtomicI32, AtomicU16, Ordering};
 
 use crate::hal::console::Console;
+use crate::sync::SyncCell;
 
 /// The object header, prefixed to every object body.
 ///
@@ -68,9 +69,9 @@ pub const MAX_OBJECT_TYPES: usize = 64;
 /// Written once during `init`, read afterwards, so it needs no lock. That assumption is
 /// recorded here because it is the kind of thing that breaks silently when someone adds
 /// runtime type registration.
-static mut TYPE_TABLE: [Option<&'static ObjectType>; MAX_OBJECT_TYPES] =
-    [None; MAX_OBJECT_TYPES];
-static mut TYPE_COUNT: usize = 0;
+static TYPE_TABLE: SyncCell<[Option<&'static ObjectType>; MAX_OBJECT_TYPES]> =
+    SyncCell::new([None; MAX_OBJECT_TYPES]);
+static TYPE_COUNT: SyncCell<usize> = SyncCell::new(0);
 
 /// Built-in object types, registered in this order so their indices are stable. A stable
 /// index matters because crash dumps print the index, and a dump from one build should be
@@ -98,13 +99,15 @@ pub fn init(console: &mut Console) {
     // SAFETY: `init` runs once on the boot processor before any other code reads the
     // table. There is no concurrent reader to race with.
     unsafe {
+        let table = &mut *TYPE_TABLE.get();
+        let count_ref = &mut *TYPE_COUNT.get();
         for ty in BUILTIN_TYPES {
-            if TYPE_COUNT < MAX_OBJECT_TYPES {
-                TYPE_TABLE[TYPE_COUNT] = Some(ty);
-                TYPE_COUNT += 1;
+            if *count_ref < MAX_OBJECT_TYPES {
+                table[*count_ref] = Some(ty);
+                *count_ref += 1;
             }
         }
-        let count = TYPE_COUNT;
+        let count = *count_ref;
         let _ = writeln!(console, "obj: registered {count} object types");
     }
 }
@@ -113,7 +116,7 @@ pub fn init(console: &mut Console) {
 #[must_use]
 pub fn type_count() -> usize {
     // SAFETY: written once in `init`, read-only afterwards.
-    unsafe { TYPE_COUNT }
+    unsafe { *TYPE_COUNT.get() }
 }
 
 /// Look up an object type by index.
@@ -121,7 +124,7 @@ pub fn type_count() -> usize {
 pub fn type_by_index(index: u16) -> Option<&'static ObjectType> {
     // SAFETY: as [`type_count`]; the index is bounds-checked.
     unsafe {
-        TYPE_TABLE
+        (*TYPE_TABLE.get())
             .get(usize::from(index))
             .and_then(|slot| *slot)
     }
@@ -135,9 +138,9 @@ pub fn type_by_index(index: u16) -> Option<&'static ObjectType> {
 pub fn type_by_name(name: &str) -> Option<(u16, &'static ObjectType)> {
     // SAFETY: as [`type_count`].
     unsafe {
-        TYPE_TABLE
+        (*TYPE_TABLE.get())
             .iter()
-            .take(TYPE_COUNT)
+            .take(*TYPE_COUNT.get())
             .enumerate()
             .find_map(|(i, slot)| slot.map(|ty| (i as u16, ty)).filter(|(_, ty)| ty.name == name))
     }

@@ -15,6 +15,7 @@
 use core::fmt::Write;
 
 use crate::hal::console::Console;
+use crate::sync::SyncCell;
 use crate::hal::multiboot::BootInfo;
 
 /// Bytes in a physical page.
@@ -48,12 +49,13 @@ pub const MAX_FRAMES: usize = 16 * 1024 * 1024;
 
 /// The frame map, as a static array.
 ///
-/// A `static mut` because there is no allocator yet to put it anywhere else, and no second
+/// A static array because there is no allocator yet to put it anywhere else, and no second
 /// CPU to race with. M3 moves it into the direct map and puts a lock on it.
-static mut FRAME_STATES: [FrameState; MAX_FRAMES] = [FrameState::Reserved; MAX_FRAMES];
+static FRAME_STATES: SyncCell<[FrameState; MAX_FRAMES]> =
+    SyncCell::new([FrameState::Reserved; MAX_FRAMES]);
 
 /// How much of the frame map is populated, in frames.
-static mut FRAME_MAP_LEN: usize = 0;
+static FRAME_MAP_LEN: SyncCell<usize> = SyncCell::new(0);
 
 /// Statistics gathered at boot, reported on the console and later through `sysctl`.
 #[derive(Clone, Copy, Debug, Default)]
@@ -96,7 +98,7 @@ pub fn init(console: &mut Console, info: &BootInfo) {
     // written only here during boot before anything else reads it.
     unsafe {
         let len = ((stats.highest_address as usize) / PAGE_SIZE).min(MAX_FRAMES);
-        for state in FRAME_STATES.iter_mut().take(len) {
+        for state in (*FRAME_STATES.get()).iter_mut().take(len) {
             *state = FrameState::Reserved;
         }
         for region in map.regions() {
@@ -104,7 +106,7 @@ pub fn init(console: &mut Console, info: &BootInfo) {
             let last = (region.end() as usize).div_ceil(PAGE_SIZE);
             let state = if region.is_usable() { FrameState::Free } else { FrameState::Reserved };
             for index in first.min(len)..last.min(len) {
-                FRAME_STATES[index] = state;
+                (*FRAME_STATES.get())[index] = state;
             }
             if region.is_usable() {
                 stats.usable_frames += (last - first) as u64;
@@ -112,7 +114,7 @@ pub fn init(console: &mut Console, info: &BootInfo) {
                 stats.reserved_frames += (last - first) as u64;
             }
         }
-        FRAME_MAP_LEN = len;
+        *FRAME_MAP_LEN.get() = len;
     }
 
     let _ = writeln!(
@@ -147,15 +149,15 @@ pub fn init_without_firmware(console: &mut Console) {
     // SAFETY: as in [`init`].
     unsafe {
         let len = (64 * 1024 * 1024) / PAGE_SIZE;
-        for state in FRAME_STATES.iter_mut().take(len) {
+        for state in (*FRAME_STATES.get()).iter_mut().take(len) {
             *state = FrameState::Free;
         }
         // The first megabyte holds the real-mode structures, the BIOS data area, and the
         // kernel image itself. Never hand it out.
-        for state in FRAME_STATES.iter_mut().take((1024 * 1024) / PAGE_SIZE) {
+        for state in (*FRAME_STATES.get()).iter_mut().take((1024 * 1024) / PAGE_SIZE) {
             *state = FrameState::Reserved;
         }
-        FRAME_MAP_LEN = len;
+        *FRAME_MAP_LEN.get() = len;
     }
     let _ = writeln!(console, "NOLX: mm online");
 }
@@ -169,10 +171,10 @@ pub fn frame_state(frame: usize) -> FrameState {
     // SAFETY: reading one byte of a static that only this module writes, after `init` has
     // run. Reads cannot tear on a `u8`-backed enum.
     unsafe {
-        if frame >= FRAME_MAP_LEN {
+        if frame >= *FRAME_MAP_LEN.get() {
             FrameState::Reserved
         } else {
-            FRAME_STATES[frame]
+            (*FRAME_STATES.get())[frame]
         }
     }
 }
@@ -184,7 +186,13 @@ pub fn frame_state(frame: usize) -> FrameState {
 #[must_use]
 pub fn count_frames(state: FrameState) -> usize {
     // SAFETY: as [`frame_state`].
-    unsafe { FRAME_STATES.iter().take(FRAME_MAP_LEN).filter(|s| **s == state).count() }
+    unsafe {
+        (*FRAME_STATES.get())
+            .iter()
+            .take(*FRAME_MAP_LEN.get())
+            .filter(|s| **s == state)
+            .count()
+    }
 }
 
 /// Convert a physical address to a frame number.

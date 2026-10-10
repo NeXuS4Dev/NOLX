@@ -92,14 +92,14 @@ pub const fn to_posix_priority(policy: Policy, level: u8) -> Option<i32> {
     if !policy.is_realtime() || level < REALTIME_BASE {
         return None;
     }
-    Some(i32::from(level - REALTIME_BASE))
+    Some((level - REALTIME_BASE) as i32)
 }
 
 /// The POSIX-visible priority range for a policy.
 #[must_use]
 pub const fn priority_range(policy: Policy) -> (i32, i32) {
     if policy.is_realtime() {
-        (0, i32::from(MAX_USER_PRIORITY - REALTIME_BASE))
+        (0, (MAX_USER_PRIORITY - REALTIME_BASE) as i32)
     } else {
         (0, 0)
     }
