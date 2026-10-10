@@ -125,7 +125,7 @@ pub fn init(madt: &Madt, destination_apic_id: u32) -> Result<(), IoApicError> {
     validate_overrides(madt)?;
 
     let mut legacy_routes = [None; LEGACY_IRQS];
-    for irq in 0..LEGACY_IRQS {
+    for (irq, route) in legacy_routes.iter_mut().enumerate() {
         let (gsi, flags, has_override) = override_for_irq(madt, irq as u8);
         if !has_override
             && madt.interrupt_overrides().iter().any(|entry| {
@@ -159,7 +159,7 @@ pub fn init(madt: &Madt, destination_apic_id: u32) -> Result<(), IoApicError> {
         if level_triggered {
             low_value |= REDIRECTION_LEVEL_TRIGGERED;
         }
-        legacy_routes[irq] = Some(LegacyRoute {
+        *route = Some(LegacyRoute {
             base: ioapic.base,
             low_register,
             low_value,

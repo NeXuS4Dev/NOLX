@@ -236,7 +236,6 @@ pub fn mask_legacy_irq(irq: u8) {
 }
 
 /// Calibrate APIC and (when invariant) TSC rates against the HPET main counter.
-#[must_use]
 pub fn calibrate_timers(
     hpet_frequency: u64,
     features: CpuFeatures,
