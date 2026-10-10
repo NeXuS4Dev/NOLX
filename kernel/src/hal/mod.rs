@@ -171,16 +171,24 @@ pub unsafe fn cpuid(leaf: u32) -> (u32, u32, u32, u32) {
     let ebx: u32;
     let ecx: u32;
     let edx: u32;
-    // SAFETY: CPUID writes only the four named registers. `ebx` is explicitly captured
-    // because the ABI reserves it as the PIC base register in position-independent code.
+    // SAFETY: CPUID writes only the four named registers. LLVM reserves `rbx` on x86-64 and
+    // refuses it as an inline-asm operand, so CPUID's output there cannot be captured with a
+    // register constraint. It has to be moved out by hand: save the callee-saved register,
+    // run the instruction, copy its `ebx` into a scratch register the compiler allocated,
+    // restore. The push and pop are balanced, so the stack is where the ABI expects on both
+    // sides -- which is also why this block cannot be marked `nostack`, and why `nomem` is
+    // wrong too, since the push writes memory.
     unsafe {
         core::arch::asm!(
+            "push rbx",
             "cpuid",
+            "mov {ebx:e}, ebx",
+            "pop rbx",
+            ebx = out(reg) ebx,
             inout("eax") leaf => eax,
-            out("ebx") ebx,
             inout("ecx") 0u32 => ecx,
             out("edx") edx,
-            options(nomem, nostack),
+            options(preserves_flags),
         )
     };
     (eax, ebx, ecx, edx)

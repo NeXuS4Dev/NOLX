@@ -92,11 +92,13 @@ jobs:
           [ -n "${PR_NUMBER:-}" ] || exit 0
           BODY=$(mktemp)
           {
-            echo "### host test totals for `${GITHUB_SHA:0:8}`"
+            echo "### host test totals for \`${{ github.sha }}\`"
             echo
             echo '```'
-            grep -E "^(test result:|running [0-9]+ test| *Running |error|warning: unused)" /tmp/job.log \
-              || echo "(no test output captured)"
+            echo "--- per-target results ---"
+            grep -E "^(     Running|   Doc-tests|test result:)" /tmp/job.log || echo "(none)"
+            echo "--- tail of the log ---"
+            tail -40 /tmp/job.log
             echo '```'
           } > "$BODY"
           gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$BODY"
