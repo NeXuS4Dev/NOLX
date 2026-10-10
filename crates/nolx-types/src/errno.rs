@@ -209,7 +209,10 @@ pub const TABLE: &[(i32, &str)] = &[
     (codes::EACCES, "Permission denied"),
     (codes::EADDRINUSE, "Address already in use"),
     (codes::EADDRNOTAVAIL, "Cannot assign requested address"),
-    (codes::EAFNOSUPPORT, "Address family not supported by protocol"),
+    (
+        codes::EAFNOSUPPORT,
+        "Address family not supported by protocol",
+    ),
     (codes::EAGAIN, "Resource temporarily unavailable"),
     (codes::EALREADY, "Operation already in progress"),
     (codes::EBADF, "Bad file descriptor"),
@@ -220,7 +223,10 @@ pub const TABLE: &[(i32, &str)] = &[
     (codes::EDEADLK, "Resource deadlock avoided"),
     (codes::EDQUOT, "Disk quota exceeded"),
     (codes::EIDRM, "Identifier removed"),
-    (codes::EILSEQ, "Invalid or incomplete multibyte or wide character"),
+    (
+        codes::EILSEQ,
+        "Invalid or incomplete multibyte or wide character",
+    ),
     (codes::EINPROGRESS, "Operation now in progress"),
     (codes::EINTR, "Interrupted system call"),
     (codes::EINVAL, "Invalid argument"),
@@ -259,7 +265,10 @@ pub const TABLE: &[(i32, &str)] = &[
     (codes::ENOTSUP, "Operation not supported"),
     (codes::ENOTTY, "Inappropriate ioctl for device"),
     (codes::ENXIO, "No such device or address"),
-    (codes::EOPNOTSUPP, "Operation not supported on transport endpoint"),
+    (
+        codes::EOPNOTSUPP,
+        "Operation not supported on transport endpoint",
+    ),
     (codes::EOVERFLOW, "Value too large for defined data type"),
     (codes::EOWNERDEAD, "Owner died"),
     (codes::EPERM, "Operation not permitted"),
@@ -295,8 +304,8 @@ mod tests {
     #[test]
     fn every_code_has_a_message() {
         for code in 1..=codes::ELAST {
-            let msg = message(code)
-                .unwrap_or_else(|| panic!("errno {code} has no strerror message"));
+            let msg =
+                message(code).unwrap_or_else(|| panic!("errno {code} has no strerror message"));
             assert!(!msg.is_empty(), "errno {code} has an empty message");
         }
     }
@@ -330,10 +339,24 @@ mod tests {
         // code from 1 to ELAST. If either changes without the other, `is_valid` starts
         // lying: it would accept an errno no code defines, or reject a real one.
         let highest = TABLE.iter().map(|(code, _)| *code).max().unwrap();
-        assert_eq!(codes::ELAST, highest, "ELAST must equal the highest code in TABLE");
-        assert_eq!(TABLE.len(), codes::ELAST as usize, "TABLE must have exactly one row per code");
-        assert!(TABLE.windows(2).all(|w| w[0].0 < w[1].0), "TABLE must be in numeric order");
-        assert!(TABLE.windows(2).all(|w| w[0].0 + 1 == w[1].0), "codes must be contiguous");
+        assert_eq!(
+            codes::ELAST,
+            highest,
+            "ELAST must equal the highest code in TABLE"
+        );
+        assert_eq!(
+            TABLE.len(),
+            codes::ELAST as usize,
+            "TABLE must have exactly one row per code"
+        );
+        assert!(
+            TABLE.windows(2).all(|w| w[0].0 < w[1].0),
+            "TABLE must be in numeric order"
+        );
+        assert!(
+            TABLE.windows(2).all(|w| w[0].0 + 1 == w[1].0),
+            "codes must be contiguous"
+        );
     }
 
     #[test]

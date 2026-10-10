@@ -851,14 +851,20 @@ mod tests {
     #[test]
     fn highest_covers_the_whole_table() {
         let max = TABLE.iter().map(|(n, _)| *n).max().unwrap();
-        assert_eq!(max, HIGHEST, "HIGHEST must equal the largest assigned number");
+        assert_eq!(
+            max, HIGHEST,
+            "HIGHEST must equal the largest assigned number"
+        );
     }
 
     #[test]
     fn numbers_land_in_their_documented_subsystem_range() {
         for (number, name) in TABLE {
             let sub = subsystem(*number);
-            assert_ne!(sub, "unassigned", "{name} ({number}) is outside every range");
+            assert_ne!(
+                sub, "unassigned",
+                "{name} ({number}) is outside every range"
+            );
         }
         assert_eq!(subsystem(SYS_READ), "file");
         assert_eq!(subsystem(SYS_KILL), "signal");
@@ -884,9 +890,27 @@ mod tests {
         // The calls a shell needs to start. If one of these is missing, nothing else in
         // the milestone list matters.
         for name in [
-            "fork", "execve", "waitid", "exit", "open", "close", "read", "write", "lseek",
-            "dup2", "getpid", "getuid", "kill", "sigaction", "sigprocmask", "mmap",
-            "ioctl", "fcntl", "getdents", "pipe", "select",
+            "fork",
+            "execve",
+            "waitid",
+            "exit",
+            "open",
+            "close",
+            "read",
+            "write",
+            "lseek",
+            "dup2",
+            "getpid",
+            "getuid",
+            "kill",
+            "sigaction",
+            "sigprocmask",
+            "mmap",
+            "ioctl",
+            "fcntl",
+            "getdents",
+            "pipe",
+            "select",
         ] {
             assert!(number_of(name).is_some(), "missing the {name} syscall");
         }

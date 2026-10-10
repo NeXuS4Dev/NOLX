@@ -77,21 +77,81 @@ static TYPE_COUNT: SyncCell<usize> = SyncCell::new(0);
 /// index matters because crash dumps print the index, and a dump from one build should be
 /// readable with another's symbol table.
 static BUILTIN_TYPES: &[ObjectType] = &[
-    ObjectType { name: "Directory", delete: None, validate_access: None },
-    ObjectType { name: "SymbolicLink", delete: None, validate_access: None },
-    ObjectType { name: "File", delete: None, validate_access: None },
-    ObjectType { name: "Device", delete: None, validate_access: None },
-    ObjectType { name: "Driver", delete: None, validate_access: None },
-    ObjectType { name: "Process", delete: None, validate_access: None },
-    ObjectType { name: "Thread", delete: None, validate_access: None },
-    ObjectType { name: "Event", delete: None, validate_access: None },
-    ObjectType { name: "Mutex", delete: None, validate_access: None },
-    ObjectType { name: "Semaphore", delete: None, validate_access: None },
-    ObjectType { name: "Timer", delete: None, validate_access: None },
-    ObjectType { name: "Port", delete: None, validate_access: None },
-    ObjectType { name: "Section", delete: None, validate_access: None },
-    ObjectType { name: "Key", delete: None, validate_access: None },
-    ObjectType { name: "Token", delete: None, validate_access: None },
+    ObjectType {
+        name: "Directory",
+        delete: None,
+        validate_access: None,
+    },
+    ObjectType {
+        name: "SymbolicLink",
+        delete: None,
+        validate_access: None,
+    },
+    ObjectType {
+        name: "File",
+        delete: None,
+        validate_access: None,
+    },
+    ObjectType {
+        name: "Device",
+        delete: None,
+        validate_access: None,
+    },
+    ObjectType {
+        name: "Driver",
+        delete: None,
+        validate_access: None,
+    },
+    ObjectType {
+        name: "Process",
+        delete: None,
+        validate_access: None,
+    },
+    ObjectType {
+        name: "Thread",
+        delete: None,
+        validate_access: None,
+    },
+    ObjectType {
+        name: "Event",
+        delete: None,
+        validate_access: None,
+    },
+    ObjectType {
+        name: "Mutex",
+        delete: None,
+        validate_access: None,
+    },
+    ObjectType {
+        name: "Semaphore",
+        delete: None,
+        validate_access: None,
+    },
+    ObjectType {
+        name: "Timer",
+        delete: None,
+        validate_access: None,
+    },
+    ObjectType {
+        name: "Port",
+        delete: None,
+        validate_access: None,
+    },
+    ObjectType {
+        name: "Section",
+        delete: None,
+        validate_access: None,
+    },
+    ObjectType {
+        name: "Key",
+        delete: None,
+        validate_access: None,
+    },
+    ObjectType {
+        name: "Token",
+        delete: None,
+        validate_access: None,
+    },
 ];
 
 /// Register the built-in object types.
@@ -142,7 +202,10 @@ pub fn type_by_name(name: &str) -> Option<(u16, &'static ObjectType)> {
             .iter()
             .take(*TYPE_COUNT.get())
             .enumerate()
-            .find_map(|(i, slot)| slot.map(|ty| (i as u16, ty)).filter(|(_, ty)| ty.name == name))
+            .find_map(|(i, slot)| {
+                slot.map(|ty| (i as u16, ty))
+                    .filter(|(_, ty)| ty.name == name)
+            })
     }
 }
 
@@ -174,7 +237,10 @@ impl ObjectHeader {
     /// thread that observes the count reach zero and runs the delete procedure.
     pub fn release(&self) -> bool {
         let previous = self.pointer_count.fetch_sub(1, Ordering::Release);
-        debug_assert!(previous > 0, "released an object more times than it was retained");
+        debug_assert!(
+            previous > 0,
+            "released an object more times than it was retained"
+        );
         if previous == 1 {
             // Make sure we see every write that preceded the final release elsewhere.
             core::sync::atomic::fence(Ordering::Acquire);

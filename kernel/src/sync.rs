@@ -29,7 +29,9 @@ impl<T> SyncCell<T> {
     /// A cell holding `value`, usable in a `static` initialiser.
     #[must_use]
     pub const fn new(value: T) -> Self {
-        Self { inner: UnsafeCell::new(value) }
+        Self {
+            inner: UnsafeCell::new(value),
+        }
     }
 
     /// A raw pointer to the value.

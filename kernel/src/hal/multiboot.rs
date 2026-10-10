@@ -205,7 +205,11 @@ impl MemoryMap {
     #[must_use]
     pub const fn empty() -> Self {
         Self {
-            regions: [MemoryRegion { base: 0, length: 0, kind: 0 }; MAX_REGIONS],
+            regions: [MemoryRegion {
+                base: 0,
+                length: 0,
+                kind: 0,
+            }; MAX_REGIONS],
             count: 0,
             dropped: 0,
         }
@@ -237,7 +241,11 @@ impl MemoryMap {
                 let kind = read_u32(p.add(20));
                 (
                     size,
-                    MemoryRegion { base: lo | (hi << 32), length: len_lo | (len_hi << 32), kind },
+                    MemoryRegion {
+                        base: lo | (hi << 32),
+                        length: len_lo | (len_hi << 32),
+                        kind,
+                    },
                 )
             };
 
@@ -278,13 +286,22 @@ impl MemoryMap {
     /// Total bytes of usable RAM.
     #[must_use]
     pub fn usable_bytes(&self) -> u64 {
-        self.regions().iter().filter(|r| r.is_usable()).map(|r| r.length).sum()
+        self.regions()
+            .iter()
+            .filter(|r| r.is_usable())
+            .map(|r| r.length)
+            .sum()
     }
 
     /// Highest usable physical address, which bounds the frame allocator.
     #[must_use]
     pub fn highest_usable(&self) -> u64 {
-        self.regions().iter().filter(|r| r.is_usable()).map(MemoryRegion::end).max().unwrap_or(0)
+        self.regions()
+            .iter()
+            .filter(|r| r.is_usable())
+            .map(MemoryRegion::end)
+            .max()
+            .unwrap_or(0)
     }
 }
 

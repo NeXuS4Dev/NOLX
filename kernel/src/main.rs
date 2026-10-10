@@ -89,7 +89,10 @@ extern "C" fn nolx_kernel_main(mb_info: *const u8, magic: u32) -> ! {
     psx::init(&mut console);
     io::init(&mut console);
 
-    let _ = writeln!(console, "NOLX: init sequence complete, halting the boot processor");
+    let _ = writeln!(
+        console,
+        "NOLX: init sequence complete, halting the boot processor"
+    );
 
     // There is no scheduler to hand off to yet (M5). Halt with interrupts enabled so an
     // NMI or a debugger can still get in.

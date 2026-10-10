@@ -66,45 +66,45 @@ pub const DREC_TYPE_SIBLING_MAP: u32 = 0xB;
 pub const DREC_TYPE_FILE_INFO: u32 = 0xC;
 
 // ------------------------------------------------------------------ object header flags
-pub const OBJ_FLAG_NO_CKSUM: u32 = 0x1;  // object body is not covered by the checksum (unused in v1)
-pub const OBJ_FLAG_ENCRYPTED: u32 = 0x2;  // object body is encrypted at rest
-pub const OBJ_FLAG_COMPRESSED: u32 = 0x4;  // object body is compressed
-pub const OBJ_FLAG_EPHEMERAL: u32 = 0x8;  // object changes during mount; pinned by the checkpoint map
+pub const OBJ_FLAG_NO_CKSUM: u32 = 0x1; // object body is not covered by the checksum (unused in v1)
+pub const OBJ_FLAG_ENCRYPTED: u32 = 0x2; // object body is encrypted at rest
+pub const OBJ_FLAG_COMPRESSED: u32 = 0x4; // object body is compressed
+pub const OBJ_FLAG_EPHEMERAL: u32 = 0x8; // object changes during mount; pinned by the checkpoint map
 
 // ------------------------------------------------------------------ object map value flags
-pub const OMAP_VAL_FLAG_SAVED: u32 = 0x1;  // reachable from a snapshot; do not overwrite
-pub const OMAP_VAL_FLAG_MISSING: u32 = 0x2;  // known absent; a lookup must fail rather than fall back
-pub const OMAP_VAL_FLAG_NO_SNAPSHOT: u32 = 0x4;  // never visible in a point-in-time view
+pub const OMAP_VAL_FLAG_SAVED: u32 = 0x1; // reachable from a snapshot; do not overwrite
+pub const OMAP_VAL_FLAG_MISSING: u32 = 0x2; // known absent; a lookup must fail rather than fall back
+pub const OMAP_VAL_FLAG_NO_SNAPSHOT: u32 = 0x4; // never visible in a point-in-time view
 
 // ------------------------------------------------------------------ B-tree node flags
-pub const BTNODE_ROOT: u32 = 0x1;  // this node is the root of its tree
-pub const BTNODE_LEAF: u32 = 0x2;  // this node holds values rather than child pointers
-pub const BTNODE_FIXED_KV_SIZE: u32 = 0x4;  // all keys and all values have one fixed size
-pub const BTNODE_NO_FREE: u32 = 0x8;  // the node free lists are empty; do not scan them
-pub const BTNODE_INDEX: u32 = 0x10;  // middle node in an index tree
+pub const BTNODE_ROOT: u32 = 0x1; // this node is the root of its tree
+pub const BTNODE_LEAF: u32 = 0x2; // this node holds values rather than child pointers
+pub const BTNODE_FIXED_KV_SIZE: u32 = 0x4; // all keys and all values have one fixed size
+pub const BTNODE_NO_FREE: u32 = 0x8; // the node free lists are empty; do not scan them
+pub const BTNODE_INDEX: u32 = 0x10; // middle node in an index tree
 
 // ------------------------------------------------------------------ container feature bits: required
-pub const NX_FEATURE_REQ_V1_BASE: u32 = 0x1;  // the version 1 base format
+pub const NX_FEATURE_REQ_V1_BASE: u32 = 0x1; // the version 1 base format
 
 // ------------------------------------------------------------------ container feature bits: read-only compatible
-pub const NX_FEATURE_RO_COMPAT_SEALED_VOLUME: u32 = 0x1;  // verified read-only system volume
+pub const NX_FEATURE_RO_COMPAT_SEALED_VOLUME: u32 = 0x1; // verified read-only system volume
 
 // ------------------------------------------------------------------ container feature bits: supported
-pub const NX_FEATURE_SUP_CASEFOLD: u32 = 0x1;  // case-insensitive, case-preserving names
-pub const NX_FEATURE_SUP_NORMALIZATION_INSENSITIVE: u32 = 0x2;  // names compared without Unicode normalization
-pub const NX_FEATURE_SUP_ENCRYPTION: u32 = 0x4;  // per-file encryption with a volume keybag
-pub const NX_FEATURE_SUP_FEXT: u32 = 0x8;  // fast-dev extent tree present
-pub const NX_FEATURE_SUP_SNAPSHOTS: u32 = 0x10;  // snapshot metadata tree present
-pub const NX_FEATURE_SUP_INTEGRITY_META: u32 = 0x20;  // Merkle integrity metadata present
+pub const NX_FEATURE_SUP_CASEFOLD: u32 = 0x1; // case-insensitive, case-preserving names
+pub const NX_FEATURE_SUP_NORMALIZATION_INSENSITIVE: u32 = 0x2; // names compared without Unicode normalization
+pub const NX_FEATURE_SUP_ENCRYPTION: u32 = 0x4; // per-file encryption with a volume keybag
+pub const NX_FEATURE_SUP_FEXT: u32 = 0x8; // fast-dev extent tree present
+pub const NX_FEATURE_SUP_SNAPSHOTS: u32 = 0x10; // snapshot metadata tree present
+pub const NX_FEATURE_SUP_INTEGRITY_META: u32 = 0x20; // Merkle integrity metadata present
 
 // ------------------------------------------------------------------ inode internal flags
-pub const INODE_FLAG_SUID_SAVED: u32 = 0x1;  // setuid bit was cleared on write by a non-owner
-pub const INODE_FLAG_SGID_SAVED: u32 = 0x2;  // setgid bit was cleared on write by a non-owner
-pub const INODE_FLAG_CLONED: u32 = 0x4;  // file has one or more clones
-pub const INODE_FLAG_SPARSE: u32 = 0x8;  // data stream contains holes
-pub const INODE_FLAG_COMPRESSED: u32 = 0x10;  // data stream is compressed
-pub const INODE_FLAG_HIDDEN: u32 = 0x20;  // hidden from directory listings
-pub const INODE_FLAG_FAST_DOC_ID: u32 = 0x40;  // document id is allocated
+pub const INODE_FLAG_SUID_SAVED: u32 = 0x1; // setuid bit was cleared on write by a non-owner
+pub const INODE_FLAG_SGID_SAVED: u32 = 0x2; // setgid bit was cleared on write by a non-owner
+pub const INODE_FLAG_CLONED: u32 = 0x4; // file has one or more clones
+pub const INODE_FLAG_SPARSE: u32 = 0x8; // data stream contains holes
+pub const INODE_FLAG_COMPRESSED: u32 = 0x10; // data stream is compressed
+pub const INODE_FLAG_HIDDEN: u32 = 0x20; // hidden from directory listings
+pub const INODE_FLAG_FAST_DOC_ID: u32 = 0x40; // document id is allocated
 
 // ------------------------------------------------------------------ limits
 /// fixed size of fs_oid[] in the container superblock
@@ -1169,4 +1169,3 @@ pub const SNAP_METADATA_VAL_DISK_SIZE: usize = 84;
 // ------------------------------------------------------------------ derived geometry
 /// Checkpoint-map entries that fit in one block.
 pub const CHECKPOINT_MAP_CAPACITY: usize = 126;
-

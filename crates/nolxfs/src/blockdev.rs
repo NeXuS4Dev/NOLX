@@ -78,7 +78,10 @@ pub trait BlockDevice {
     fn read_object<T: Pod>(&self, index: u64) -> Result<T, DevError> {
         let size = self.block_size();
         if core::mem::size_of::<T>() > size {
-            return Err(DevError::BadBufferLen { got: size, want: core::mem::size_of::<T>() });
+            return Err(DevError::BadBufferLen {
+                got: size,
+                want: core::mem::size_of::<T>(),
+            });
         }
         let mut buf = vec![0u8; size];
         self.read_block(index, &mut buf)?;
@@ -101,7 +104,10 @@ pub trait BlockDevice {
     fn write_object<T: Pod>(&mut self, index: u64, value: &T) -> Result<(), DevError> {
         let size = self.block_size();
         if core::mem::size_of::<T>() > size {
-            return Err(DevError::BadBufferLen { got: size, want: core::mem::size_of::<T>() });
+            return Err(DevError::BadBufferLen {
+                got: size,
+                want: core::mem::size_of::<T>(),
+            });
         }
         let mut buf = vec![0u8; size];
         buf[..core::mem::size_of::<T>()].copy_from_slice(value.as_bytes());
@@ -132,7 +138,10 @@ impl MemBlockDevice {
     /// is.
     #[must_use]
     pub fn new(block_size: usize, block_count: u64) -> Self {
-        assert!(block_size > 0 && block_size % 512 == 0, "block_size must be a multiple of 512");
+        assert!(
+            block_size > 0 && block_size % 512 == 0,
+            "block_size must be a multiple of 512"
+        );
         let total = block_size
             .checked_mul(block_count as usize)
             .expect("device size overflowed usize");
@@ -152,9 +161,18 @@ impl MemBlockDevice {
     /// Panics if `data.len()` is not a whole number of `block_size` blocks.
     #[must_use]
     pub fn from_contents(block_size: usize, data: Vec<u8>) -> Self {
-        assert!(block_size > 0 && data.len() % block_size == 0, "data is not block aligned");
+        assert!(
+            block_size > 0 && data.len() % block_size == 0,
+            "data is not block aligned"
+        );
         let writes = 0;
-        Self { data, block_size, writes, fail_from_write: None, read_only: false }
+        Self {
+            data,
+            block_size,
+            writes,
+            fail_from_write: None,
+            read_only: false,
+        }
     }
 
     /// Make every write from the `n`th write onward fail with [`DevError::Io`].
@@ -199,7 +217,10 @@ impl BlockDevice for MemBlockDevice {
 
     fn read_block(&self, index: u64, buf: &mut [u8]) -> Result<(), DevError> {
         if buf.len() != self.block_size {
-            return Err(DevError::BadBufferLen { got: buf.len(), want: self.block_size });
+            return Err(DevError::BadBufferLen {
+                got: buf.len(),
+                want: self.block_size,
+            });
         }
         let start = (index as usize)
             .checked_mul(self.block_size)
@@ -214,7 +235,10 @@ impl BlockDevice for MemBlockDevice {
 
     fn write_block(&mut self, index: u64, buf: &[u8]) -> Result<(), DevError> {
         if buf.len() != self.block_size {
-            return Err(DevError::BadBufferLen { got: buf.len(), want: self.block_size });
+            return Err(DevError::BadBufferLen {
+                got: buf.len(),
+                want: self.block_size,
+            });
         }
         if self.read_only {
             return Err(DevError::ReadOnly);
@@ -271,8 +295,14 @@ mod tests {
     fn out_of_range_is_an_error_not_a_panic() {
         let mut dev = MemBlockDevice::new(4096, 4);
         let mut buf = vec![0u8; 4096];
-        assert_eq!(dev.read_block(4, &mut buf), Err(DevError::OutOfRange { block: 4 }));
-        assert_eq!(dev.write_block(u64::MAX, &buf), Err(DevError::OutOfRange { block: u64::MAX }));
+        assert_eq!(
+            dev.read_block(4, &mut buf),
+            Err(DevError::OutOfRange { block: 4 })
+        );
+        assert_eq!(
+            dev.write_block(u64::MAX, &buf),
+            Err(DevError::OutOfRange { block: u64::MAX })
+        );
     }
 
     #[test]
@@ -281,7 +311,10 @@ mod tests {
         let mut buf = vec![0u8; 512];
         assert_eq!(
             dev.read_block(0, &mut buf),
-            Err(DevError::BadBufferLen { got: 512, want: 4096 })
+            Err(DevError::BadBufferLen {
+                got: 512,
+                want: 4096
+            })
         );
     }
 
@@ -335,6 +368,12 @@ mod tests {
         let dev = MemBlockDevice::new(512, 8);
         let sb = on_disk_gen::nolx_nx_superblock_t::zeroed();
         let err = dev.write_object(0, &sb).unwrap_err();
-        assert!(matches!(err, DevError::BadBufferLen { got: 512, want: 4096 }));
+        assert!(matches!(
+            err,
+            DevError::BadBufferLen {
+                got: 512,
+                want: 4096
+            }
+        ));
     }
 }

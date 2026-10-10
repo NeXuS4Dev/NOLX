@@ -372,15 +372,25 @@ mod tests {
     #[test]
     fn the_fourth_argument_is_r10_not_rcx() {
         // Documented in `syscall4`'s doc comment; asserted here so the doc cannot drift.
-        let frame = TrapFrame { r10: 99, rcx: 12345, ..TrapFrame::default() };
+        let frame = TrapFrame {
+            r10: 99,
+            rcx: 12345,
+            ..TrapFrame::default()
+        };
         assert_eq!(frame.args()[3], 99);
         assert!(!frame.args().contains(&12345));
     }
 
     #[test]
     fn user_mode_is_detected_from_the_saved_cs() {
-        let user = TrapFrame { cs: 0x18 | 3, ..TrapFrame::default() };
-        let kernel = TrapFrame { cs: 0x08, ..TrapFrame::default() };
+        let user = TrapFrame {
+            cs: 0x18 | 3,
+            ..TrapFrame::default()
+        };
+        let kernel = TrapFrame {
+            cs: 0x08,
+            ..TrapFrame::default()
+        };
         assert!(user.from_user_mode());
         assert!(!kernel.from_user_mode());
     }

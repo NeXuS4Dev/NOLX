@@ -201,7 +201,10 @@ impl<'a> ObjRef<'a> {
             return Err(FsError::BadChecksum { oid: header.oid });
         }
         if header.r#type != expected_type {
-            return Err(FsError::BadType { found: header.r#type, expected: expected_type });
+            return Err(FsError::BadType {
+                found: header.r#type,
+                expected: expected_type,
+            });
         }
 
         Ok(Self {
@@ -242,8 +245,9 @@ pub fn seal(object: &mut [u8], header: ObjHeader) -> Result<()> {
     let mut raw = header.raw();
     raw.checksum = 0;
     object[..gen::nolx_obj_phys_t::DISK_SIZE].copy_from_slice(raw.as_bytes());
-    let sum = fletcher::compute(object)
-        .ok_or(FsError::InvalidField("object length is not a multiple of four"))?;
+    let sum = fletcher::compute(object).ok_or(FsError::InvalidField(
+        "object length is not a multiple of four",
+    ))?;
     object[..8].copy_from_slice(&sum.to_le_bytes());
     Ok(())
 }
@@ -325,7 +329,10 @@ pub const fn is_valid_block_size(block_size: u32) -> bool {
 /// than attempt a repair; `fsck.nolxfs` is the repair tool.
 pub fn validate_container(sb: &gen::nolx_nx_superblock_t) -> Result<()> {
     if sb.magic != gen::MAGIC_CONTAINER_SUPERBLOCK {
-        return Err(FsError::BadMagic { found: sb.magic, expected: gen::MAGIC_CONTAINER_SUPERBLOCK });
+        return Err(FsError::BadMagic {
+            found: sb.magic,
+            expected: gen::MAGIC_CONTAINER_SUPERBLOCK,
+        });
     }
     if !is_valid_block_size(sb.block_size) {
         return Err(FsError::InvalidField("block_size"));
@@ -334,7 +341,9 @@ pub fn validate_container(sb: &gen::nolx_nx_superblock_t) -> Result<()> {
         return Err(FsError::InvalidField("block_count is zero"));
     }
     if sb.fs_oid_count as u64 > gen::MAX_VOLUMES_PER_CONTAINER {
-        return Err(FsError::InvalidField("fs_oid_count exceeds the container limit"));
+        return Err(FsError::InvalidField(
+            "fs_oid_count exceeds the container limit",
+        ));
     }
     let unsupported = sb.features_required & !supported_features();
     if unsupported != 0 {
@@ -363,7 +372,10 @@ pub fn validate_container(sb: &gen::nolx_nx_superblock_t) -> Result<()> {
 /// Returns the first problem found.
 pub fn validate_volume(sb: &gen::nolx_fs_superblock_t) -> Result<()> {
     if sb.magic != gen::MAGIC_VOLUME_SUPERBLOCK {
-        return Err(FsError::BadMagic { found: sb.magic, expected: gen::MAGIC_VOLUME_SUPERBLOCK });
+        return Err(FsError::BadMagic {
+            found: sb.magic,
+            expected: gen::MAGIC_VOLUME_SUPERBLOCK,
+        });
     }
     if !is_valid_block_size(sb.block_size) {
         return Err(FsError::InvalidField("block_size"));
@@ -373,7 +385,9 @@ pub fn validate_volume(sb: &gen::nolx_fs_superblock_t) -> Result<()> {
         return Err(FsError::UnsupportedFeature(unsupported));
     }
     if sb.root_tree_oid == 0 || sb.omap_oid == 0 {
-        return Err(FsError::InvalidField("the volume has no fs-tree or object map"));
+        return Err(FsError::InvalidField(
+            "the volume has no fs-tree or object map",
+        ));
     }
     let name = &sb.volume_name[..];
     let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
@@ -463,7 +477,10 @@ mod tests {
         let packed = pack_len_and_flags(1 << 40, 0x02);
         assert_eq!(extent_len(packed), 1 << 40);
         assert_eq!(extent_flags(packed), 0x02);
-        assert_eq!(extent_len(pack_len_and_flags(gen::MAX_EXTENT_LEN, 0)), gen::MAX_EXTENT_LEN);
+        assert_eq!(
+            extent_len(pack_len_and_flags(gen::MAX_EXTENT_LEN, 0)),
+            gen::MAX_EXTENT_LEN
+        );
     }
 
     #[test]
@@ -506,7 +523,10 @@ mod tests {
 
         let mut sb = good_container();
         sb.block_size = 4000;
-        assert_eq!(validate_container(&sb), Err(FsError::InvalidField("block_size")));
+        assert_eq!(
+            validate_container(&sb),
+            Err(FsError::InvalidField("block_size"))
+        );
 
         let mut sb = good_container();
         sb.block_count = 0;
@@ -517,7 +537,10 @@ mod tests {
 
         let mut sb = good_container();
         sb.fs_oid_count = 9;
-        assert!(matches!(validate_container(&sb), Err(FsError::InvalidField(_))));
+        assert!(matches!(
+            validate_container(&sb),
+            Err(FsError::InvalidField(_))
+        ));
 
         let mut sb = good_container();
         sb.features_required = 1 << 40;
@@ -528,7 +551,10 @@ mod tests {
 
         let mut sb = good_container();
         sb.xp_desc_base = 999_999;
-        assert!(matches!(validate_container(&sb), Err(FsError::BlockOutOfRange(_))));
+        assert!(matches!(
+            validate_container(&sb),
+            Err(FsError::BlockOutOfRange(_))
+        ));
     }
 
     fn good_volume() -> gen::nolx_fs_superblock_t {
@@ -553,7 +579,10 @@ mod tests {
     fn volume_validation_rejects_a_missing_tree() {
         let mut sb = good_volume();
         sb.root_tree_oid = 0;
-        assert!(matches!(validate_volume(&sb), Err(FsError::InvalidField(_))));
+        assert!(matches!(
+            validate_volume(&sb),
+            Err(FsError::InvalidField(_))
+        ));
     }
 
     #[test]
@@ -562,7 +591,10 @@ mod tests {
         sb.volume_name[0] = 0xFF;
         sb.volume_name[1] = 0xFE;
         sb.volume_name[2] = 0;
-        assert!(matches!(validate_volume(&sb), Err(FsError::InvalidField(_))));
+        assert!(matches!(
+            validate_volume(&sb),
+            Err(FsError::InvalidField(_))
+        ));
     }
 
     #[test]

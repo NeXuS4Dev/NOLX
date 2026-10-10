@@ -39,11 +39,11 @@
 //! ```
 
 use alloc::string::String;
-use alloc::vec;
 use alloc::string::ToString;
+use alloc::vec;
 
-use crate::btree::{BlockAllocator, BTree, KeyKind, Node};
 use crate::blockdev::BlockDevice;
+use crate::btree::{BTree, BlockAllocator, KeyKind, Node};
 use crate::omap::ObjectMap;
 use crate::on_disk::{self, FsError, Result};
 use crate::on_disk_gen as gen;
@@ -243,7 +243,9 @@ pub fn format<D: BlockDevice>(dev: &mut D, opts: &FormatOptions) -> Result<Layou
     }
     let name_bytes = opts.volume_name.as_bytes();
     if name_bytes.len() > gen::MAX_VOLUME_NAME_LEN as usize {
-        return Err(FsError::InvalidField("volume name exceeds MAX_VOLUME_NAME_LEN"));
+        return Err(FsError::InvalidField(
+            "volume name exceeds MAX_VOLUME_NAME_LEN",
+        ));
     }
     if name_bytes.iter().any(|&b| b == 0) {
         return Err(FsError::InvalidField("volume name contains a NUL"));
@@ -263,8 +265,16 @@ pub fn format<D: BlockDevice>(dev: &mut D, opts: &FormatOptions) -> Result<Layou
     write_empty_tree(dev, layout.container_omap_tree, gen::SUB_OMAP as u16)?;
     write_empty_tree(dev, layout.volume_omap_tree, gen::SUB_OMAP as u16)?;
     write_empty_tree(dev, layout.fs_tree_root, gen::SUB_FSTREE as u16)?;
-    write_empty_tree(dev, layout.extentref_tree_root, gen::SUB_EXTENT_REF_TREE as u16)?;
-    write_empty_tree(dev, layout.snap_meta_tree_root, gen::SUB_SNAP_META_TREE as u16)?;
+    write_empty_tree(
+        dev,
+        layout.extentref_tree_root,
+        gen::SUB_EXTENT_REF_TREE as u16,
+    )?;
+    write_empty_tree(
+        dev,
+        layout.snap_meta_tree_root,
+        gen::SUB_SNAP_META_TREE as u16,
+    )?;
 
     // ---- the root inode, so the fs-tree is never empty ---------------------
     let mut inode = gen::nolx_inode_t::zeroed();
@@ -276,7 +286,10 @@ pub fn format<D: BlockDevice>(dev: &mut D, opts: &FormatOptions) -> Result<Layou
     let inode_bytes = inode.as_bytes();
 
     {
-        let mut alloc = BumpAllocator { next: layout.first_data_block, end: block_count };
+        let mut alloc = BumpAllocator {
+            next: layout.first_data_block,
+            end: block_count,
+        };
         let mut fs_tree = BTree::new(
             dev,
             &mut alloc,
@@ -291,7 +304,10 @@ pub fn format<D: BlockDevice>(dev: &mut D, opts: &FormatOptions) -> Result<Layou
 
     // ---- volume object map: fs-tree root and friends -----------------------
     {
-        let mut alloc = BumpAllocator { next: layout.first_data_block, end: block_count };
+        let mut alloc = BumpAllocator {
+            next: layout.first_data_block,
+            end: block_count,
+        };
         let mut vomap = ObjectMap::open(dev, &mut alloc, layout.volume_omap_tree, 1);
         vomap.set(oid::FS_TREE, 1, layout.fs_tree_root, 0)?;
         vomap.set(oid::EXTENT_REF_TREE, 1, layout.extentref_tree_root, 0)?;
@@ -300,7 +316,10 @@ pub fn format<D: BlockDevice>(dev: &mut D, opts: &FormatOptions) -> Result<Layou
 
     // ---- container object map: the volume's virtual objects ----------------
     {
-        let mut alloc = BumpAllocator { next: layout.first_data_block, end: block_count };
+        let mut alloc = BumpAllocator {
+            next: layout.first_data_block,
+            end: block_count,
+        };
         let mut comap = ObjectMap::open(dev, &mut alloc, layout.container_omap_tree, 1);
         comap.set(oid::VOLUME_SUPERBLOCK, 1, layout.volume_sb, 0)?;
         comap.set(oid::VOLUME_OMAP, 1, layout.volume_omap, 0)?;
@@ -331,8 +350,11 @@ pub fn format<D: BlockDevice>(dev: &mut D, opts: &FormatOptions) -> Result<Layou
     vsb.magic = gen::MAGIC_VOLUME_SUPERBLOCK;
     vsb.block_size = opts.block_size;
     vsb.features_required = u64::from(gen::NX_FEATURE_REQ_V1_BASE);
-    vsb.features_supported =
-        if opts.casefold { u64::from(gen::NX_FEATURE_SUP_CASEFOLD) } else { 0 };
+    vsb.features_supported = if opts.casefold {
+        u64::from(gen::NX_FEATURE_SUP_CASEFOLD)
+    } else {
+        0
+    };
     vsb.omap_oid = oid::VOLUME_OMAP;
     vsb.root_tree_oid = oid::FS_TREE;
     vsb.extentref_tree_oid = oid::EXTENT_REF_TREE;
@@ -345,7 +367,13 @@ pub fn format<D: BlockDevice>(dev: &mut D, opts: &FormatOptions) -> Result<Layou
     vsb.snap_meta_tree_subtype = gen::SUB_SNAP_META_TREE;
     vsb.num_directories = 1;
     vsb.volume_name[..name_bytes.len()].copy_from_slice(name_bytes);
-    write_sealed(dev, layout.volume_sb, &vsb, oid::VOLUME_SUPERBLOCK, gen::OBJ_VOLUME_SUPERBLOCK)?;
+    write_sealed(
+        dev,
+        layout.volume_sb,
+        &vsb,
+        oid::VOLUME_SUPERBLOCK,
+        gen::OBJ_VOLUME_SUPERBLOCK,
+    )?;
 
     // ---- container superblock, written last as the commit point ------------
     let mut csb = gen::nolx_nx_superblock_t::zeroed();
@@ -366,7 +394,13 @@ pub fn format<D: BlockDevice>(dev: &mut D, opts: &FormatOptions) -> Result<Layou
     csb.fs_oid[0] = oid::VOLUME_SUPERBLOCK;
     csb.omap_oid = layout.container_omap;
     csb.reaper_oid = oid::REAPER;
-    write_sealed(dev, 0, &csb, oid::CONTAINER_SUPERBLOCK, gen::OBJ_CONTAINER_SUPERBLOCK)?;
+    write_sealed(
+        dev,
+        0,
+        &csb,
+        oid::CONTAINER_SUPERBLOCK,
+        gen::OBJ_CONTAINER_SUPERBLOCK,
+    )?;
 
     dev.flush()?;
     Ok(layout)
@@ -449,7 +483,9 @@ pub fn probe<D: BlockDevice>(dev: &mut D) -> Result<VolumeInfo> {
 
     let layout = plan(csb.block_size, csb.block_count)?;
     if layout.xp_desc_base != csb.xp_desc_base || layout.xp_data_base != csb.xp_data_base {
-        return Err(FsError::InvalidField("the checkpoint rings are not where mkfs put them"));
+        return Err(FsError::InvalidField(
+            "the checkpoint rings are not where mkfs put them",
+        ));
     }
     if csb.fs_oid_count == 0 {
         return Err(FsError::InvalidField("the container holds no volumes"));
@@ -458,7 +494,10 @@ pub fn probe<D: BlockDevice>(dev: &mut D) -> Result<VolumeInfo> {
     // The container omap's physical block is pinned by the superblock.
     let comap_phys: gen::nolx_omap_phys_t = dev.read_object(csb.omap_oid)?;
     if comap_phys.magic != gen::MAGIC_OMAP {
-        return Err(FsError::BadMagic { found: comap_phys.magic, expected: gen::MAGIC_OMAP });
+        return Err(FsError::BadMagic {
+            found: comap_phys.magic,
+            expected: gen::MAGIC_OMAP,
+        });
     }
 
     let volume_sb_block = {
@@ -466,7 +505,9 @@ pub fn probe<D: BlockDevice>(dev: &mut D) -> Result<VolumeInfo> {
         let mut comap = ObjectMap::open(dev, &mut alloc, comap_phys.tree_oid, csb.next_xid);
         comap
             .resolve(csb.fs_oid[0], csb.next_xid)?
-            .ok_or(FsError::InvalidField("the container omap cannot find the volume"))?
+            .ok_or(FsError::InvalidField(
+                "the container omap cannot find the volume",
+            ))?
     };
 
     let vsb: gen::nolx_fs_superblock_t = dev.read_object(volume_sb_block)?;
@@ -477,11 +518,16 @@ pub fn probe<D: BlockDevice>(dev: &mut D) -> Result<VolumeInfo> {
         let mut comap = ObjectMap::open(dev, &mut alloc, comap_phys.tree_oid, csb.next_xid);
         comap
             .resolve(vsb.omap_oid, csb.next_xid)?
-            .ok_or(FsError::InvalidField("the container omap cannot find the volume's map"))?
+            .ok_or(FsError::InvalidField(
+                "the container omap cannot find the volume's map",
+            ))?
     };
     let vomap_phys: gen::nolx_omap_phys_t = dev.read_object(volume_omap_block)?;
     if vomap_phys.magic != gen::MAGIC_OMAP {
-        return Err(FsError::BadMagic { found: vomap_phys.magic, expected: gen::MAGIC_OMAP });
+        return Err(FsError::BadMagic {
+            found: vomap_phys.magic,
+            expected: gen::MAGIC_OMAP,
+        });
     }
 
     let name_len = vsb
@@ -493,7 +539,11 @@ pub fn probe<D: BlockDevice>(dev: &mut D) -> Result<VolumeInfo> {
         .map_err(|_| FsError::InvalidField("volume name is not valid UTF-8"))?
         .to_string();
 
-    Ok(VolumeInfo { layout, name, superblock: vsb })
+    Ok(VolumeInfo {
+        layout,
+        name,
+        superblock: vsb,
+    })
 }
 
 /// Read the volume's root inode.
@@ -538,8 +588,10 @@ pub fn read_root_inode<D: BlockDevice>(
     let bytes = fs_tree
         .search(&key)?
         .ok_or(FsError::InvalidField("the volume has no root inode"))?;
-    gen::nolx_inode_t::read_from(&bytes)
-        .ok_or(FsError::TooShort { have: bytes.len(), need: gen::nolx_inode_t::DISK_SIZE })
+    gen::nolx_inode_t::read_from(&bytes).ok_or(FsError::TooShort {
+        have: bytes.len(),
+        need: gen::nolx_inode_t::DISK_SIZE,
+    })
 }
 
 #[cfg(test)]
@@ -581,8 +633,14 @@ mod tests {
 
     #[test]
     fn plan_rejects_a_bad_block_size() {
-        assert!(matches!(plan(4000, 1000), Err(FsError::InvalidField("block_size"))));
-        assert!(matches!(plan(512, 1000), Err(FsError::InvalidField("block_size"))));
+        assert!(matches!(
+            plan(4000, 1000),
+            Err(FsError::InvalidField("block_size"))
+        ));
+        assert!(matches!(
+            plan(512, 1000),
+            Err(FsError::InvalidField("block_size"))
+        ));
     }
 
     #[test]
@@ -598,7 +656,10 @@ mod tests {
     #[test]
     fn format_then_probe_round_trips() {
         let mut dev = device();
-        let opts = FormatOptions { volume_name: String::from("testdata"), ..Default::default() };
+        let opts = FormatOptions {
+            volume_name: String::from("testdata"),
+            ..Default::default()
+        };
         let layout = format(&mut dev, &opts).unwrap();
 
         let info = probe(&mut dev).unwrap();
@@ -635,21 +696,36 @@ mod tests {
             volume_name: "n".repeat(gen::MAX_VOLUME_NAME_LEN as usize + 1),
             ..Default::default()
         };
-        assert!(matches!(format(&mut dev, &opts), Err(FsError::InvalidField(_))));
+        assert!(matches!(
+            format(&mut dev, &opts),
+            Err(FsError::InvalidField(_))
+        ));
     }
 
     #[test]
     fn format_refuses_a_nul_in_the_volume_name() {
         let mut dev = device();
-        let opts = FormatOptions { volume_name: String::from("a\0b"), ..Default::default() };
-        assert!(matches!(format(&mut dev, &opts), Err(FsError::InvalidField(_))));
+        let opts = FormatOptions {
+            volume_name: String::from("a\0b"),
+            ..Default::default()
+        };
+        assert!(matches!(
+            format(&mut dev, &opts),
+            Err(FsError::InvalidField(_))
+        ));
     }
 
     #[test]
     fn format_refuses_a_device_whose_block_size_disagrees() {
         let mut dev = MemBlockDevice::new(512, 8192);
-        let opts = FormatOptions { block_size: 4096, ..Default::default() };
-        assert!(matches!(format(&mut dev, &opts), Err(FsError::InvalidField(_))));
+        let opts = FormatOptions {
+            block_size: 4096,
+            ..Default::default()
+        };
+        assert!(matches!(
+            format(&mut dev, &opts),
+            Err(FsError::InvalidField(_))
+        ));
     }
 
     #[test]
@@ -678,7 +754,10 @@ mod tests {
 
         let err = probe(&mut dev).unwrap_err();
         assert!(
-            matches!(err, FsError::InvalidField(_) | FsError::UnsupportedFeature(_)),
+            matches!(
+                err,
+                FsError::InvalidField(_) | FsError::UnsupportedFeature(_)
+            ),
             "got {err:?}"
         );
     }
@@ -719,7 +798,11 @@ mod tests {
             dev.read_block(block, &mut raw).unwrap();
             let obj = on_disk::ObjRef::parse(&raw, expected)
                 .unwrap_or_else(|e| panic!("block {block}: {e}"));
-            assert_eq!(obj.header().obj_type(), expected, "block {block} has the wrong type");
+            assert_eq!(
+                obj.header().obj_type(),
+                expected,
+                "block {block} has the wrong type"
+            );
         }
     }
 
@@ -730,7 +813,10 @@ mod tests {
         let mut raw = vec![0u8; 4096];
         for b in layout.xp_desc_base..layout.xp_desc_base + u64::from(layout.xp_desc_blocks) {
             dev.read_block(b, &mut raw).unwrap();
-            assert!(raw.iter().all(|&x| x == 0), "descriptor block {b} is not clear");
+            assert!(
+                raw.iter().all(|&x| x == 0),
+                "descriptor block {b} is not clear"
+            );
         }
     }
 
@@ -759,8 +845,9 @@ mod tests {
             dev.fail_writes_from(None);
 
             let block0 = &dev.contents()[0..4096];
-            let looks_formatted = u32::from_le_bytes([block0[32], block0[33], block0[34], block0[35]])
-                == gen::MAGIC_CONTAINER_SUPERBLOCK;
+            let looks_formatted =
+                u32::from_le_bytes([block0[32], block0[33], block0[34], block0[35]])
+                    == gen::MAGIC_CONTAINER_SUPERBLOCK;
             if looks_formatted {
                 // The commit point landed, so everything before it must be intact.
                 assert_eq!(

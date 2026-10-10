@@ -190,7 +190,10 @@ pub fn resolve<R: Resolver + ?Sized>(
     }
 
     let is_symlink = vfs.is_symlink(current);
-    Ok(Resolution { node: current, is_symlink })
+    Ok(Resolution {
+        node: current,
+        is_symlink,
+    })
 }
 
 /// Split a path into its components, dropping empty ones (so `a//b` is `["a", "b"]`).
@@ -304,15 +307,19 @@ mod tests {
             self.nodes
                 .iter()
                 .enumerate()
-                .find(|(i, n)| {
-                    *i != 0 && n.parent == dir.ino as usize && n.name == want
+                .find(|(i, n)| *i != 0 && n.parent == dir.ino as usize && n.name == want)
+                .map(|(i, _)| NodeId {
+                    mount: 0,
+                    ino: i as u64,
                 })
-                .map(|(i, _)| NodeId { mount: 0, ino: i as u64 })
                 .ok_or(errno::ENOENT)
         }
 
         fn parent(&self, node: NodeId) -> NodeId {
-            NodeId { mount: 0, ino: self.nodes[node.ino as usize].parent as u64 }
+            NodeId {
+                mount: 0,
+                ino: self.nodes[node.ino as usize].parent as u64,
+            }
         }
 
         fn is_dir(&self, node: NodeId) -> bool {
@@ -447,20 +454,29 @@ mod tests {
         let t = sample_tree();
         assert_eq!(resolve(&t, b"/nope", Final::Follow), Err(errno::ENOENT));
         assert_eq!(resolve(&t, b"/dir/nope", Final::Follow), Err(errno::ENOENT));
-        assert_eq!(resolve(&t, b"/dir/file/deeper", Final::Follow), Err(errno::ENOTDIR));
+        assert_eq!(
+            resolve(&t, b"/dir/file/deeper", Final::Follow),
+            Err(errno::ENOTDIR)
+        );
     }
 
     #[test]
     fn a_file_in_the_middle_is_enotdir() {
         let t = sample_tree();
-        assert_eq!(resolve(&t, b"/dir/file/x", Final::Follow), Err(errno::ENOTDIR));
+        assert_eq!(
+            resolve(&t, b"/dir/file/x", Final::Follow),
+            Err(errno::ENOTDIR)
+        );
     }
 
     #[test]
     fn trailing_slash_requires_a_directory() {
         let t = sample_tree();
         assert!(resolve(&t, b"/dir/", Final::Follow).is_ok());
-        assert_eq!(resolve(&t, b"/dir/file/", Final::Follow), Err(errno::ENOTDIR));
+        assert_eq!(
+            resolve(&t, b"/dir/file/", Final::Follow),
+            Err(errno::ENOTDIR)
+        );
     }
 
     #[test]

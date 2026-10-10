@@ -82,7 +82,10 @@ impl MountTable {
     /// An empty table.
     #[must_use]
     pub const fn new() -> Self {
-        Self { mounts: Vec::new(), next_id: 1 }
+        Self {
+            mounts: Vec::new(),
+            next_id: 1,
+        }
     }
 
     /// Install the root filesystem.
@@ -131,7 +134,14 @@ impl MountTable {
     ) -> Result<u32, i32> {
         let id = self.next_id;
         self.next_id = self.next_id.checked_add(1).ok_or(errno::EMFILE)?;
-        self.mounts.push(Mount { id, covered, root, flags: mflags, source, fstype });
+        self.mounts.push(Mount {
+            id,
+            covered,
+            root,
+            flags: mflags,
+            source,
+            fstype,
+        });
         Ok(id)
     }
 
@@ -167,7 +177,10 @@ impl MountTable {
     /// The root node of the filesystem, which is where an absolute path starts.
     #[must_use]
     pub fn root_node(&self) -> Option<NodeId> {
-        self.mounts.iter().find(|m| m.covered.is_none()).map(|m| m.root)
+        self.mounts
+            .iter()
+            .find(|m| m.covered.is_none())
+            .map(|m| m.root)
     }
 
     /// If `node` is covered by a mount, return that filesystem's root.
@@ -212,8 +225,12 @@ mod tests {
 
     fn table() -> MountTable {
         let mut t = MountTable::new();
-        t.mount_root(NodeId::new(1, 1), String::from("nolxroot"), String::from("nolxfs"))
-            .unwrap();
+        t.mount_root(
+            NodeId::new(1, 1),
+            String::from("nolxroot"),
+            String::from("nolxfs"),
+        )
+        .unwrap();
         t
     }
 
@@ -236,7 +253,13 @@ mod tests {
     fn mounting_without_a_root_fails() {
         let mut t = MountTable::new();
         assert_eq!(
-            t.mount_over(NodeId::new(1, 5), NodeId::new(2, 1), 0, String::new(), String::new()),
+            t.mount_over(
+                NodeId::new(1, 5),
+                NodeId::new(2, 1),
+                0,
+                String::new(),
+                String::new()
+            ),
             Err(errno::ENOENT)
         );
     }
@@ -245,8 +268,14 @@ mod tests {
     fn downward_crossing_replaces_the_covered_directory() {
         let mut t = table();
         let covered = NodeId::new(1, 5);
-        t.mount_over(covered, NodeId::new(2, 1), 0, String::from("/dev/x"), String::from("nolxfs"))
-            .unwrap();
+        t.mount_over(
+            covered,
+            NodeId::new(2, 1),
+            0,
+            String::from("/dev/x"),
+            String::from("nolxfs"),
+        )
+        .unwrap();
         assert_eq!(t.cross_down(covered), Some(NodeId::new(2, 1)));
         assert!(t.is_mount_point(covered));
     }
@@ -255,8 +284,14 @@ mod tests {
     fn upward_crossing_from_a_mount_root_reaches_the_covered_directory() {
         let mut t = table();
         let covered = NodeId::new(1, 5);
-        t.mount_over(covered, NodeId::new(2, 1), 0, String::from("/dev/x"), String::from("nolxfs"))
-            .unwrap();
+        t.mount_over(
+            covered,
+            NodeId::new(2, 1),
+            0,
+            String::from("/dev/x"),
+            String::from("nolxfs"),
+        )
+        .unwrap();
         // `..` from the mounted filesystem's root lands on the covered directory's parent,
         // which the caller computes; here we check the table hands back the covered node.
         assert_eq!(t.cross_up(NodeId::new(2, 1)), Some(covered));
@@ -267,8 +302,14 @@ mod tests {
         let mut t = table();
         let covered = NodeId::new(1, 5);
         let new_root = NodeId::new(2, 1);
-        t.mount_over(covered, new_root, 0, String::from("/dev/x"), String::from("nolxfs"))
-            .unwrap();
+        t.mount_over(
+            covered,
+            new_root,
+            0,
+            String::from("/dev/x"),
+            String::from("nolxfs"),
+        )
+        .unwrap();
         let down = t.cross_down(covered).unwrap();
         assert_eq!(down, new_root);
         assert_eq!(t.cross_up(down), Some(covered));
@@ -284,10 +325,22 @@ mod tests {
     fn stacking_a_mount_on_a_mount_is_rejected() {
         let mut t = table();
         let covered = NodeId::new(1, 5);
-        t.mount_over(covered, NodeId::new(2, 1), 0, String::from("a"), String::from("nolxfs"))
-            .unwrap();
+        t.mount_over(
+            covered,
+            NodeId::new(2, 1),
+            0,
+            String::from("a"),
+            String::from("nolxfs"),
+        )
+        .unwrap();
         assert_eq!(
-            t.mount_over(covered, NodeId::new(3, 1), 0, String::from("b"), String::from("nolxfs")),
+            t.mount_over(
+                covered,
+                NodeId::new(3, 1),
+                0,
+                String::from("b"),
+                String::from("nolxfs")
+            ),
             Err(errno::EBUSY)
         );
     }
@@ -297,7 +350,13 @@ mod tests {
         let mut t = table();
         let covered = NodeId::new(1, 5);
         let lower = t
-            .mount_over(covered, NodeId::new(2, 1), 0, String::from("a"), String::from("nolxfs"))
+            .mount_over(
+                covered,
+                NodeId::new(2, 1),
+                0,
+                String::from("a"),
+                String::from("nolxfs"),
+            )
             .unwrap();
         t.mount_over(
             NodeId::new(2, 1),
@@ -322,13 +381,25 @@ mod tests {
         let mut t = table();
         let covered = NodeId::new(1, 5);
         let id = t
-            .mount_over(covered, NodeId::new(2, 1), 0, String::from("a"), String::from("nolxfs"))
+            .mount_over(
+                covered,
+                NodeId::new(2, 1),
+                0,
+                String::from("a"),
+                String::from("nolxfs"),
+            )
             .unwrap();
         t.unmount(id).unwrap();
         assert_eq!(t.cross_down(covered), None);
         assert!(!t.is_mount_point(covered));
         assert!(t
-            .mount_over(covered, NodeId::new(3, 1), 0, String::from("b"), String::from("nolxfs"))
+            .mount_over(
+                covered,
+                NodeId::new(3, 1),
+                0,
+                String::from("b"),
+                String::from("nolxfs")
+            )
             .is_ok());
     }
 

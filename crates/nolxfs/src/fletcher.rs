@@ -50,7 +50,11 @@ pub fn fletcher64(words: &[u32]) -> u64 {
 
     let mut rest = words;
     while !rest.is_empty() {
-        let (chunk, tail) = if rest.len() > NMAX { rest.split_at(NMAX) } else { (rest, &[][..]) };
+        let (chunk, tail) = if rest.len() > NMAX {
+            rest.split_at(NMAX)
+        } else {
+            (rest, &[][..])
+        };
         for &w in chunk {
             sum1 += u64::from(w);
             sum2 += sum1;
@@ -179,7 +183,9 @@ mod tests {
     use alloc::vec::Vec;
 
     fn words(n: usize, seed: u32) -> Vec<u32> {
-        (0..n).map(|i| seed.wrapping_mul(2_654_435_761).wrapping_add(i as u32)).collect()
+        (0..n)
+            .map(|i| seed.wrapping_mul(2_654_435_761).wrapping_add(i as u32))
+            .collect()
     }
 
     #[test]
@@ -231,7 +237,11 @@ mod tests {
         let mut a = words(64, 3);
         let sum = fletcher64(&a);
         a.swap(10, 11);
-        assert_ne!(fletcher64(&a), sum, "swapping adjacent words went undetected");
+        assert_ne!(
+            fletcher64(&a),
+            sum,
+            "swapping adjacent words went undetected"
+        );
     }
 
     #[test]
@@ -285,7 +295,10 @@ mod tests {
 
         let sum = compute(&object).expect("4096 is a multiple of four");
         object[0..8].copy_from_slice(&sum.to_le_bytes());
-        assert!(verify(&object, sum), "verify rejected a checksum compute just produced");
+        assert!(
+            verify(&object, sum),
+            "verify rejected a checksum compute just produced"
+        );
     }
 
     #[test]
@@ -299,7 +312,10 @@ mod tests {
         for byte in 8..object.len() {
             let mut damaged = object.clone();
             damaged[byte] ^= 0x01;
-            assert!(!verify(&damaged, sum), "corruption at byte {byte} went undetected");
+            assert!(
+                !verify(&damaged, sum),
+                "corruption at byte {byte} went undetected"
+            );
         }
     }
 

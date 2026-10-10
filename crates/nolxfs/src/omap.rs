@@ -5,8 +5,8 @@
 //! version of this object at or before transaction `xid`", which is what makes
 //! point-in-time views and snapshots a lookup rather than a copy.
 
-use crate::btree::{BTree, BlockAllocator, KeyKind};
 use crate::blockdev::BlockDevice;
+use crate::btree::{BTree, BlockAllocator, KeyKind};
 use crate::on_disk::{FsError, Result};
 use crate::on_disk_gen as gen;
 use crate::Pod;
@@ -30,7 +30,11 @@ pub fn decode_key(bytes: &[u8]) -> Option<(u64, u64)> {
 /// Encode an object-map value.
 #[must_use]
 pub fn encode_val(paddr: u64, flags: u32) -> [u8; 16] {
-    let val = gen::nolx_omap_val_t { flags, pad: 0, paddr };
+    let val = gen::nolx_omap_val_t {
+        flags,
+        pad: 0,
+        paddr,
+    };
     let mut out = [0u8; 16];
     out.copy_from_slice(val.as_bytes());
     out
@@ -102,7 +106,8 @@ impl<'d, D: BlockDevice, A: BlockAllocator> ObjectMap<'d, D, A> {
     ///
     /// Device errors or out-of-space.
     pub fn set(&mut self, oid: u64, xid: u64, paddr: u64, flags: u32) -> Result<()> {
-        self.tree.insert(&encode_key(oid, xid), &encode_val(paddr, flags))
+        self.tree
+            .insert(&encode_key(oid, xid), &encode_val(paddr, flags))
     }
 
     /// Mark `oid` as absent at `xid`, so a lookup fails instead of falling back to an
@@ -188,13 +193,21 @@ mod tests {
         }
         {
             let mut omap = ObjectMap::open(&mut dev, &mut alloc, 0, 1);
-            assert_eq!(omap.resolve(7, 0).unwrap(), None, "before the first version");
+            assert_eq!(
+                omap.resolve(7, 0).unwrap(),
+                None,
+                "before the first version"
+            );
             assert_eq!(omap.resolve(7, 1).unwrap(), Some(100));
             assert_eq!(omap.resolve(7, 4).unwrap(), Some(100), "still the v1 block");
             assert_eq!(omap.resolve(7, 5).unwrap(), Some(200));
             assert_eq!(omap.resolve(7, 8).unwrap(), Some(200));
             assert_eq!(omap.resolve(7, 9).unwrap(), Some(300));
-            assert_eq!(omap.resolve(7, 10_000).unwrap(), Some(300), "newest version");
+            assert_eq!(
+                omap.resolve(7, 10_000).unwrap(),
+                Some(300),
+                "newest version"
+            );
         }
     }
 
@@ -224,8 +237,16 @@ mod tests {
         }
         {
             let mut omap = ObjectMap::open(&mut dev, &mut alloc, 0, 1);
-            assert_eq!(omap.resolve(3, 1).unwrap(), Some(42), "v1 is still visible at xid 1");
-            assert_eq!(omap.resolve(3, 2).unwrap(), None, "hidden from xid 2 onward");
+            assert_eq!(
+                omap.resolve(3, 1).unwrap(),
+                Some(42),
+                "v1 is still visible at xid 1"
+            );
+            assert_eq!(
+                omap.resolve(3, 2).unwrap(),
+                None,
+                "hidden from xid 2 onward"
+            );
         }
     }
 
@@ -258,8 +279,16 @@ mod tests {
         {
             let mut omap = ObjectMap::open(&mut dev, &mut alloc, 0, 1);
             for oid in 1..500u64 {
-                assert_eq!(omap.resolve(oid, 1).unwrap(), Some(oid * 10), "oid {oid} at xid 1");
-                assert_eq!(omap.resolve(oid, 2).unwrap(), Some(oid * 20), "oid {oid} at xid 2");
+                assert_eq!(
+                    omap.resolve(oid, 1).unwrap(),
+                    Some(oid * 10),
+                    "oid {oid} at xid 1"
+                );
+                assert_eq!(
+                    omap.resolve(oid, 2).unwrap(),
+                    Some(oid * 20),
+                    "oid {oid} at xid 2"
+                );
             }
             assert_eq!(omap.all().unwrap().len(), 998);
         }

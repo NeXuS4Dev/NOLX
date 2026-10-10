@@ -45,7 +45,10 @@ impl FileDevice {
             .map_err(|e| format!("cannot stat {}: {e}", path.display()))?
             .len();
         if length == 0 {
-            return Err(format!("{} is empty; create the image first", path.display()));
+            return Err(format!(
+                "{} is empty; create the image first",
+                path.display()
+            ));
         }
         if length % block_size as u64 != 0 {
             return Err(format!(
@@ -53,7 +56,11 @@ impl FileDevice {
                 path.display()
             ));
         }
-        Ok(Self { file, block_size, block_count: length / block_size as u64 })
+        Ok(Self {
+            file,
+            block_size,
+            block_count: length / block_size as u64,
+        })
     }
 }
 
@@ -68,7 +75,10 @@ impl BlockDevice for FileDevice {
 
     fn read_block(&self, index: u64, buf: &mut [u8]) -> Result<(), DevError> {
         if buf.len() != self.block_size {
-            return Err(DevError::BadBufferLen { got: buf.len(), want: self.block_size });
+            return Err(DevError::BadBufferLen {
+                got: buf.len(),
+                want: self.block_size,
+            });
         }
         if index >= self.block_count {
             return Err(DevError::OutOfRange { block: index });
@@ -87,7 +97,10 @@ impl BlockDevice for FileDevice {
 
     fn write_block(&mut self, index: u64, buf: &[u8]) -> Result<(), DevError> {
         if buf.len() != self.block_size {
-            return Err(DevError::BadBufferLen { got: buf.len(), want: self.block_size });
+            return Err(DevError::BadBufferLen {
+                got: buf.len(),
+                want: self.block_size,
+            });
         }
         if index >= self.block_count {
             return Err(DevError::OutOfRange { block: index });
@@ -153,8 +166,15 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         // Options that take a value.
         let value_flag = matches!(
             arg,
-            "-b" | "--block-size" | "-L" | "--label" | "-u" | "--uid" | "-g" | "--gid"
-                | "-m" | "--mode"
+            "-b" | "--block-size"
+                | "-L"
+                | "--label"
+                | "-u"
+                | "--uid"
+                | "-g"
+                | "--gid"
+                | "-m"
+                | "--mode"
         );
         let value = if value_flag {
             let v = argv
@@ -199,12 +219,20 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         i += 1;
     }
 
-    Ok(Args { path: path.ok_or("no device given")?, options, dry_run, force })
+    Ok(Args {
+        path: path.ok_or("no device given")?,
+        options,
+        dry_run,
+        force,
+    })
 }
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().collect();
-    let program = argv.first().cloned().unwrap_or_else(|| "mkfs.nolxfs".to_string());
+    let program = argv
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "mkfs.nolxfs".to_string());
 
     let args = match parse_args(&argv) {
         Ok(a) => a,
@@ -258,8 +286,10 @@ fn main() -> ExitCode {
     }
 
     if !args.force {
-        eprint!("mkfs.nolxfs: this will destroy everything on {}. Type YES to continue: ",
-                args.path.display());
+        eprint!(
+            "mkfs.nolxfs: this will destroy everything on {}. Type YES to continue: ",
+            args.path.display()
+        );
         let mut answer = String::new();
         if std::io::stdin().read_line(&mut answer).is_err() || answer.trim() != "YES" {
             eprintln!("mkfs.nolxfs: aborted");
@@ -286,18 +316,39 @@ fn main() -> ExitCode {
 
 fn print_layout(layout: &mkfs::Layout) {
     println!("  container superblock      block 0");
-    println!("  checkpoint descriptors    block {} (+{})", layout.xp_desc_base, layout.xp_desc_blocks);
-    println!("  checkpoint data           block {} (+{})", layout.xp_data_base, layout.xp_data_blocks);
-    println!("  container object map      block {}", layout.container_omap);
-    println!("    ... B-tree root         block {}", layout.container_omap_tree);
+    println!(
+        "  checkpoint descriptors    block {} (+{})",
+        layout.xp_desc_base, layout.xp_desc_blocks
+    );
+    println!(
+        "  checkpoint data           block {} (+{})",
+        layout.xp_data_base, layout.xp_data_blocks
+    );
+    println!(
+        "  container object map      block {}",
+        layout.container_omap
+    );
+    println!(
+        "    ... B-tree root         block {}",
+        layout.container_omap_tree
+    );
     println!("  space manager             block {}", layout.spaceman);
     println!("  reaper                    block {}", layout.reaper);
     println!("  volume superblock         block {}", layout.volume_sb);
     println!("  volume object map         block {}", layout.volume_omap);
-    println!("    ... B-tree root         block {}", layout.volume_omap_tree);
+    println!(
+        "    ... B-tree root         block {}",
+        layout.volume_omap_tree
+    );
     println!("  fs-tree root              block {}", layout.fs_tree_root);
-    println!("  extent reference tree     block {}", layout.extentref_tree_root);
-    println!("  snapshot metadata tree    block {}", layout.snap_meta_tree_root);
+    println!(
+        "  extent reference tree     block {}",
+        layout.extentref_tree_root
+    );
+    println!(
+        "  snapshot metadata tree    block {}",
+        layout.snap_meta_tree_root
+    );
     println!("  first data block          {}", layout.first_data_block);
 }
 
@@ -325,8 +376,20 @@ mod tests {
     #[test]
     fn every_option_is_parsed() {
         let a = parse_args(&argv(&[
-            "-b", "8192", "-L", "backup", "-u", "1000", "-g", "1000", "-m", "0750",
-            "--casefold", "--dry-run", "-f", "/dev/sdb",
+            "-b",
+            "8192",
+            "-L",
+            "backup",
+            "-u",
+            "1000",
+            "-g",
+            "1000",
+            "-m",
+            "0750",
+            "--casefold",
+            "--dry-run",
+            "-f",
+            "/dev/sdb",
         ]))
         .unwrap();
         assert_eq!(a.options.block_size, 8192);
@@ -343,8 +406,7 @@ mod tests {
     #[test]
     fn long_and_short_forms_agree() {
         let short = parse_args(&argv(&["-b", "1024", "-L", "x", "/dev/a"])).unwrap();
-        let long =
-            parse_args(&argv(&["--block-size", "1024", "--label", "x", "/dev/a"])).unwrap();
+        let long = parse_args(&argv(&["--block-size", "1024", "--label", "x", "/dev/a"])).unwrap();
         assert_eq!(short.options.block_size, long.options.block_size);
         assert_eq!(short.options.volume_name, long.options.volume_name);
     }

@@ -30,8 +30,8 @@
 
 extern crate alloc;
 
-pub mod btree;
 pub mod blockdev;
+pub mod btree;
 pub mod fletcher;
 pub mod mkfs;
 pub mod omap;
@@ -117,7 +117,8 @@ pub unsafe trait Pod: Copy + 'static {
             return None;
         }
         let mut out = Self::zeroed();
-        out.as_bytes_mut().copy_from_slice(&bytes[..core::mem::size_of::<Self>()]);
+        out.as_bytes_mut()
+            .copy_from_slice(&bytes[..core::mem::size_of::<Self>()]);
         Some(out)
     }
 }

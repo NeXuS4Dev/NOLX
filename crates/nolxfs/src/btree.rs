@@ -99,7 +99,10 @@ impl Entry {
     /// Build an entry from borrowed slices.
     #[must_use]
     pub fn new(key: &[u8], val: &[u8]) -> Self {
-        Self { key: key.to_vec(), val: val.to_vec() }
+        Self {
+            key: key.to_vec(),
+            val: val.to_vec(),
+        }
     }
 
     /// The child block address, for an entry in a middle node.
@@ -130,13 +133,21 @@ impl Node {
     /// An empty leaf.
     #[must_use]
     pub fn new_leaf() -> Self {
-        Self { level: 0, flags: (gen::BTNODE_LEAF | gen::BTNODE_NO_FREE) as u16, entries: Vec::new() }
+        Self {
+            level: 0,
+            flags: (gen::BTNODE_LEAF | gen::BTNODE_NO_FREE) as u16,
+            entries: Vec::new(),
+        }
     }
 
     /// An empty middle node at `level`.
     #[must_use]
     pub fn new_inner(level: u16) -> Self {
-        Self { level, flags: gen::BTNODE_NO_FREE as u16, entries: Vec::new() }
+        Self {
+            level,
+            flags: gen::BTNODE_NO_FREE as u16,
+            entries: Vec::new(),
+        }
     }
 
     /// `true` if this is a leaf.
@@ -194,15 +205,23 @@ impl Node {
         let key_count = header.key_count as usize;
         let toc_size = key_count
             .checked_mul(TOC_ENTRY_SIZE)
-            .ok_or(FsError::CorruptNode("key_count overflows the table of contents"))?;
+            .ok_or(FsError::CorruptNode(
+                "key_count overflows the table of contents",
+            ))?;
         let toc_end = NODE_HEADER_SIZE
             .checked_add(toc_size)
-            .ok_or(FsError::CorruptNode("table of contents overflows the block"))?;
+            .ok_or(FsError::CorruptNode(
+                "table of contents overflows the block",
+            ))?;
         if toc_end > block.len() {
-            return Err(FsError::CorruptNode("table of contents runs past the end of the block"));
+            return Err(FsError::CorruptNode(
+                "table of contents runs past the end of the block",
+            ));
         }
         if key_count > u16::MAX as usize {
-            return Err(FsError::CorruptNode("key_count exceeds the 16-bit offset field"));
+            return Err(FsError::CorruptNode(
+                "key_count exceeds the 16-bit offset field",
+            ));
         }
 
         let mut entries = Vec::with_capacity(key_count);
@@ -239,11 +258,17 @@ impl Node {
         let kind = Self::key_kind_for(obj.header().subtype());
         for pair in entries.windows(2) {
             if compare_keys(kind, &pair[0].key, &pair[1].key) != Ordering::Less {
-                return Err(FsError::CorruptNode("entries are not in strictly increasing order"));
+                return Err(FsError::CorruptNode(
+                    "entries are not in strictly increasing order",
+                ));
             }
         }
 
-        Ok(Self { level: header.level, flags: header.flags, entries })
+        Ok(Self {
+            level: header.level,
+            flags: header.flags,
+            entries,
+        })
     }
 
     /// Which ordering a tree of this subtype uses.
@@ -251,7 +276,9 @@ impl Node {
     pub fn key_kind_for(subtype: u16) -> KeyKind {
         match u32::from(subtype) {
             gen::SUB_OMAP => KeyKind::OMap,
-            gen::SUB_FSTREE | gen::SUB_EXTENT_REF_TREE | gen::SUB_SNAP_META_TREE
+            gen::SUB_FSTREE
+            | gen::SUB_EXTENT_REF_TREE
+            | gen::SUB_SNAP_META_TREE
             | gen::SUB_FEXT_TREE => KeyKind::JKey,
             _ => KeyKind::Bytes,
         }
@@ -286,12 +313,14 @@ impl Node {
             if entry.key.len() > u16::MAX as usize || entry.val.len() > u16::MAX as usize {
                 return Err(FsError::CorruptNode("a key or value exceeds 65535 bytes"));
             }
-            key_off = key_off.checked_add(entry.key.len()).ok_or(FsError::CorruptNode(
-                "keys overflow the 16-bit offset field",
-            ))?;
-            val_off = val_off.checked_sub(entry.val.len()).ok_or(FsError::CorruptNode(
-                "values overflow the block",
-            ))?;
+            key_off = key_off
+                .checked_add(entry.key.len())
+                .ok_or(FsError::CorruptNode(
+                    "keys overflow the 16-bit offset field",
+                ))?;
+            val_off = val_off
+                .checked_sub(entry.val.len())
+                .ok_or(FsError::CorruptNode("values overflow the block"))?;
             if val_off < key_off {
                 return Err(FsError::CorruptNode("keys and values collided"));
             }
@@ -366,7 +395,14 @@ impl<'d, D: BlockDevice, A: BlockAllocator> BTree<'d, D, A> {
         subtype: u16,
         xid: u64,
     ) -> Self {
-        Self { dev, alloc, root, kind, subtype, xid }
+        Self {
+            dev,
+            alloc,
+            root,
+            kind,
+            subtype,
+            xid,
+        }
     }
 
     /// The root block, which changes when the tree grows a level.
@@ -476,14 +512,22 @@ impl<'d, D: BlockDevice, A: BlockAllocator> BTree<'d, D, A> {
         let block_size = self.dev.block_size();
         let mut buf = vec![0u8; block_size];
         self.dev.read_block(block, &mut buf)?;
-        let expected = if block == self.root { gen::OBJ_BTREE_ROOT } else { gen::OBJ_BTREE_NODE };
+        let expected = if block == self.root {
+            gen::OBJ_BTREE_ROOT
+        } else {
+            gen::OBJ_BTREE_NODE
+        };
         Node::decode(&buf, expected)
     }
 
     fn write_node(&mut self, block: u64, node: &Node, is_root: bool) -> Result<()> {
         let block_size = self.dev.block_size();
         let mut buf = vec![0u8; block_size];
-        let obj_type = if is_root { gen::OBJ_BTREE_ROOT } else { gen::OBJ_BTREE_NODE };
+        let obj_type = if is_root {
+            gen::OBJ_BTREE_ROOT
+        } else {
+            gen::OBJ_BTREE_NODE
+        };
         node.encode(&mut buf, 0, self.xid, obj_type, self.subtype)?;
         self.dev.write_block(block, &buf)?;
         Ok(())
@@ -504,10 +548,15 @@ impl<'d, D: BlockDevice, A: BlockAllocator> BTree<'d, D, A> {
                 Err(i) => i.saturating_sub(1),
             };
             let child = node.entries[index].child_block();
-            if let Split::Promote { key: sep, block: new_block } =
-                self.insert_into(child, key, val)?
+            if let Split::Promote {
+                key: sep,
+                block: new_block,
+            } = self.insert_into(child, key, val)?
             {
-                let promoted = Entry { key: sep, val: new_block.to_le_bytes().to_vec() };
+                let promoted = Entry {
+                    key: sep,
+                    val: new_block.to_le_bytes().to_vec(),
+                };
                 node.entries.insert(index + 1, promoted);
             }
         }
@@ -534,15 +583,24 @@ impl<'d, D: BlockDevice, A: BlockAllocator> BTree<'d, D, A> {
         // Both halves must now fit, or the caller inserted something longer than a block
         // can hold and no amount of splitting will help.
         let block_size = self.dev.block_size();
-        let right_node = Node { level: node.level, flags: node.flags, entries: right_entries };
+        let right_node = Node {
+            level: node.level,
+            flags: node.flags,
+            entries: right_entries,
+        };
         if node.overflows(block_size) || right_node.overflows(block_size) {
-            return Err(FsError::CorruptNode("a single key or value is too large to store"));
+            return Err(FsError::CorruptNode(
+                "a single key or value is too large to store",
+            ));
         }
 
         let new_right = self.alloc.alloc()?;
         self.write_node(block, &node, block == self.root)?;
         self.write_node(new_right, &right_node, false)?;
-        Ok(Split::Promote { key: separator, block: new_right })
+        Ok(Split::Promote {
+            key: separator,
+            block: new_right,
+        })
     }
 
     fn grow_root(&mut self, separator: Vec<u8>, right: u64) -> Result<()> {
@@ -568,9 +626,14 @@ impl<'d, D: BlockDevice, A: BlockAllocator> BTree<'d, D, A> {
 
         let mut root = Node::new_inner(old_root.level + 1);
         root.flags |= gen::BTNODE_ROOT as u16;
-        root.entries
-            .push(Entry { key: left_key, val: old_root_block.to_le_bytes().to_vec() });
-        root.entries.push(Entry { key: separator, val: right.to_le_bytes().to_vec() });
+        root.entries.push(Entry {
+            key: left_key,
+            val: old_root_block.to_le_bytes().to_vec(),
+        });
+        root.entries.push(Entry {
+            key: separator,
+            val: right.to_le_bytes().to_vec(),
+        });
         self.write_node(self.root, &root, true)?;
         Ok(())
     }
@@ -622,7 +685,9 @@ mod tests {
 
     fn key(s: &str) -> Vec<u8> {
         // A j-key: a packed (type, inode) prefix followed by the name.
-        let mut v = on_disk::pack_jkey(gen::DREC_TYPE_DIR_REC, 1).to_le_bytes().to_vec();
+        let mut v = on_disk::pack_jkey(gen::DREC_TYPE_DIR_REC, 1)
+            .to_le_bytes()
+            .to_vec();
         v.extend_from_slice(s.as_bytes());
         v
     }
@@ -674,7 +739,8 @@ mod tests {
     fn empty_node_round_trips() {
         let node = Node::new_leaf();
         let mut buf = vec![0u8; 4096];
-        node.encode(&mut buf, 0, 1, gen::OBJ_BTREE_ROOT, gen::SUB_FSTREE as u16).unwrap();
+        node.encode(&mut buf, 0, 1, gen::OBJ_BTREE_ROOT, gen::SUB_FSTREE as u16)
+            .unwrap();
         let back = Node::decode(&buf, gen::OBJ_BTREE_ROOT).unwrap();
         assert!(back.entries.is_empty());
         assert_eq!(back.level, 0);
@@ -686,13 +752,15 @@ mod tests {
         for name in ["alpha", "beta", "gamma", "delta"] {
             let mut entries: Vec<Entry> = node.entries.clone();
             let k = key(name);
-            let pos = entries.binary_search_by(|e| compare_keys(KeyKind::JKey, &e.key, &k))
+            let pos = entries
+                .binary_search_by(|e| compare_keys(KeyKind::JKey, &e.key, &k))
                 .unwrap_or_else(|i| i);
             entries.insert(pos, Entry::new(&k, name.as_bytes()));
             node.entries = entries;
         }
         let mut buf = vec![0u8; 4096];
-        node.encode(&mut buf, 0, 1, gen::OBJ_BTREE_ROOT, gen::SUB_FSTREE as u16).unwrap();
+        node.encode(&mut buf, 0, 1, gen::OBJ_BTREE_ROOT, gen::SUB_FSTREE as u16)
+            .unwrap();
         let back = Node::decode(&buf, gen::OBJ_BTREE_ROOT).unwrap();
         assert_eq!(back.entries.len(), 4);
         assert_eq!(back.entries[0].key, key("alpha"));
@@ -730,7 +798,10 @@ mod tests {
         }
         {
             let mut tree = make_tree(&mut dev, &mut alloc);
-            assert_eq!(tree.search(&key("hello")).unwrap().as_deref(), Some(&b"world"[..]));
+            assert_eq!(
+                tree.search(&key("hello")).unwrap().as_deref(),
+                Some(&b"world"[..])
+            );
             assert_eq!(tree.search(&key("missing")).unwrap(), None);
         }
     }
@@ -742,7 +813,10 @@ mod tests {
         let mut tree = make_tree(&mut dev, &mut alloc);
         tree.insert(&key("k"), b"first").unwrap();
         tree.insert(&key("k"), b"second").unwrap();
-        assert_eq!(tree.search(&key("k")).unwrap().as_deref(), Some(&b"second"[..]));
+        assert_eq!(
+            tree.search(&key("k")).unwrap().as_deref(),
+            Some(&b"second"[..])
+        );
         assert_eq!(tree.collect().unwrap().len(), 1);
     }
 
@@ -751,9 +825,7 @@ mod tests {
         let mut dev = MemBlockDevice::new(4096, 4096);
         let mut alloc = Bump { next: 1, end: 4096 };
         let count = 500;
-        let mut names: Vec<String> = (0..count)
-            .map(|i| alloc::format!("name-{i:06}"))
-            .collect();
+        let mut names: Vec<String> = (0..count).map(|i| alloc::format!("name-{i:06}")).collect();
 
         {
             let mut tree = make_tree(&mut dev, &mut alloc);
@@ -816,7 +888,10 @@ mod tests {
             tree.insert(&key(n), n.as_bytes()).unwrap();
         }
         assert!(tree.remove(&key("b")).unwrap());
-        assert!(!tree.remove(&key("b")).unwrap(), "removing twice reports success twice");
+        assert!(
+            !tree.remove(&key("b")).unwrap(),
+            "removing twice reports success twice"
+        );
         assert_eq!(tree.search(&key("b")).unwrap(), None);
         let all = tree.collect().unwrap();
         assert_eq!(all.len(), 3);
@@ -840,7 +915,10 @@ mod tests {
                 break;
             }
         }
-        assert!(hit_error, "exhausting the allocator did not surface as an error");
+        assert!(
+            hit_error,
+            "exhausting the allocator did not surface as an error"
+        );
     }
 
     #[test]

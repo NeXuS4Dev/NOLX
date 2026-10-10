@@ -24,7 +24,10 @@ impl Descriptor {
     /// A descriptor with default flags.
     #[must_use]
     pub const fn new(file: u64) -> Self {
-        Self { file, close_on_exec: false }
+        Self {
+            file,
+            close_on_exec: false,
+        }
     }
 }
 
@@ -48,7 +51,11 @@ impl DescriptorTable {
     /// An empty table with `limit` slots available.
     #[must_use]
     pub fn with_limit(limit: usize) -> Self {
-        Self { slots: Vec::new(), limit: limit.max(1), allocations: 0 }
+        Self {
+            slots: Vec::new(),
+            limit: limit.max(1),
+            allocations: 0,
+        }
     }
 
     /// Raise or lower the soft limit, as `setrlimit(RLIMIT_NOFILE)` does.
@@ -69,7 +76,10 @@ impl DescriptorTable {
     /// and caching it would mean it could drift, so it is computed.
     #[must_use]
     pub fn next_after_last(&self) -> usize {
-        self.slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1)
+        self.slots
+            .iter()
+            .rposition(|s| s.is_some())
+            .map_or(0, |i| i + 1)
     }
 
     /// The number of open descriptors.
@@ -118,7 +128,11 @@ impl DescriptorTable {
     /// # Errors
     ///
     /// `EBADF` if `slot` is at or above the limit.
-    pub fn place_at(&mut self, slot: usize, descriptor: Descriptor) -> Result<Option<Descriptor>, i32> {
+    pub fn place_at(
+        &mut self,
+        slot: usize,
+        descriptor: Descriptor,
+    ) -> Result<Option<Descriptor>, i32> {
         if slot >= self.limit {
             return Err(errno::EBADF);
         }
@@ -251,7 +265,10 @@ mod tests {
         assert!(t.alloc(Descriptor::new(1)).is_ok());
         assert!(t.alloc(Descriptor::new(2)).is_ok());
         assert_eq!(t.alloc(Descriptor::new(3)), Err(errno::EMFILE));
-        assert_eq!(t.alloc_at_or_above(2, Descriptor::new(4)), Err(errno::EMFILE));
+        assert_eq!(
+            t.alloc_at_or_above(2, Descriptor::new(4)),
+            Err(errno::EMFILE)
+        );
     }
 
     #[test]
@@ -309,7 +326,10 @@ mod tests {
 
         let closed = t.close_on_exec();
         assert_eq!(closed.len(), 2);
-        assert!(closed.contains(&Descriptor { file: 7, close_on_exec: true }));
+        assert!(closed.contains(&Descriptor {
+            file: 7,
+            close_on_exec: true
+        }));
         assert!(t.is_open(0) && t.is_open(1));
         assert!(!t.is_open(2));
         assert!(!t.is_open(d));

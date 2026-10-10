@@ -166,12 +166,18 @@ impl Timespec {
     pub const NANOS_PER_SEC: i64 = 1_000_000_000;
 
     /// The zero timestamp.
-    pub const ZERO: Self = Self { tv_sec: 0, tv_nsec: 0 };
+    pub const ZERO: Self = Self {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
 
     /// Construct, saturating an out-of-range nanosecond count rather than wrapping.
     #[must_use]
     pub const fn new(sec: Time, nsec: i64) -> Self {
-        Self { tv_sec: sec, tv_nsec: nsec }
+        Self {
+            tv_sec: sec,
+            tv_nsec: nsec,
+        }
     }
 
     /// `true` if `tv_nsec` is in range. An out-of-range value must produce `EINVAL`.
@@ -201,7 +207,10 @@ impl Timespec {
                 None => i64::MAX,
             };
         }
-        Self { tv_sec: sec, tv_nsec: nsec }
+        Self {
+            tv_sec: sec,
+            tv_nsec: nsec,
+        }
     }
 
     /// `self + other`, saturating instead of overflowing.
@@ -211,13 +220,23 @@ impl Timespec {
             Some(v) => v,
             None => {
                 return if self.tv_sec > 0 {
-                    Self { tv_sec: i64::MAX, tv_nsec: Self::NANOS_PER_SEC - 1 }
+                    Self {
+                        tv_sec: i64::MAX,
+                        tv_nsec: Self::NANOS_PER_SEC - 1,
+                    }
                 } else {
-                    Self { tv_sec: i64::MIN, tv_nsec: 0 }
+                    Self {
+                        tv_sec: i64::MIN,
+                        tv_nsec: 0,
+                    }
                 };
             }
         };
-        Self { tv_sec: sec, tv_nsec: self.tv_nsec + other.tv_nsec }.normalized()
+        Self {
+            tv_sec: sec,
+            tv_nsec: self.tv_nsec + other.tv_nsec,
+        }
+        .normalized()
     }
 
     /// `self - other`, saturating instead of overflowing.
@@ -227,13 +246,23 @@ impl Timespec {
             Some(v) => v,
             None => {
                 return if self.tv_sec > 0 {
-                    Self { tv_sec: i64::MAX, tv_nsec: Self::NANOS_PER_SEC - 1 }
+                    Self {
+                        tv_sec: i64::MAX,
+                        tv_nsec: Self::NANOS_PER_SEC - 1,
+                    }
                 } else {
-                    Self { tv_sec: i64::MIN, tv_nsec: 0 }
+                    Self {
+                        tv_sec: i64::MIN,
+                        tv_nsec: 0,
+                    }
                 };
             }
         };
-        Self { tv_sec: sec, tv_nsec: self.tv_nsec - other.tv_nsec }.normalized()
+        Self {
+            tv_sec: sec,
+            tv_nsec: self.tv_nsec - other.tv_nsec,
+        }
+        .normalized()
     }
 }
 
@@ -509,7 +538,9 @@ mod tests {
 
     #[test]
     fn dt_and_mode_round_trip() {
-        for mode in [S_IFREG, S_IFDIR, S_IFLNK, S_IFIFO, S_IFSOCK, S_IFCHR, S_IFBLK] {
+        for mode in [
+            S_IFREG, S_IFDIR, S_IFLNK, S_IFIFO, S_IFSOCK, S_IFCHR, S_IFBLK,
+        ] {
             let dt = dt_from_mode(mode | 0o755);
             assert_ne!(dt, DT_UNKNOWN, "mode {mode:#o} mapped to DT_UNKNOWN");
             assert_eq!(mode_from_dt(dt), mode);
@@ -522,8 +553,16 @@ mod tests {
     fn makedev_round_trips() {
         for (major, minor) in [(0u64, 0u64), (8, 1), (259, 0), (1 << 24, (1 << 20) - 1)] {
             let dev = makedev(major, minor);
-            assert_eq!(self::major(dev), major, "major mismatch for {major}:{minor}");
-            assert_eq!(self::minor(dev), minor, "minor mismatch for {major}:{minor}");
+            assert_eq!(
+                self::major(dev),
+                major,
+                "major mismatch for {major}:{minor}"
+            );
+            assert_eq!(
+                self::minor(dev),
+                minor,
+                "minor mismatch for {major}:{minor}"
+            );
         }
     }
 

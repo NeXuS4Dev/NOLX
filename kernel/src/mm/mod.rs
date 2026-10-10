@@ -15,8 +15,8 @@
 use core::fmt::Write;
 
 use crate::hal::console::Console;
-use crate::sync::SyncCell;
 use crate::hal::multiboot::BootInfo;
+use crate::sync::SyncCell;
 
 /// Bytes in a physical page.
 pub const PAGE_SIZE: usize = 4096;
@@ -104,7 +104,11 @@ pub fn init(console: &mut Console, info: &BootInfo) {
         for region in map.regions() {
             let first = (region.base as usize) / PAGE_SIZE;
             let last = (region.end() as usize).div_ceil(PAGE_SIZE);
-            let state = if region.is_usable() { FrameState::Free } else { FrameState::Reserved };
+            let state = if region.is_usable() {
+                FrameState::Free
+            } else {
+                FrameState::Reserved
+            };
             for index in first.min(len)..last.min(len) {
                 (*FRAME_STATES.get())[index] = state;
             }
@@ -154,7 +158,10 @@ pub fn init_without_firmware(console: &mut Console) {
         }
         // The first megabyte holds the real-mode structures, the BIOS data area, and the
         // kernel image itself. Never hand it out.
-        for state in (*FRAME_STATES.get()).iter_mut().take((1024 * 1024) / PAGE_SIZE) {
+        for state in (*FRAME_STATES.get())
+            .iter_mut()
+            .take((1024 * 1024) / PAGE_SIZE)
+        {
             *state = FrameState::Reserved;
         }
         *FRAME_MAP_LEN.get() = len;
