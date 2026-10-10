@@ -357,6 +357,16 @@ pub fn validate_container(sb: &gen::nolx_nx_superblock_t) -> Result<()> {
     if unsupported != 0 {
         return Err(FsError::UnsupportedFeature(unsupported));
     }
+    // The other direction matters just as much, and is the one that is easy to miss. A
+    // container that does not *require* the v1 base features is not describing a v1
+    // container, and accepting it would mean interpreting fields whose meaning only the
+    // base set defines.
+    let missing = u64::from(gen::NX_FEATURE_REQ_V1_BASE) & !sb.features_required;
+    if missing != 0 {
+        return Err(FsError::InvalidField(
+            "the container does not require the v1 base features",
+        ));
+    }
     // The checkpoint rings must lie inside the container, or reading them reads past the
     // end of the device.
     let desc_end = sb

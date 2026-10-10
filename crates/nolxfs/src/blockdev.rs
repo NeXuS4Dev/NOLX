@@ -119,15 +119,17 @@ pub trait BlockDevice {
         })
     }
 
-    /// Serialise a `T` into a block and write it.
+    /// Serialise a `T` into a block, seal it, and write it.
     ///
     /// The remainder of the block is zeroed, so a rewritten block never leaks the previous
-    /// occupant's bytes.
+    /// occupant's bytes. The caller fills in the object header -- id, transaction, type --
+    /// and this fills in the checksum, which makes it the exact counterpart of
+    /// [`BlockDevice::read_object`]: nothing can be written here that cannot be read back.
     ///
     /// # Errors
     ///
     /// As [`BlockDevice::write_block`], plus [`DevError::BadBufferLen`] if `T` does not
-    /// fit in a block.
+    /// fit in a block or the block is not a whole number of checksum words.
     fn write_object<T: Pod>(&mut self, index: u64, value: &T) -> Result<(), DevError> {
         let size = self.block_size();
         if core::mem::size_of::<T>() > size {
@@ -138,6 +140,15 @@ pub trait BlockDevice {
         }
         let mut buf = vec![0u8; size];
         buf[..core::mem::size_of::<T>()].copy_from_slice(value.as_bytes());
+        // Zero the checksum field, checksum the block, store the result. `compute` skips
+        // the first two words, so the zeroing is belt and braces rather than load-bearing,
+        // but writing it explicitly means this cannot drift from `on_disk::seal`.
+        buf[..8].copy_from_slice(&0u64.to_le_bytes());
+        let sum = fletcher::compute(&buf).ok_or(DevError::BadBufferLen {
+            got: size,
+            want: 4,
+        })?;
+        buf[..8].copy_from_slice(&sum.to_le_bytes());
         self.write_block(index, &buf)
     }
 }
@@ -372,6 +383,30 @@ mod tests {
     }
 
     #[test]
+    fn a_corrupted_object_is_refused_on_read() {
+        let mut dev = MemBlockDevice::new(4096, 8);
+        let mut sb = on_disk_gen::nolx_obj_phys_t::zeroed();
+        sb.oid = 7;
+        sb.r#type = on_disk_gen::OBJ_CONTAINER_SUPERBLOCK;
+        dev.write_object(0, &sb).unwrap();
+
+        // Flip a bit in the body and leave the stored checksum alone: this is what a torn
+        // write or a bad sector looks like, and it is the case the checksum exists for.
+        let mut raw = vec![0u8; 4096];
+        dev.read_block(0, &mut raw).unwrap();
+        raw[20] ^= 0xFF;
+        dev.write_block(0, &raw).unwrap();
+
+        assert!(
+            matches!(
+                dev.read_object::<on_disk_gen::nolx_obj_phys_t>(0),
+                Err(DevError::BadChecksum { oid: 7 })
+            ),
+            "a corrupted object must be refused on read"
+        );
+    }
+
+    #[test]
     fn object_helpers_round_trip_a_real_on_disk_struct() {
         let mut dev = MemBlockDevice::new(4096, 8);
         let mut sb = on_disk_gen::nolx_obj_phys_t::zeroed();
@@ -381,7 +416,12 @@ mod tests {
         dev.write_object(0, &sb).unwrap();
 
         let back: on_disk_gen::nolx_obj_phys_t = dev.read_object(0).unwrap();
-        assert_eq!(back, sb);
+        // `write_object` seals what it writes, so the one field that differs on the way
+        // back is the checksum it filled in.
+        assert_eq!(back.oid, sb.oid);
+        assert_eq!(back.xid, sb.xid);
+        assert_eq!(back.r#type, sb.r#type);
+        assert_ne!(back.checksum, 0, "write_object must seal what it writes");
         // The rest of the block must have been zeroed, not left as it was.
         let mut raw = vec![0u8; 4096];
         dev.read_block(0, &mut raw).unwrap();
