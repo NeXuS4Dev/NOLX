@@ -22,16 +22,18 @@ pub mod multiboot;
 #[inline]
 pub unsafe fn inb(port: u16) -> u8 {
     let value: u8;
-    // SAFETY: the caller asserts the port is valid, and the `out("al")` constraint ties the
-    // result to the register the instruction writes.
+    // The only option here is `nostack`. The `nomem` and `preserves_flags` that a port
+    // read looks like it deserves are deliberately absent: together with `nostack` they
+    // tell LLVM the block has no observable effect beyond its outputs, and then LLVM is
+    // free to hoist the read out of a spin loop -- which turns
+    // `while inb(LSR) & THRE == 0 {}` into an infinite loop that reads the port once.
+    // Port I/O is a side effect; the compiler must not be told otherwise.
     //
-    // The only option here is `nostack`. `nomem` and `preserves_flags` are deliberately
-    // absent: together with `nostack` they tell LLVM the block has no observable effect
-    // beyond its outputs, and for a port read that has no outputs LLVM is then free to
-    // hoist it out of a spin loop -- which turns `while inb(LSR) & THRE == 0 {}` into an
-    // infinite loop that reads the port exactly once. Port I/O is a side effect; the
-    // compiler must not be told otherwise.
-    unsafe { core::arch::asm!("in al, dx", out("al") value, in("dx") port, options(nostack)) };
+    // SAFETY: the caller asserts the port is valid, and `out("al")` ties the result to the
+    // register the instruction writes.
+    unsafe {
+        core::arch::asm!("in al, dx", out("al") value, in("dx") port, options(nostack))
+    };
     value
 }
 
@@ -42,14 +44,16 @@ pub unsafe fn inb(port: u16) -> u8 {
 /// As [`inb`], and the write may have an immediate device side effect.
 #[inline]
 pub unsafe fn outb(port: u16, value: u8) {
-    // SAFETY: the caller asserts the port is valid and accepts the write.
-    //
     // `nostack` only, and the reason is sharper here than for [`inb`]: this block has no
-    // output operands at all, so `nomem` plus `preserves_flags` plus `nostack` would
-    // describe it as an instruction with no observable effect whatsoever -- which licenses
-    // LLVM to delete it. A deleted port write is the quietest possible failure: the code
-    // runs, nothing faults, and nothing is ever transmitted.
-    unsafe { core::arch::asm!("out dx, al", in("dx") port, in("al") value, options(nostack)) };
+    // output operands at all, so the three options together would describe an instruction
+    // with no observable effect whatsoever, which licenses LLVM to delete it. A deleted
+    // port write is the quietest failure there is -- the code runs, nothing faults, and
+    // nothing is ever transmitted.
+    //
+    // SAFETY: the caller asserts the port is valid and accepts the write.
+    unsafe {
+        core::arch::asm!("out dx, al", in("dx") port, in("al") value, options(nostack))
+    };
 }
 
 /// Read a 32-bit model-specific register.
@@ -62,8 +66,10 @@ pub unsafe fn outb(port: u16, value: u8) {
 pub unsafe fn rdmsr(msr: u32) -> u64 {
     let low: u32;
     let high: u32;
+    // `nostack` only, for the reason [`inb`] gives.
+    //
     // SAFETY: the caller asserts the MSR exists. `rdmsr` returns its result in edx:eax,
-    // which the two `out` constraints capture. `nostack` only, as [`inb`] explains.
+    // which the two `out` constraints capture.
     unsafe {
         core::arch::asm!(
             "rdmsr",
@@ -83,9 +89,10 @@ pub unsafe fn rdmsr(msr: u32) -> u64 {
 /// As [`rdmsr`], and writing some MSRs changes the CPU's mode of operation.
 #[inline]
 pub unsafe fn wrmsr(msr: u32, value: u64) {
-    // SAFETY: the caller asserts the MSR exists and that `value` is valid for it.
     // `nostack` only: like [`outb`], this has no outputs, so claiming no other effect
     // would license LLVM to delete a write that changes how the CPU behaves.
+    //
+    // SAFETY: the caller asserts the MSR exists and that `value` is valid for it.
     unsafe {
         core::arch::asm!(
             "wrmsr",
