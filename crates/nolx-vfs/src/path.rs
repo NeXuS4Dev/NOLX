@@ -300,6 +300,8 @@ impl<'a> Queue<'a> {
     }
 
     /// The bytes of every component, for tests and diagnostics.
+    // Only the tests read the queue directly; resolution walks it with `pop_at_front`.
+    #[cfg(test)]
     fn as_slices(&self) -> Vec<&[u8]> {
         self.items.iter().map(Comp::as_bytes).collect()
     }
@@ -486,8 +488,25 @@ mod tests {
     fn duplicate_slashes_name_the_same_file() {
         let t = sample_tree();
         let a = resolve(&t, b"/dir/file", Final::Follow).unwrap();
-        let b = resolve(&t, b"//dir///file//", Final::Follow).unwrap();
+        let b = resolve(&t, b"//dir///file", Final::Follow).unwrap();
         assert_eq!(a.node, b.node);
+    }
+
+    #[test]
+    fn a_trailing_slash_requires_the_last_component_to_be_a_directory() {
+        // Base Definitions, Pathname Resolution: a pathname that ends in one or more
+        // slashes resolves only if the last component before them names a directory. So
+        // `file/` is not the same pathname as `file`, and collapsing the slashes first
+        // would silently accept it.
+        let t = sample_tree();
+        assert_eq!(resolve(&t, b"/dir/file/", Final::Follow), Err(errno::ENOTDIR));
+        assert_eq!(
+            resolve(&t, b"//dir///file//", Final::Follow),
+            Err(errno::ENOTDIR)
+        );
+        assert!(resolve(&t, b"/dir/", Final::Follow).is_ok());
+        assert!(resolve(&t, b"/dir//", Final::Follow).is_ok());
+        assert!(resolve(&t, b"/dir/./", Final::Follow).is_ok());
     }
 
     #[test]

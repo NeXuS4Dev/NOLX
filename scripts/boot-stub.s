@@ -11,6 +11,13 @@
 
     .section .text
     .code64
+    .globl  nolx_probe0
+    .type   nolx_probe0, @function
+nolx_probe0:
+    /* extern "C" fn nolx_probe0() -- empty in the real kernel too. */
+    ret
+    .size   nolx_probe0, . - nolx_probe0
+
     .globl  nolx_probe
     .type   nolx_probe, @function
 nolx_probe:

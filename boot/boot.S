@@ -96,8 +96,14 @@ msg_returned:
     .asciz  "NOLX: FATAL: kernel entry point returned\r\n"
 msg_idt:
     .asciz  "NOLX: early exception handlers installed\r\n"
+msg_probe0:
+    .asciz  "NOLX: calling nolx_probe0 (empty)\r\n"
+msg_probe0_back:
+    .asciz  "NOLX: nolx_probe0 returned\r\n"
+msg_probe_bytes:
+    .asciz  "NOLX: first 16 bytes at nolx_probe: "
 msg_probe_at:
-    .asciz  "NOLX: calling nolx_probe at 0x"
+    .asciz  "\r\nNOLX: calling nolx_probe at 0x"
 msg_probe_back:
     .asciz  "\r\nNOLX: nolx_probe returned\r\n"
 msg_exc_head:
@@ -320,12 +326,33 @@ long_mode_entry:
     call    serial_puts64
 
     /*
-     * Bisecting probe: a Rust function that does nothing but print.
+     * Three probes, each answering one question.
      *
-     * The address is printed as well as the markers, because "the call did not happen"
-     * and "the call went somewhere else" look identical on a serial console and the
-     * answer is one `lea` away.
+     * 1. `nolx_probe0` is an empty Rust function. If it returns, the trampoline can
+     *    reach Rust and return from it, and whatever is wrong is not the handoff.
+     * 2. The first sixteen bytes at `nolx_probe` are printed. If they are zeros, the
+     *    call is going into memory the loader never wrote, which no amount of
+     *    reasoning about the entry point would have revealed.
+     * 3. `nolx_probe` prints from Rust through the same COM1 the boot layer uses.
      */
+    movl    $msg_probe0, %esi
+    call    serial_puts64
+    call    nolx_probe0
+    movl    $msg_probe0_back, %esi
+    call    serial_puts64
+
+    movl    $msg_probe_bytes, %esi
+    call    serial_puts64
+    leaq    nolx_probe(%rip), %r12
+    movl    $16, %r13d
+1:  movzbq  (%r12), %r8
+    call    serial_puthex8
+    movl    $0x20, %ecx
+    call    serial_putc64
+    incq    %r12
+    decl    %r13d
+    jnz     1b
+
     movl    $msg_probe_at, %esi
     call    serial_puts64
     leaq    nolx_probe(%rip), %r8
@@ -455,6 +482,38 @@ serial_puthex64:
     pushq   %rdx
     pushq   %r9
     movl    $60, %r9d
+1:  movq    %r8, %rax
+    movl    %r9d, %ecx
+    shrq    %cl, %rax
+    andl    $0x0f, %eax
+    cmpb    $10, %al
+    jb      3f
+    addb    $('a' - '0' - 10), %al
+3:  addb    $'0', %al
+    movb    %al, %cl
+    call    serial_putc64
+    subl    $4, %r9d
+    jns     1b
+    popq    %r9
+    popq    %rdx
+    popq    %rcx
+    popq    %rax
+    ret
+
+    .type serial_puthex8, @function
+/*
+ * serial_puthex8: %r8 = value. Prints its low byte as two hex digits.
+ *
+ * `serial_puthex64` is fixed width at sixteen digits, which is right for a register and
+ * absurd for a byte. Clobbers %rax, %rcx, %rdx, %cl, %r8. Preserves everything else, so
+ * the byte-dump loop can keep its cursor in %r12 and its counter in %r13 across the call.
+ */
+serial_puthex8:
+    pushq   %rax
+    pushq   %rcx
+    pushq   %rdx
+    pushq   %r9
+    movl    $4, %r9d
 1:  movq    %r8, %rax
     movl    %r9d, %ecx
     shrq    %cl, %rax

@@ -52,6 +52,14 @@ pub const MULTIBOOT_BOOTLOADER_MAGIC: u32 = 0x2BAD_B002;
 /// does not, the fault is in the kernel entry point rather than in the handoff. It is
 /// cheap to keep, and it is the first thing to look at when a future change to the entry
 /// path breaks booting.
+/// An empty Rust function, called from `boot/boot.S` before [`nolx_probe`].
+///
+/// It answers one question and nothing else: can the trampoline enter Rust and come back?
+/// If this returns and `nolx_probe` does not, the handoff is fine and whatever is wrong is
+/// in what `nolx_probe` touches -- one port read and one port write.
+#[no_mangle]
+extern "C" fn nolx_probe0() {}
+
 #[no_mangle]
 extern "C" fn nolx_probe() {
     hal::console::raw_put_str("NOLX: nolx_probe reached (Rust is callable)\n");
