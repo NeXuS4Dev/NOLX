@@ -102,12 +102,11 @@ pub trait BlockDevice {
         // leaving it to whichever caller remembers, is the only way the guarantee means
         // anything: a mount that reads a torn superblock must refuse to mount, and a
         // filesystem that reads a torn B-tree node must not go on indexing with it.
-        let header = on_disk_gen::nolx_obj_phys_t::read_from(&buf).ok_or(
-            DevError::BadBufferLen {
+        let header =
+            on_disk_gen::nolx_obj_phys_t::read_from(&buf).ok_or(DevError::BadBufferLen {
                 got: buf.len(),
                 want: on_disk_gen::nolx_obj_phys_t::DISK_SIZE,
-            },
-        )?;
+            })?;
         if !fletcher::verify(&buf, header.checksum) {
             return Err(DevError::BadChecksum { oid: header.oid });
         }
@@ -144,10 +143,7 @@ pub trait BlockDevice {
         // the first two words, so the zeroing is belt and braces rather than load-bearing,
         // but writing it explicitly means this cannot drift from `on_disk::seal`.
         buf[..8].copy_from_slice(&0u64.to_le_bytes());
-        let sum = fletcher::compute(&buf).ok_or(DevError::BadBufferLen {
-            got: size,
-            want: 4,
-        })?;
+        let sum = fletcher::compute(&buf).ok_or(DevError::BadBufferLen { got: size, want: 4 })?;
         buf[..8].copy_from_slice(&sum.to_le_bytes());
         self.write_block(index, &buf)
     }
