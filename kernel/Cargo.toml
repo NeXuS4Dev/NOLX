@@ -24,4 +24,10 @@ path = "src/main.rs"
 
 [dependencies]
 nolx-hal-core = { path = "../crates/nolx-hal-core" }
+# The memory-management algorithms: buddy allocator, frame magazines, page-table
+# arithmetic, VAD tree, commit accounting, and the kernel heap. `no_std`, no hardware
+# access, and `forbid(unsafe_code)`, so all of it runs under `cargo test` on the host while
+# the kernel reaches the same code through the traits it implements (`BlockStore`,
+# `TableStore`) over the direct map.
+nolx-mm-core = { path = "../crates/nolx-mm-core" }
 nolx-types = { path = "../crates/nolx-types" }

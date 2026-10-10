@@ -39,7 +39,7 @@ Get from firmware to `nolx_kernel_main` in 64-bit long mode.
   services hand-off, Secure Boot–compatible PE layout).
 - Tests: T2 `NOLX: boot layer reached long mode`; T1 multiboot header validation.
 
-## M2 — HAL: console, tables, interrupts, time
+## M2 — HAL: console, tables, interrupts, time (done)
 
 - Serial (16550) + VGA text console behind one `HalConsole` trait; boot log from the first
   instruction that can print.
@@ -63,15 +63,26 @@ periodic LAPIC timer otherwise. The 8259/PIT remains a fallback when firmware, A
 calibration setup is unavailable. HPET also backs monotonic time (including extension of
 32-bit counter wraps); the RTC wall-clock anchor stores its matching monotonic baseline.
 
-The host assertion database covers portable ACPI/APIC parsing and timer arithmetic. CI is
-configured to boot the normal APIC/HPET timer path, assert 100 timer interrupts, exercise a
-separate PIC/PIT fallback boot with local APIC hidden, and boot `#PF`/`#GP` fault images.
-Those QEMU checks are still **pending** until this code revision has a passing workflow run.
-The HAL also retains the earlier verified console contract, TSS/IST stacks, complete IDT,
+The host assertion database covers portable ACPI/APIC parsing and timer arithmetic. CI boots
+the normal APIC/HPET timer path, asserts 100 timer interrupts, exercises a separate PIC/PIT
+fallback boot with local APIC hidden, and boots `#PF`/`#GP` fault images. Those QEMU checks
+are no longer pending: workflow run
+[38086516018](https://github.com/NeXuS4Dev/NOLX/actions/runs/38086516018) on revision
+`dc2d8d1` passed all six jobs -- boot layer, NOLXFS layout, host tests, fmt + clippy + unsafe
+audit, kernel build, and the QEMU boot smoke test -- and the eight HAL assertions that were
+`pending-T2` are recorded as `tested-T2` in `docs/testing/assertions/hal.md`. The HAL also
+retains the earlier verified console contract, TSS/IST stacks, complete IDT,
 register-preserving interrupt stubs, and bootstrap GS-based per-CPU block.
 
-M2 remains **in progress** pending host/build and QEMU verification of this extension; no
-current-revision Rust build or QEMU pass is claimed in this checkpoint.
+M2 is **done**: the code exists, its listed tests pass in CI, and its assertions are recorded
+in the database.
+
+### M2 verification checkpoint — 2026-10-10
+
+The revision named above is the first on which every M2 claim has a passing machine record
+behind it. The QEMU boot smoke test asserts the boot markers themselves -- not a summary of
+them -- and the serial log for each run is archived as a build artifact and posted on the
+pull request, so the evidence can be read rather than trusted.
 
 ## M3 — Memory management
 
@@ -87,6 +98,40 @@ current-revision Rust build or QEMU pass is claimed in this checkpoint.
   quota objects.
 - Tests: T1 buddy allocator + VAD tree property tests (split/coalesce invariants,
   fragmentation bounds, overlap rejection); T2 stress allocation under interrupt load.
+
+M3 is **in progress**. The algorithms are done and host-tested; the parts that need a
+machine to run on are partly wired up.
+
+### M3 progress checkpoint — 2026-10-10
+
+Landed:
+
+* `crates/nolx-mm-core` -- the buddy allocator, per-CPU frame magazines with a zeroed-frame
+  pool, the four-level paging arithmetic and page-table walker, the VAD tree, the commit and
+  pool accounting, and the boundary-tagged kernel heap. `no_std`, `forbid(unsafe_code)`, and
+  therefore the same code under `cargo test` on the host as in the kernel, reached through
+  the `BlockStore` and `TableStore` traits.
+* `kernel/src/mm` -- the frame map gains the reservations that make it honest (low memory,
+  the kernel image and BSS, the static heap arena, and frames outside the boot identity map),
+  the buddy allocator is built from runs of free frames, and the boot processor's magazine
+  sits in front of it. `kernel/src/mm/store.rs` is the `BlockStore` over the direct map: the
+  free-list links are written into the free frames themselves.
+* `kernel/src/mm/selftest.rs` -- the boot-time stress test: single frames in both
+  directions, then a deterministic mixed-order walk, audited every few thousand operations,
+  running until the timer has ticked so the allocations demonstrably happen under interrupt
+  load. It ends by requiring the free-frame count to return to where it started.
+
+The four allocator assertions that were `pending-T2` are now `tested-T2`, recorded against
+workflow run 38088471560 on revision `a025a42` -- the same bar M2 was held to: the claim, the
+marker that carries it, and the run that shows it happening.
+
+Still to do in M3:
+
+* page tables in the kernel (per-process address spaces over the frame allocator) and the
+  higher-half switch, which `kernel/linker.ld` and `boot/boot.S` both reserve for M3;
+* the kernel heap registered as a `GlobalAlloc`, over regions taken from the frame allocator;
+* demand paging, copy-on-write, and the four fault causes from the memory-manager design;
+* NUMA node lists, and the pool accounting wired to the object manager.
 
 ## M4 — Object Manager and handles
 

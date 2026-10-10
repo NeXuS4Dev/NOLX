@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/nolx-types",
     "crates/nolx-hal-core",
+    "crates/nolx-mm-core",
     "crates/nolx-syscall",
     "crates/nolxfs",
     "crates/nolx-vfs",
@@ -10,11 +11,12 @@ members = [
     "tools/mkfs-nolxfs",
 ]
 # `cargo test` with no `-p` and no `--workspace` uses these. The kernel is deliberately
-# excluded: it is a `no_std` binary with no host test harness, and its testable HAL layouts
-# and calculations live in `nolx-hal-core`.
+# excluded: it is a `no_std` binary with no host test harness, and its testable HAL and
+# memory-management layouts live in `nolx-hal-core` and `nolx-mm-core`.
 default-members = [
     "crates/nolx-types",
     "crates/nolx-hal-core",
+    "crates/nolx-mm-core",
     "crates/nolx-syscall",
     "crates/nolxfs",
     "crates/nolx-vfs",
@@ -24,7 +26,12 @@ default-members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
+# 1.80 was the floor while the kernel was HAL-only. The memory manager uses
+# `u64::is_multiple_of` on the allocation paths, where writing `% size == 0` would be both
+# slower to read and a Clippy warning under `-D warnings`; that method is stable from 1.87.
+# The floor is set to 1.88, the toolchain the tree is verified with, rather than to the
+# exact stabilisation release.
+rust-version = "1.88"
 license = "BSD-2-Clause"
 repository = "https://github.com/NeXuS4Dev/NOLX"
 authors = ["The NOLX Authors"]

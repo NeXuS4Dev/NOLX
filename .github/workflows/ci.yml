@@ -231,6 +231,11 @@ jobs:
             "wall-clock: CMOS RTC UTC epoch=" \
             "NOLX: hal online" \
             "NOLX: mm online" \
+            "NOLX: frame allocator online" \
+            "NOLX: mm selftest: starting" \
+            "NOLX: mm selftest: single-frame phase" \
+            "NOLX: mm selftest: mixed-order phase" \
+            "NOLX: mm selftest: complete" \
             "NOLX: objmgr online" \
             "NOLX: init sequence complete, halting the boot processor" \
             "NOLX: timer reached 100 ticks; nominal 100 Hz"
@@ -242,6 +247,13 @@ jobs:
           done
           if ! grep -Eq 'hal: active clock source=(calibrated LAPIC|TSC deadline)' build/serial.log; then
             echo "the calibrated local-APIC timer was not selected"
+            exit 1
+          fi
+          # The allocator's stress test has to have run *while the clock kept ticking*: the
+          # tick count is the evidence that interrupts were live during the allocations,
+          # and the audit is the evidence that the free lists survived them.
+          if ! grep -Eq 'NOLX: mm selftest: complete: [0-9]+ operations, audit ok, ticks=[1-9][0-9]*' build/serial.log; then
+            echo "the memory-manager stress test did not complete cleanly under interrupt load"
             exit 1
           fi
           python3 - <<'PY'

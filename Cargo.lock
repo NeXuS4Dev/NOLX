@@ -19,8 +19,13 @@ name = "nolx-kernel"
 version = "0.1.0"
 dependencies = [
  "nolx-hal-core",
+ "nolx-mm-core",
  "nolx-types",
 ]
+
+[[package]]
+name = "nolx-mm-core"
+version = "0.1.0"
 
 [[package]]
 name = "nolx-syscall"

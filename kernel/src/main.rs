@@ -128,6 +128,7 @@ extern "C" fn nolx_kernel_main(mb_info: *const u8, magic: u32) -> ! {
         unsafe { core::arch::asm!("sti", options(nostack)) };
 
         let mut timer_marker_reported = false;
+        let mut memory_selftest_done = false;
         loop {
             let ticks = hal::timer::ticks();
             if !timer_marker_reported && ticks >= 100 {
@@ -141,6 +142,18 @@ extern "C" fn nolx_kernel_main(mb_info: *const u8, magic: u32) -> ! {
                     realtime_ns,
                 );
                 timer_marker_reported = true;
+            }
+
+            // Exercise the frame allocator once the clock is live, so the stress runs while
+            // timer interrupts keep arriving instead of in the quiet window before they
+            // start. A failure is fatal: a memory manager that did not survive its own self
+            // test must not go on to serve allocations.
+            if timer_marker_reported && !memory_selftest_done {
+                memory_selftest_done = true;
+                if let Err(message) = mm::selftest::run(&mut console) {
+                    let _ = writeln!(console, "NOLX: mm selftest: FAILED: {message}");
+                    panic!("mm selftest: {message}");
+                }
             }
 
             // SAFETY: this boot processor has no runnable work. The selected periodic timer
