@@ -276,7 +276,9 @@ mod tests {
         for w in &data {
             bytes.extend_from_slice(&w.to_le_bytes());
         }
-        assert_eq!(fletcher64(&data), fletcher64_bytes(&bytes));
+        // `fletcher64` cannot fail on a word slice; the byte interface can, on a length
+        // that is not a whole number of words. Unwrapping here is the assertion.
+        assert_eq!(fletcher64(&data), fletcher64_bytes(&bytes).unwrap());
     }
 
     #[test]

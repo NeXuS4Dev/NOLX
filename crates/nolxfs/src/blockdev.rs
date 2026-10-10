@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn object_helpers_reject_a_struct_larger_than_a_block() {
-        let dev = MemBlockDevice::new(512, 8);
+        let mut dev = MemBlockDevice::new(512, 8);
         let sb = on_disk_gen::nolx_nx_superblock_t::zeroed();
         let err = dev.write_object(0, &sb).unwrap_err();
         assert!(matches!(

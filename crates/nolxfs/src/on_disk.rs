@@ -499,7 +499,7 @@ mod tests {
         sb.magic = gen::MAGIC_CONTAINER_SUPERBLOCK;
         sb.block_size = 4096;
         sb.block_count = 1_000_000;
-        sb.features_required = gen::NX_FEATURE_REQ_V1_BASE;
+        sb.features_required = u64::from(gen::NX_FEATURE_REQ_V1_BASE);
         sb.xp_desc_base = 1;
         sb.xp_desc_blocks = 32;
         sb.xp_data_base = 33;
@@ -561,7 +561,7 @@ mod tests {
         let mut sb = gen::nolx_fs_superblock_t::zeroed();
         sb.magic = gen::MAGIC_VOLUME_SUPERBLOCK;
         sb.block_size = 4096;
-        sb.features_required = gen::NX_FEATURE_REQ_V1_BASE;
+        sb.features_required = u64::from(gen::NX_FEATURE_REQ_V1_BASE);
         sb.omap_oid = 10;
         sb.root_tree_oid = 11;
         sb.extentref_tree_oid = 12;
@@ -631,13 +631,16 @@ mod tests {
     fn parse_rejects_the_wrong_object_type() {
         let mut block = vec![0u8; 4096];
         seal(&mut block, ObjHeader::make(1, 1, gen::OBJ_OMAP, 0)).unwrap();
-        assert_eq!(
+        // `ObjRef` borrows the block it parsed and deliberately does not implement
+        // `PartialEq`: two references to the same bytes are not the same object, and
+        // comparing them would invite exactly that mistake. Assert on the error.
+        assert!(matches!(
             ObjRef::parse(&block, gen::OBJ_BTREE_ROOT),
             Err(FsError::BadType {
                 found: gen::OBJ_OMAP,
                 expected: gen::OBJ_BTREE_ROOT,
             })
-        );
+        ));
     }
 
     #[test]

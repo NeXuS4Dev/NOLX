@@ -625,10 +625,13 @@ mod tests {
             l.extentref_tree_root,
             l.snap_meta_tree_root,
         ];
-        let mut sorted = blocks;
+        // A fixed array has no `dedup`, and the overlap check is the point of the test, so
+        // this moves to a Vec rather than being rewritten as a pairwise comparison.
+        let mut sorted = blocks.to_vec();
         sorted.sort_unstable();
+        let before = sorted.len();
         sorted.dedup();
-        assert_eq!(sorted.len(), blocks.len(), "metadata blocks overlap");
+        assert_eq!(sorted.len(), before, "metadata blocks overlap");
     }
 
     #[test]

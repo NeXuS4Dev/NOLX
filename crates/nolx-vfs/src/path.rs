@@ -27,6 +27,8 @@
 //! * A component longer than `NAME_MAX` is `ENAMETOOLONG`; a pathname longer than
 //!   `PATH_MAX` is likewise `ENAMETOOLONG`.
 
+use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use crate::mount::NodeId;
@@ -129,16 +131,12 @@ pub fn resolve<R: Resolver + ?Sized>(
     // A trailing slash means the pathname must name a directory.
     let require_dir = path.len() > 1 && path[path.len() - 1] == b'/';
 
-    // Symlink targets are owned by the resolver, but the components the queue holds borrow
-    // from them, so each target has to outlive the walk rather than the loop iteration that
-    // found it. The number of entries is bounded by `SYMLOOP_MAX`, so this cannot grow
-    // without limit. Appending here may reallocate the outer vector; that moves the inner
-    // `Vec<u8>` headers but never the buffers they point at, so slices already handed to
-    // the queue stay valid.
-    let mut link_targets: Vec<Vec<u8>> = Vec::new();
 
-    while let Some(component) = pending.pop_at_front() {
+    while let Some(comp) = pending.pop_at_front() {
         let is_last = pending.is_empty();
+        // `comp` is owned by this iteration, so borrowing its bytes does not borrow
+        // `pending` and cannot conflict with replacing the queue below.
+        let component: &[u8] = comp.as_bytes();
 
         if component == b"." {
             // `.` names the directory itself. A trailing `/.` still requires a directory.
@@ -178,15 +176,9 @@ pub fn resolve<R: Resolver + ?Sized>(
             }
             let starts_at_root = target[0] == b'/';
 
-            // Store first, then borrow from the stored copy: the queue's components must
-            // not point into a local that dies at the end of this iteration.
-            link_targets.push(target);
-            let stored: &[u8] = match link_targets.last() {
-                Some(bytes) => bytes,
-                None => return Err(errno::EIO),
-            };
-
-            let mut substituted = split_components(stored);
+            // The components carved from the target own their bytes, so they live exactly
+            // as long as the walk does and there is no arena to keep alive behind them.
+            let mut substituted = Queue::from_parts(split_owned(target));
             // Whatever is left of the original pathname comes after the substituted
             // components, which is what makes a relative link resolve in its own directory
             // and an absolute one restart from the root.
@@ -216,43 +208,95 @@ pub fn resolve<R: Resolver + ?Sized>(
 /// The returned queue borrows the path, which is what lets a symlink target be spliced in
 /// front of what remains without copying the whole pathname.
 fn split_components(path: &[u8]) -> Queue<'_> {
-    let items: Vec<&[u8]> = path
+    let items = path
         .split(|&b| b == b'/')
         .filter(|c| !c.is_empty())
+        .map(Comp::Borrowed)
         .collect();
-    Queue { items, head: 0 }
+    Queue { items }
+}
+
+/// Split a symlink target into owned components.
+///
+/// Owned because the target came from the resolver as a `Vec<u8>` that nothing else keeps
+/// alive. The lifetime parameter is unconstrained -- every component here is `Owned` -- so
+/// the result drops into any `Queue<'a>`.
+fn split_owned<'a>(target: Vec<u8>) -> Vec<Comp<'a>> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    for (index, &byte) in target.iter().enumerate() {
+        if byte == b'/' {
+            if index > start {
+                parts.push(Comp::Owned(target[start..index].into()));
+            }
+            start = index + 1;
+        }
+    }
+    if target.len() > start {
+        parts.push(Comp::Owned(target[start..].into()));
+    }
+    parts
+}
+
+/// One pathname component.
+///
+/// Borrowed when it is a slice of the pathname the caller passed in, owned when it was
+/// carved out of a symlink target. The owned variant is what makes substitution work: the
+/// resolver hands back a `Vec<u8>` with no other home, and the components taken from it
+/// have to live exactly as long as the walk rather than as long as one loop iteration.
+enum Comp<'a> {
+    /// A slice of the caller's pathname.
+    Borrowed(&'a [u8]),
+    /// A slice of a symlink target this resolution produced.
+    Owned(Box<[u8]>),
+}
+
+impl Comp<'_> {
+    /// The component's bytes, whichever variant holds them.
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(b) | Self::Owned(b) => b,
+        }
+    }
 }
 
 /// The component queue used while walking.
+///
+/// A `VecDeque` rather than a `Vec` plus a head index because components are now owned and
+/// have to be *moved* out, not copied.
 struct Queue<'a> {
-    items: Vec<&'a [u8]>,
-    head: usize,
+    items: VecDeque<Comp<'a>>,
 }
 
 impl<'a> Queue<'a> {
+    /// A queue over already-split components.
+    fn from_parts(parts: Vec<Comp<'a>>) -> Self {
+        Self { items: parts.into() }
+    }
+
     /// Take the next component, or `None` when exhausted.
-    fn pop_at_front(&mut self) -> Option<&'a [u8]> {
-        if self.head >= self.items.len() {
-            return None;
-        }
-        let item = self.items[self.head];
-        self.head += 1;
-        Some(item)
+    fn pop_at_front(&mut self) -> Option<Comp<'a>> {
+        self.items.pop_front()
     }
 
     /// `true` when no components remain.
     fn is_empty(&self) -> bool {
-        self.head >= self.items.len()
+        self.items.is_empty()
     }
 
     /// Everything not yet consumed.
-    fn take_rest(&mut self) -> Vec<&'a [u8]> {
-        self.items.drain(self.head..).collect()
+    fn take_rest(&mut self) -> Vec<Comp<'a>> {
+        self.items.drain(..).collect()
     }
 
     /// Push the unconsumed remainder of an outer resolution onto the back.
-    fn append_tail(&mut self, tail: Vec<&'a [u8]>) {
+    fn append_tail(&mut self, tail: Vec<Comp<'a>>) {
         self.items.extend(tail);
+    }
+
+    /// The bytes of every component, for tests and diagnostics.
+    fn as_slices(&self) -> Vec<&[u8]> {
+        self.items.iter().map(Comp::as_bytes).collect()
     }
 }
 
@@ -387,7 +431,7 @@ mod tests {
     #[test]
     fn splits_components_and_collapses_slashes() {
         let q = split_components(b"/a//b///c/");
-        assert_eq!(q.items, vec![&b"a"[..], &b"b"[..], &b"c"[..]]);
+        assert_eq!(q.as_slices(), vec![&b"a"[..], &b"b"[..], &b"c"[..]]);
         assert!(split_components(b"/").items.is_empty());
         assert!(split_components(b"").items.is_empty());
     }
