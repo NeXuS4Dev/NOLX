@@ -213,7 +213,15 @@ jobs:
             "NOLX: boot layer entered (32-bit protected mode)" \
             "NOLX: long mode entered" \
             "NOLX: calling nolx_kernel_main" \
-            "NOLX: early exception handlers installed"
+            "NOLX: early exception handlers installed" \
+            "NOLX: nolx_probe0 returned" \
+            "NOLX: nolx_probe reached (Rust is callable)" \
+            "NOLX: nolx_kernel_main entered" \
+            "NOLX 0.1.0 starting" \
+            "NOLX: mm online" \
+            "NOLX: hal online" \
+            "NOLX: objmgr online" \
+            "NOLX: init sequence complete, halting the boot processor"
           do
             if ! grep -qF "$marker" build/serial.log; then
               echo "missing boot marker: $marker"
@@ -221,32 +229,13 @@ jobs:
             fi
           done
 
-      # KNOWN FAILURE, tracked and deliberately not gating.
-      #
-      # The trampoline calls into Rust and nothing comes back. The image is provably
-      # correct: readelf puts every section at its intended address, nm shows both entry
-      # points, and objdump shows nolx_probe containing the `out` to port 0x3F8 that would
-      # print. So the call is not reaching -- or not surviving -- Rust's first instruction.
-      #
-      # This step reports the gap instead of hiding it. It becomes a hard gate the moment
-      # the kernel entry point produces output; until then a green run must not be readable
-      # as "the kernel boots".
-      - name: Report the not-yet-reached markers (known failure)
+      # Every marker above is asserted, so this is a summary rather than a confession.
+      # It stays because the subsystem lines carry detail -- the memory map, the object
+      # type count, the syscall count -- that is worth reading rather than just passing.
+      - name: Report what the kernel said about itself
         run: |
-          for marker in \
-            "NOLX: nolx_probe reached (Rust is callable)" \
-            "NOLX: nolx_kernel_main entered" \
-            "NOLX: hal online" \
-            "NOLX: mm online" \
-            "NOLX: objmgr online"
-          do
-            if grep -qF "$marker" build/serial.log; then
-              echo "reached:     $marker"
-            else
-              echo "NOT reached: $marker"
-            fi
-          done
-          echo "::warning::the kernel entry point does not yet execute; see the report above"
+          grep -E "^(multiboot|mm|obj|exec|psx|io):" build/serial.log || \
+            echo "::warning::no subsystem reported in"
       - name: Assert nothing panicked
         run: |
           # `CPU exception` is the boot layer's own handler (boot/boot.S); the other two

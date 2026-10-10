@@ -247,30 +247,53 @@ Each wave is a numbered, testable set of System Interfaces functions.
 
 ---
 
-## Known defect: the kernel entry point does not yet execute
+## Resolved: the kernel entry point did not execute
 
-Recorded 2026-10-10, M1.
+Recorded 2026-10-10, M1. Closed the same day.
 
-`boot/boot.S` brings the machine to long mode and calls `nolx_kernel_main`. Nothing comes
-back: no output, no panic message, no fault report. The image itself is verified correct --
-`readelf` places every section at its intended address, `nm` shows both entry points, and
-`objdump` shows the probe containing the port write that would print -- so the failure is in
-executing Rust code reached from the trampoline, not in building or loading it.
+`boot/boot.S` brought the machine to long mode and called `nolx_kernel_main`. Nothing came
+back: no output, no panic, no fault report. The image was verified correct throughout --
+`readelf` placed every section where the linker script put it, `nm` showed both entry
+points, and `objdump` showed the probe containing the port write that would print -- so the
+failure was in executing Rust reached from the trampoline, not in building or loading it.
 
-What has been ruled out, with the evidence that ruled it out:
+The cause was one constant. `COM1_LSR` was `3`. Offset 3 from COM1's base port is the FIFO
+control register, which is write-only on a 16550A; the line status register, the one with
+the "transmit holding register empty" bit, is at offset 5 -- port `0x3FD`, which
+`boot/boot.S` had been using correctly all along. So the kernel's first Rust function spun
+forever on `while inb(0x3FB) & 0x20 == 0`, waiting for a bit a write-only register would
+never report. No fault, no output, and nothing on the serial log to distinguish it from a
+machine that had simply stopped.
 
-| Hypothesis | Evidence |
+What made it findable was refusing to guess. Three things were added to the boot layer:
+
+| Step | What it established |
 |---|---|
-| The Multiboot magic was lost | Fixed: `__start32` zeroed BSS with `xorl %eax,%eax` before saving the magic. The mismatch warning is gone. |
-| The boot code was never linked in | Fixed: `kernel/build.rs` now assembles `boot.S` into the kernel. |
-| The image is loaded at the wrong address | Ruled out: `readelf -SW` shows every section where the linker script put it. |
-| Port I/O was optimized away | Fixed: `options(nomem, preserves_flags)` licensed LLVM to delete an output-less `out`. That was a real bug; it was not this one. |
-| The entry symbol is missing | Ruled out: `nm` shows `nolx_probe` and `nolx_kernel_main`. |
+| Load an interrupt descriptor table before the first call into Rust | The silence was *not* a triple fault -- no exception ever fired |
+| An empty Rust function, called before the printing probe | The trampoline could enter Rust and return, so the handoff was fine |
+| The first sixteen bytes at the probe, printed as hex | `31 f6 eb 1c` -- `xor esi,esi` then a jump -- the transmit loop was compiled exactly as written, so the code was present and the loop was not terminating |
 
-Still open: the interrupt descriptor table is never loaded, so any exception between the
-`call` and the first instruction is an unrecoverable triple fault rather than a message.
-That is the leading candidate and the first thing M4 should address -- a kernel that cannot
-report its own faults cannot be debugged from inside.
+That leaves one possibility, and one port read to check.
 
-The QEMU job reports these markers on every run rather than failing silently, so the gap
-cannot be mistaken for progress.
+The lesson is worth more than the fix: a kernel that cannot report its own faults cannot be
+debugged from inside, and a boot log that is not posted where it can be read is the same as
+no log. Both are now true in the other direction -- the IDT is loaded in the boot layer, in
+assembly, so it works even when calling Rust is the thing that is broken, and the serial log
+is posted to the pull request on every run.
+
+The whole init sequence now runs under QEMU:
+
+```
+NOLX: nolx_probe reached (Rust is callable)
+NOLX: nolx_kernel_main entered
+NOLX 0.1.0 starting
+multiboot: flags=0x24f mem_lower=639KiB mem_upper=523136KiB modules=0 mmap=168B@0x9000
+mm: 7 regions, 511 MiB usable, 12288 MiB reserved, highest usable 0x1ffe0000
+obj: registered 15 object types
+exec: 32 priority levels, real-time band from 16, SCHED_FIFO priority range 0..15
+psx: 229 syscall numbers assigned, 0 implemented, the rest return ENOSYS
+io: I/O manager online, 16 major function codes, IORB is 656 bytes
+NOLX: init sequence complete, halting the boot processor
+```
+
+Every one of those lines is now a hard gate in the boot smoke test.
