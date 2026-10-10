@@ -24,7 +24,10 @@ const COM1_LSR: u16 = 5;
 
 /// `boot/boot.S` waits on the same register using the absolute port `0x3FD`. The two have
 /// to agree, and this is checked while compiling rather than discovered while booting.
-const _: () = assert!(COM1 + COM1_LSR == 0x3FD, "COM1's line status register is at 0x3FD");
+const _: () = assert!(
+    COM1 + COM1_LSR == 0x3FD,
+    "COM1's line status register is at 0x3FD"
+);
 /// The "transmit holding register empty" bit.
 const LSR_THRE: u8 = 1 << 5;
 

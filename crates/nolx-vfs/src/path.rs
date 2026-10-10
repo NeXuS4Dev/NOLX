@@ -499,7 +499,10 @@ mod tests {
         // `file/` is not the same pathname as `file`, and collapsing the slashes first
         // would silently accept it.
         let t = sample_tree();
-        assert_eq!(resolve(&t, b"/dir/file/", Final::Follow), Err(errno::ENOTDIR));
+        assert_eq!(
+            resolve(&t, b"/dir/file/", Final::Follow),
+            Err(errno::ENOTDIR)
+        );
         assert_eq!(
             resolve(&t, b"//dir///file//", Final::Follow),
             Err(errno::ENOTDIR)

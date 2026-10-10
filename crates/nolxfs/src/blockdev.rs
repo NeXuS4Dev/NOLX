@@ -8,7 +8,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::Pod;
+use crate::on_disk_gen;
+use crate::{fletcher, Pod};
 
 /// A device-level failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,6 +30,16 @@ pub enum DevError {
         got: usize,
         /// What the device needs.
         want: usize,
+    },
+    /// The block was delivered intact but does not match its own Fletcher-64 checksum.
+    ///
+    /// This is a statement about the stored bytes, not about the device: the read
+    /// succeeded. It lives here because [`BlockDevice::read_object`] is the one place
+    /// every object read goes through, and a checksum that is only checked by some
+    /// callers is a checksum that is not checked.
+    BadChecksum {
+        /// The object id from the header, which is what a repair tool needs.
+        oid: u64,
     },
 }
 
@@ -85,6 +96,22 @@ pub trait BlockDevice {
         }
         let mut buf = vec![0u8; size];
         self.read_block(index, &mut buf)?;
+
+        // Every NOLXFS object starts with `nolx_obj_phys_t`, whose first eight bytes are a
+        // Fletcher-64 checksum over the rest of the block. Checking it here, rather than
+        // leaving it to whichever caller remembers, is the only way the guarantee means
+        // anything: a mount that reads a torn superblock must refuse to mount, and a
+        // filesystem that reads a torn B-tree node must not go on indexing with it.
+        let header = on_disk_gen::nolx_obj_phys_t::read_from(&buf).ok_or(
+            DevError::BadBufferLen {
+                got: buf.len(),
+                want: on_disk_gen::nolx_obj_phys_t::DISK_SIZE,
+            },
+        )?;
+        if !fletcher::verify(&buf, header.checksum) {
+            return Err(DevError::BadChecksum { oid: header.oid });
+        }
+
         // `read_from` copies out, so an unaligned scratch buffer is fine.
         T::read_from(&buf).ok_or(DevError::BadBufferLen {
             got: buf.len(),

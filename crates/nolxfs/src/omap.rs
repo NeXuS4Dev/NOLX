@@ -84,7 +84,14 @@ impl<'d, D: BlockDevice, A: BlockAllocator> ObjectMap<'d, D, A> {
     /// Device errors, or a block too small to hold a node header.
     pub fn create(dev: &'d mut D, alloc: &'d mut A, tree_root: u64, xid: u64) -> Result<Self> {
         Ok(Self {
-            tree: BTree::create(dev, alloc, tree_root, KeyKind::OMap, gen::SUB_OMAP as u16, xid)?,
+            tree: BTree::create(
+                dev,
+                alloc,
+                tree_root,
+                KeyKind::OMap,
+                gen::SUB_OMAP as u16,
+                xid,
+            )?,
         })
     }
 

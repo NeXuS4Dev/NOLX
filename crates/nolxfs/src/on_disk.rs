@@ -82,7 +82,15 @@ impl fmt::Display for FsError {
 
 impl From<crate::DevError> for FsError {
     fn from(value: crate::DevError) -> Self {
-        Self::Device(value)
+        // A checksum failure is unwrapped rather than nested. It is not a property of the
+        // device -- the device delivered the block exactly as stored -- it is a statement
+        // that what was stored is wrong. Keeping it as `BadChecksum` is what lets a mount
+        // tell "the disk failed" apart from "the data is corrupt", which have very
+        // different consequences and very different repairs.
+        match value {
+            crate::DevError::BadChecksum { oid } => Self::BadChecksum { oid },
+            other => Self::Device(other),
+        }
     }
 }
 
