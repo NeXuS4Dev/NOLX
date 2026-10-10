@@ -45,6 +45,18 @@ pub const MULTIBOOT_BOOTLOADER_MAGIC: u32 = 0x2BAD_B002;
 /// Called exactly once, with interrupts disabled, on the boot stack, with `mb_info`
 /// pointing at a Multiboot information structure that is valid for as long as the kernel
 /// runs, or null if `magic` is not [`MULTIBOOT_BOOTLOADER_MAGIC`].
+/// A trivial Rust entry point, called from `boot/boot.S` before the real one.
+///
+/// It exists to answer one question: can the trampoline call into Rust at all? It has no
+/// frame worth speaking of and touches nothing, so if this prints and `nolx_kernel_main`
+/// does not, the fault is in the kernel entry point rather than in the handoff. It is
+/// cheap to keep, and it is the first thing to look at when a future change to the entry
+/// path breaks booting.
+#[no_mangle]
+extern "C" fn nolx_probe() {
+    hal::console::raw_put_str("NOLX: nolx_probe reached (Rust is callable)\n");
+}
+
 // Deliberately not `pub`: this is called from `boot/boot.S` and from nowhere in Rust, so it
 // is not an API. Keeping it private is also what makes clippy's
 // `not_unsafe_ptr_arg_deref` rule inapplicable -- the rule protects Rust callers, and there

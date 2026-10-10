@@ -211,6 +211,17 @@ jobs:
           sudo apt-get install -y qemu-system-x86 2>&1 | tail -3
       - name: Build
         run: make kernel 2>&1 | tee /tmp/job.log
+      - name: Inspect the kernel image
+        run: |
+          {
+            echo "--- size ---"; ls -l build/nolx.elf
+            echo "--- ELF header ---"; readelf -h build/nolx.elf
+            echo "--- sections ---"; readelf -SW build/nolx.elf
+            echo "--- key symbols ---"
+            nm -n build/nolx.elf | grep -Ei "nolx_kernel_main|nolx_probe|__start32|long_mode_entry|_sbss|_ebss|_edata|_end" || true
+            echo "--- first instructions of nolx_kernel_main ---"
+            objdump -d --no-show-raw-insn build/nolx.elf | sed -n '/<nolx_kernel_main>:/,/^$/p' | head -25
+          } 2>&1 | tee -a /tmp/job.log
       - name: Boot and capture the serial log
         run: |
           set -o pipefail

@@ -251,6 +251,12 @@ long_mode_entry:
     movl    mb_magic(%rip), %esi
     movl    $msg_handoff, %esi
     call    serial_puts64
+
+    /* Bisecting probe: a Rust function that does nothing but print. If this line appears
+     * and the kernel's own entry point does not, the handoff is fine and the fault is in
+     * nolx_kernel_main. */
+    call    nolx_probe
+
     movl    mb_info_phys(%rip), %edi
     movl    mb_magic(%rip), %esi
     call    nolx_kernel_main
