@@ -245,7 +245,11 @@ def main(argv: list[str]) -> int:
 
     stale: list[str] = []
     for name, (fn, path) in EMITTERS.items():
-        text = fn()
+        # Exactly one trailing newline. rustfmt collapses a run of blank lines at end of
+        # file, so an emitter that produces two puts the generator and `cargo fmt` back in
+        # disagreement over a file that only the generator is allowed to write -- which is
+        # the same argument as the doc-comment change, applied to the file's last byte.
+        text = fn().rstrip("\n") + "\n"
         if a.check:
             if not path.exists():
                 stale.append(f"{path} (missing)")

@@ -1196,4 +1196,3 @@ pub const SNAP_METADATA_VAL_DISK_SIZE: usize = 84;
 // ------------------------------------------------------------------ derived geometry
 /// Checkpoint-map entries that fit in one block.
 pub const CHECKPOINT_MAP_CAPACITY: usize = 126;
-
