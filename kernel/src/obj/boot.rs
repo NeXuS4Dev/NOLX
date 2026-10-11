@@ -20,7 +20,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use nolx_hal_core::console::HalConsole;
 use nolx_obj_core::handle::{Handle, HandleError, HandleTable};
-use nolx_obj_core::namespace::{NsError, Namespace};
+use nolx_obj_core::namespace::{Namespace, NsError};
 
 use super::{type_by_name, ObjectHeader};
 use crate::sync::SyncCell;
@@ -42,14 +42,14 @@ pub type ObjectId = u16;
 static HEADERS: [ObjectHeader; MAX_OBJECTS] = [const { ObjectHeader::new(0, 0) }; MAX_OBJECTS];
 static LIVE: [AtomicBool; MAX_OBJECTS] = [const { AtomicBool::new(false) }; MAX_OBJECTS];
 
-/// The root namespace. `None` until [`init`] builds it.
-static NAMESPACE: SyncCell<Option<Namespace<ObjectId, NAMESPACE_NODES>>> = SyncCell::new(None);
+/// The root namespace. Built empty at compile time and given its root by [`init`], so it lives
+/// in `.data` rather than being assembled on the boot stack.
+static NAMESPACE: SyncCell<Namespace<ObjectId, NAMESPACE_NODES>> =
+    SyncCell::new(Namespace::empty());
 
 /// Why an object-manager operation failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObjError {
-    /// [`init`] has not run.
-    NotInitialised,
     /// No object type of that name is registered.
     UnknownType,
     /// Every header slot is in use.
@@ -73,7 +73,6 @@ fn with_namespace<R>(
     // SAFETY: single boot processor, no interrupt handler reaches the namespace, and `f`
     // cannot re-enter this function (see above), so this is the only live reference.
     let namespace = unsafe { &mut *NAMESPACE.get() };
-    let namespace = namespace.as_mut().ok_or(ObjError::NotInitialised)?;
     Ok(f(namespace))
 }
 
@@ -119,9 +118,7 @@ pub fn reference_counts(id: ObjectId) -> Result<(i32, i32), ObjError> {
 
 /// Build the root namespace with the executive's standard directories.
 pub fn init(console: &mut dyn HalConsole) -> Result<(), ObjError> {
-    // SAFETY: called once, from the boot processor, before anything reads the namespace, so
-    // there is no other reference to the cell.
-    unsafe { *NAMESPACE.get() = Some(Namespace::new()) };
+    with_namespace(Namespace::ensure_root)?;
     for directory in ["Device", "FileSystem", "BaseNamedObjects", "NOLX"] {
         with_namespace(|ns| ns.create_directory("\\", directory))?.map_err(ObjError::Namespace)?;
     }
@@ -190,10 +187,7 @@ pub fn duplicate(
     target: &mut HandleTable<ObjectId, HANDLE_TABLE_ENTRIES>,
     access: u32,
 ) -> Result<Handle, ObjError> {
-    let id = source
-        .get(source_handle)
-        .map_err(ObjError::Handle)?
-        .object;
+    let id = source.get(source_handle).map_err(ObjError::Handle)?.object;
     let header = header_of(id)?;
     header.add_handle();
     match source.duplicate_into(source_handle, target, id, access, false) {
@@ -275,7 +269,10 @@ pub fn selftest(console: &mut dyn HalConsole) -> Result<(), ObjError> {
     )?;
 
     let a = open("\\Device\\Null", &mut first, READ)?;
-    check(reference_counts(id)? == (2, 1), "open did not add a reference pair")?;
+    check(
+        reference_counts(id)? == (2, 1),
+        "open did not add a reference pair",
+    )?;
 
     // Widening rights must be refused, and a refused duplicate must leave no trace.
     let refused = duplicate(&first, a, &mut second, READ_WRITE);
@@ -299,7 +296,10 @@ pub fn selftest(console: &mut dyn HalConsole) -> Result<(), ObjError> {
     )?;
 
     close(&mut first, a)?;
-    check(reference_counts(id)? == (2, 1), "closing a handle did not drop its pair")?;
+    check(
+        reference_counts(id)? == (2, 1),
+        "closing a handle did not drop its pair",
+    )?;
     check(
         first.get(a) == Err(HandleError::Invalid),
         "a closed handle still resolves in its table",
@@ -307,7 +307,10 @@ pub fn selftest(console: &mut dyn HalConsole) -> Result<(), ObjError> {
 
     // Remove the name while the second table still holds the object: the object must
     // survive, the name must be gone, and the link to it must dangle.
-    check(unbind("\\Device\\Null")?, "the binding was not found to remove")?;
+    check(
+        unbind("\\Device\\Null")?,
+        "the binding was not found to remove",
+    )?;
     check(
         reference_counts(id)? == (1, 1),
         "removing the binding did not drop the namespace's reference",

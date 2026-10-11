@@ -119,6 +119,33 @@ impl<T, const N: usize> Default for Namespace<T, N> {
     }
 }
 
+impl<T, const N: usize> Namespace<T, N> {
+    /// A namespace with no nodes, not even a root. `const`, so it can be a `static` directly
+    /// and never sits on a stack. Call [`Namespace::ensure_root`] before use.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            nodes: [const { None }; N],
+        }
+    }
+
+    /// Add the root directory if it is missing. Idempotent.
+    ///
+    /// # Panics
+    ///
+    /// If `N` is zero: there must be room for the root.
+    pub fn ensure_root(&mut self) {
+        assert!(N >= 1, "the namespace needs room for its root");
+        if self.nodes[ROOT].is_none() {
+            self.nodes[ROOT] = Some(Node {
+                parent: ROOT,
+                name: FixedText::empty(),
+                kind: Kind::Directory,
+            });
+        }
+    }
+}
+
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= NAME_MAX
@@ -143,14 +170,9 @@ impl<T, const N: usize> Namespace<T, N> {
     /// If `N` is zero: there must be room for the root.
     #[must_use]
     pub fn new() -> Self {
-        assert!(N >= 1, "the namespace needs room for its root");
-        let mut nodes: [Option<Node<T>>; N] = core::array::from_fn(|_| None);
-        nodes[ROOT] = Some(Node {
-            parent: ROOT,
-            name: FixedText::empty(),
-            kind: Kind::Directory,
-        });
-        Self { nodes }
+        let mut namespace = Self::empty();
+        namespace.ensure_root();
+        namespace
     }
 
     fn node(&self, index: usize) -> Result<&Node<T>, NsError> {
