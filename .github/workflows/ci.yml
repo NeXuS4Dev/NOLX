@@ -245,6 +245,7 @@ jobs:
             "NOLX: objmgr online" \
             "obj: namespace: \\Device" \
             "NOLX: obj selftest: 1 object, 2 handles" \
+            "NOLX: srm selftest: 10 access checks (6 granted, 4 denied)" \
             "NOLX: init sequence complete, halting the boot processor" \
             "NOLX: timer reached 100 ticks; nominal 100 Hz"
           do

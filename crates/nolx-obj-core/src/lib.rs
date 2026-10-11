@@ -8,6 +8,8 @@
 //!   which entry and whether an operation is allowed.
 //! * [`namespace`] -- the object namespace: a tree of directories, objects, and symbolic
 //!   links rooted at `\`, with lookup that follows links up to a fixed depth.
+//! * [`security`] -- the Security Reference Monitor's rules: SIDs, ACLs, tokens, integrity
+//!   labels, privileges, `SeAccessCheck`, and a bounded audit log.
 //!
 //! The crate is `no_std` and free of unsafe code, so every rule it enforces is a red test on
 //! a laptop rather than a corrupted table in the middle of boot.
@@ -19,3 +21,4 @@
 
 pub mod handle;
 pub mod namespace;
+pub mod security;
