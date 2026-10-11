@@ -295,7 +295,7 @@ next step to stop guessing.
 - Tests: T1 scheduler simulation (priority inversion bounded by boost, FIFO within band,
   no starvation); T2 round-robin of N threads prints interleaved output.
 
-### M5 implementation checkpoint 1 — process-owned context (CI pending)
+### M5 implementation checkpoint 1 — process-owned context (CI passed: [run 38153497878](https://github.com/NeXuS4Dev/NOLX/actions/runs/38153497878))
 
 * `crates/nolx-exec-core` models process identity and parentage, owns a handle table and token,
   and owns the supplied address-space association. Its host tests cover independent tables and
