@@ -169,6 +169,7 @@ fn decode_field(value: u8, binary: bool) -> Option<u8> {
     Some(high * 10 + low)
 }
 
+#[allow(unknown_lints)] // The lint was added after the workspace's Rust 1.88 toolchain.
 #[allow(clippy::manual_is_multiple_of)] // `is_multiple_of` is newer than the workspace MSRV.
 fn is_leap_year(year: u16) -> bool {
     year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)

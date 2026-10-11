@@ -9,6 +9,7 @@ readme = "../../README.md"
 publish = false
 
 [dependencies]
+nolx-mm-core = { path = "../nolx-mm-core" }
 nolx-obj-core = { path = "../nolx-obj-core" }
 
 [lib]

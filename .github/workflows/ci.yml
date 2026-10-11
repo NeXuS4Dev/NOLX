@@ -249,7 +249,9 @@ jobs:
             "NOLX: obj private namespace selftest: boundaries enforced, isolated roots" \
             "NOLX: obj type callback selftest: create/open/parse/close/delete invoked" \
             "NOLX: srm selftest: 10 access checks (6 granted, 4 denied)" \
-            "NOLX: process selftest: 2 processes, 2 address spaces" \
+            "NOLX: process selftest: 2 processes, 2 address spaces, PEB/job metadata, thread context, isolated/inherited handles, token-checked open/deny, teardown returned resources" \
+            "NOLX: executive scheduler prepared: BSP idle context, three kernel threads, 16 KiB stacks" \
+            "NOLX: round-robin T2:" \
             "NOLX: init sequence complete, halting the boot processor" \
             "NOLX: timer reached 100 ticks; nominal 100 Hz"
           do
@@ -258,6 +260,12 @@ jobs:
               exit 1
             fi
           done
+          if ! grep -Eq \
+            'NOLX: round-robin T2: ABCABCABCABC complete: 3 kernel threads, 12 timer quanta, order verified=true' \
+            build/serial.log; then
+            echo "the three kernel threads did not produce the exact interleaved round-robin trace"
+            exit 1
+          fi
           if ! grep -Eq \
             'mm: higher-half switch: .*identity map gone=true, direct map reachable=true, image window reachable=true' \
             build/serial.log; then

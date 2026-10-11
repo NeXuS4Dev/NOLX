@@ -113,3 +113,62 @@ impl Drop for IrqGuard<'_> {
         self.lock.locked.store(false, Ordering::Release);
     }
 }
+
+/// An interrupt-masking spin mutex around kernel state.
+///
+/// Unlike [`SyncCell`], this type serializes access: the local processor masks interrupts
+/// before taking the lock, and the atomic lock word serializes later processors. M5's BSP
+/// scheduler uses it now; AP startup will assign a separate run queue and lock to each CPU.
+pub struct IrqMutex<T> {
+    lock: IrqLock,
+    value: UnsafeCell<T>,
+}
+
+// SAFETY: access to `value` is only handed out through `IrqMutexGuard`, which holds the
+// acquired lock for the full borrow. Requiring `T: Send` permits ownership to move between
+// processors without claiming that the value may be accessed concurrently.
+unsafe impl<T: Send> Sync for IrqMutex<T> {}
+
+impl<T> IrqMutex<T> {
+    /// Construct a mutex around `value` for use in a static initializer.
+    #[must_use]
+    pub const fn new(value: T) -> Self {
+        Self {
+            lock: IrqLock::new(),
+            value: UnsafeCell::new(value),
+        }
+    }
+
+    /// Acquire exclusive access while masking local interrupts.
+    pub fn lock(&self) -> IrqMutexGuard<'_, T> {
+        IrqMutexGuard {
+            value: &self.value,
+            _guard: self.lock.lock(),
+        }
+    }
+}
+
+/// Exclusive access to an [`IrqMutex`]'s protected value.
+pub struct IrqMutexGuard<'a, T> {
+    value: &'a UnsafeCell<T>,
+    /// Releases the spin lock before restoring the caller's interrupt state.
+    _guard: IrqGuard<'a>,
+}
+
+impl<T> core::ops::Deref for IrqMutexGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: the guard owns the mutex for this borrow, so no mutable or shared alias can
+        // be handed out by another holder until this guard is dropped.
+        unsafe { &*self.value.get() }
+    }
+}
+
+impl<T> core::ops::DerefMut for IrqMutexGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: this guard is the unique lock holder; `DerefMut` borrows the guard mutably,
+        // so there cannot be another live reference through the same guard either.
+        unsafe { &mut *self.value.get() }
+    }
+}

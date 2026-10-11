@@ -7,6 +7,7 @@
 use core::fmt;
 use core::mem::MaybeUninit;
 
+use nolx_exec_core::thread::StackDescriptor;
 use nolx_hal_core::console::HalConsole;
 use nolx_obj_core::handle::HandleError;
 use nolx_obj_core::security::{
@@ -18,7 +19,8 @@ use crate::obj::boot::{self, ObjError};
 use crate::sync::SyncCell;
 
 use super::process::{Process, ProcessCreateError, ProcessExitError};
-use super::ProcessId;
+use super::thread::{Thread, ThreadCreateError};
+use super::{JobId, Policy, ProcessId, SchedState, ThreadId};
 
 static PROCESS_SPACE_A: SyncCell<MaybeUninit<Space>> = SyncCell::new(MaybeUninit::uninit());
 static PROCESS_SPACE_B: SyncCell<MaybeUninit<Space>> = SyncCell::new(MaybeUninit::uninit());
@@ -29,6 +31,8 @@ pub(super) enum SelftestError {
     AddressSpaceAllocation,
     /// A process body could not be initialized.
     ProcessCreate(ProcessCreateError),
+    /// A thread body, stack, or scheduling state could not be initialized.
+    ThreadCreate(ThreadCreateError),
     /// A process could not terminate cleanly.
     ProcessExit(ProcessExitError),
     /// An Object Manager operation failed.
@@ -44,6 +48,7 @@ impl fmt::Display for SelftestError {
         match self {
             Self::AddressSpaceAllocation => formatter.write_str("address-space allocation failed"),
             Self::ProcessCreate(error) => write!(formatter, "process creation failed: {error:?}"),
+            Self::ThreadCreate(error) => write!(formatter, "thread creation failed: {error:?}"),
             Self::ProcessExit(error) => write!(formatter, "process exit failed: {error:?}"),
             Self::ObjectManager(error) => {
                 write!(formatter, "Object Manager operation failed: {error:?}")
@@ -103,6 +108,64 @@ pub(super) fn run(console: &mut dyn HalConsole) -> Result<(), SelftestError> {
         process_a.handle_count() == 0 && process_b.handle_count() == 0,
         "a new process did not start with an empty handle table",
     )?;
+    let job = JobId::new(77);
+    process_a.set_job(Some(job));
+    process_a
+        .set_command_line("/bin/nolxsh --login")
+        .map_err(|_| SelftestError::Check("process command line exceeded the PEB storage"))?;
+    process_a.peb_mut().image_base = 0x0040_0000;
+    check(
+        process_a.job() == Some(job)
+            && process_a.peb().process_id == id_a
+            && process_a.peb().parent_process_id.is_none()
+            && process_a.peb().command_line.as_str() == "/bin/nolxsh --login"
+            && process_a.peb().image_base == 0x0040_0000,
+        "process job membership or PEB-equivalent metadata was not retained",
+    )?;
+
+    let stack = StackDescriptor::new(0x10_0000, 0x4000, Some(0x0F_F000))
+        .map_err(|_| SelftestError::Check("the synthetic kernel stack descriptor was invalid"))?;
+    let mut thread = Thread::new(
+        ThreadId::new(200),
+        id_a,
+        0x0040_1000,
+        0xCAFE,
+        stack,
+        SchedState::default(),
+    )
+    .map_err(SelftestError::ThreadCreate)?;
+    check(
+        thread.process == id_a
+            && thread.context.cpu.instruction_pointer == 0x0040_1000
+            && thread.context.cpu.stack_pointer == stack.top - 8
+            && thread.context.cpu.general[0] == 0xCAFE
+            && thread.context.kernel_stack == stack
+            && thread.context.user_apcs.is_empty()
+            && thread.context.kernel_apcs.is_empty(),
+        "thread context did not retain its owning process, initial registers, stack, or APC lists",
+    )?;
+    thread
+        .set_policy(Policy::RoundRobin, 16, 4)
+        .map_err(SelftestError::ThreadCreate)?;
+    check(
+        thread.sched.policy == Policy::RoundRobin
+            && thread.sched.base_priority == 16
+            && thread.sched.quantum == 4,
+        "thread scheduling policy was not applied",
+    )?;
+    thread.terminate(0).map_err(SelftestError::ThreadCreate)?;
+    check(
+        thread.terminated() && thread.exit_status == Some(0),
+        "thread termination did not publish its waitable exit status",
+    )?;
+    check(
+        thread.terminate(1) == Err(ThreadCreateError::AlreadyTerminated),
+        "thread termination was not idempotence-checked",
+    )?;
+    check(
+        thread.header.release(),
+        "the self-test Thread object header did not release",
+    )?;
 
     let mut acl = Acl::empty();
     acl.push(Ace {
@@ -136,6 +199,14 @@ pub(super) fn run(console: &mut dyn HalConsole) -> Result<(), SelftestError> {
         boot::reference_counts(object) == Ok((2, 1)),
         "process A's open did not add one pointer/handle reference",
     )?;
+    let inherited_source = process_a
+        .open_inheritable_handle("\\Device\\ProcessSelftest", rights::READ)
+        .map_err(SelftestError::ObjectManager)?;
+    check(
+        process_a.object_for_handle(inherited_source) == Ok(object)
+            && boot::reference_counts(object) == Ok((3, 2)),
+        "an inheritable handle was not opened with its own object reference",
+    )?;
     check(
         process_b.object_for_handle(handle_a) == Err(HandleError::Invalid),
         "process B resolved a handle that only exists in process A",
@@ -154,8 +225,16 @@ pub(super) fn run(console: &mut dyn HalConsole) -> Result<(), SelftestError> {
         "a duplicated handle did not resolve in its owning process",
     )?;
     check(
-        boot::reference_counts(object) == Ok((3, 2)),
+        boot::reference_counts(object) == Ok((4, 3)),
         "cross-process duplication did not add one pointer/handle reference",
+    )?;
+    let inherited = Process::inherit_handles_from(&process_a, &mut process_b)
+        .map_err(SelftestError::ObjectManager)?;
+    check(
+        inherited == 1
+            && process_b.object_for_handle(inherited_source) == Ok(object)
+            && boot::reference_counts(object) == Ok((5, 4)),
+        "child-process creation did not copy only inheritable handles with retained references",
     )?;
 
     let denied = process_b.open_handle("\\Device\\ProcessSelftest", rights::READ);
@@ -164,7 +243,7 @@ pub(super) fn run(console: &mut dyn HalConsole) -> Result<(), SelftestError> {
         "the process token did not control an object open",
     )?;
     check(
-        process_a.handle_count() == 1 && process_b.handle_count() == 1,
+        process_a.handle_count() == 2 && process_b.handle_count() == 2,
         "a denied open changed a process handle table",
     )?;
 
@@ -202,8 +281,8 @@ pub(super) fn run(console: &mut dyn HalConsole) -> Result<(), SelftestError> {
 
     let _ = writeln!(
         console,
-        "NOLX: process selftest: 2 processes, 2 address spaces, isolated handle tables, \
-         token-checked open/deny, process teardown returned resources"
+        "NOLX: process selftest: 2 processes, 2 address spaces, PEB/job metadata, thread context, \
+         isolated/inherited handles, token-checked open/deny, teardown returned resources"
     );
     Ok(())
 }

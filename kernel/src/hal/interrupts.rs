@@ -22,50 +22,62 @@ pub use nolx_hal_core::interrupt::InterruptFrame;
 /// Entry called by `interrupts.S`. It is not a Rust API; the assembly stubs are its only
 /// caller and provide a pointer to a live [`InterruptFrame`].
 #[no_mangle]
-extern "C" fn nolx_interrupt_dispatch(frame: *mut InterruptFrame) {
-    // SAFETY: each assembly stub pushes the complete frame immediately before calling this
-    // function and does not alter its contents. The stack remains live until IRETQ.
-    let frame = unsafe { &mut *frame };
+extern "C" fn nolx_interrupt_dispatch(frame_pointer: *mut InterruptFrame) -> *mut InterruptFrame {
+    // SAFETY: each assembly stub pushes the register, vector, error-code, and processor frame
+    // immediately before this call. The pointer remains live until this function returns.
+    let frame = unsafe { &mut *frame_pointer };
     let vector = frame.vector as u8;
 
     if apic::is_spurious_vector(vector) {
-        return;
+        return frame_pointer;
     }
 
     if apic::is_enabled() && apic::handles_vector(vector) {
         // Interrupt gates clear IF. APIC TPR and the per-CPU software IPL are both raised
         // until after the local APIC EOI, then restored in that order.
+        let mut clock_tick = false;
         if let Some(previous_ipl) = cpu::raise_ipl(Ipl::DEVICE_MIN) {
             if vector == 32 || vector == nolx_hal_core::apic::LAPIC_TIMER_VECTOR {
                 timer::on_interrupt(vector);
+                clock_tick = true;
             }
             apic::end_of_interrupt();
             cpu::restore_ipl(previous_ipl);
         } else {
             apic::end_of_interrupt();
         }
-        return;
+        return if clock_tick {
+            crate::exec::on_timer_interrupt(frame_pointer)
+        } else {
+            frame_pointer
+        };
     }
 
     if pic::irq_for(vector).is_some() {
         // The legacy path has no hardware priority register. Keep software IPL recorded until
         // the 8259 has received EOI, then restore the previous level.
+        let mut clock_tick = false;
         if let Some(previous_ipl) = cpu::raise_ipl(Ipl::DEVICE_MIN) {
             if vector == 32 {
                 timer::on_interrupt(vector);
+                clock_tick = true;
             }
             pic::end_of_interrupt(vector);
             cpu::restore_ipl(previous_ipl);
         } else {
             pic::end_of_interrupt(vector);
         }
-        return;
+        return if clock_tick {
+            crate::exec::on_timer_interrupt(frame_pointer)
+        } else {
+            frame_pointer
+        };
     }
 
     if vector == 14 && crate::mm::space::handle(read_cr2(), frame.error_code) {
         // The page is mapped and the instruction can be retried: the address space promised
         // this memory, and the fault is how a promise becomes a page.
-        return;
+        return frame_pointer;
     }
 
     let mut console = Console::new();
