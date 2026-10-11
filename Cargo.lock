@@ -28,6 +28,10 @@ name = "nolx-mm-core"
 version = "0.1.0"
 
 [[package]]
+name = "nolx-obj-core"
+version = "0.1.0"
+
+[[package]]
 name = "nolx-syscall"
 version = "0.1.0"
 dependencies = [

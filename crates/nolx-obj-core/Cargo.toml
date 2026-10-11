@@ -1,0 +1,12 @@
+[package]
+name = "nolx-obj-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-testable Object Manager primitives for NOLX: handle tables with generation-checked handles"
+readme = "../../README.md"
+publish = false
+
+[lib]
+path = "src/lib.rs"

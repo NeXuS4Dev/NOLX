@@ -71,7 +71,8 @@ Milestone tracking lives in [ROADMAP.md](ROADMAP.md). Current state:
 | M1 — Boot layer: Multiboot → long mode → kernel entry | **done** — boot layer machine-verified, kernel entry reached under QEMU |
 | M2 — HAL: console, GDT, IDT, PIC/APIC, timer | **done** — ACPI/HPET discovery, xAPIC/x2APIC, I/O APIC routing, TPR/EOI, calibrated LAPIC/TSC-deadline paths with PIC/PIT fallback; every HAL T2 assertion now has a passing QEMU run |
 | M3 — Physical/virtual memory, kernel heap | **implemented** — frame map with kernel reservations, buddy allocator with per-CPU magazines, boot-time stress test under live interrupts, the higher-half switch (image in the top 2 GiB, identity map dropped and verified at boot), a kernel heap registered as `GlobalAlloc` over frame-backed regions, per-process address spaces (VAD tree + page tables over `KernelTableStore` + commit charge), demand paging and copy-on-write resolved by the page-fault path, pool accounting reported through the object manager, and a one-node NUMA list whose zonelist every allocation walks; the remaining step is the CI run that promotes the `pending-T2` rows to `tested-T2` |
-| M4+ | planned |
+| M4 — Object Manager and handles | **in progress** — handle tables with generation-checked handles, `DuplicateHandle` and inheritance rules in `crates/nolx-obj-core` (not yet compiled or run; see ROADMAP M4 checkpoint 1); object headers, namespace, Security Reference Monitor, and the T2 self test still to come |
+| M5+ | planned |
 
 ### What has actually been verified
 
