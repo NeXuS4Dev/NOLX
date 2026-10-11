@@ -127,6 +127,14 @@ marker that carries it, and the run that shows it happening.
 
 Landed since the checkpoint above (2026-10-11):
 
+MM-030 is `tested-T2`: the switch marker is asserted by the `boot-smoke` job, and run
+38114869085 on revision `b9686fb` shows the machine reporting it -- "image window at
+0xffffffff80000000, dropped 1 identity-map PML4 entry/entries; identity map gone=true, direct
+map reachable=true, image window reachable=true" -- with the frame map (131040 frames, 8935
+taken back for the kernel), the buddy allocator (122008 frames), the 100-tick marker, and the
+mm self-test all still passing afterwards. The same run re-stated HAL-008, whose #GP test had
+been loading an LDT selector and so had been relying on the identity map still being there.
+
 * the higher-half switch -- the image is linked in the top 2 GiB at
   `0xffff_ffff_8000_0000` and mapped there by the trampoline in PML4 slot 511, the direct map
   carries the low 2 GiB of RAM and the APIC/HPET windows at `0xffff_8000_0000_0000`, and the

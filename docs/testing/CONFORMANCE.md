@@ -12,19 +12,19 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 |---|---|---|
 | `unimplemented` | 10 | 100.0% |
 | `implemented` | 6 | 89.4% |
-| `tested-T1` | 65 | 81.9% |
-| `pending-T2` | 1 | — |
-| `tested-T2` | 12 | 12.8% |
+| `tested-T1` | 65 | 83.0% |
+| `pending-T2` | 0 | — |
+| `tested-T2` | 13 | 13.8% |
 | `tested-T3` | 0 | 0.0% |
 
-**77 of 94 assertions have a passing automated test; 1 are awaiting T2 results.**
+**78 of 94 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
 | Area | Assertions | Implemented | Tested (T1) | Pending (T2) | Tested (T2) | Tested (T3) |
 |---|---|---|---|---|---|---|
 | hal | 23 | 23 | 11 | 0 | 8 | 0 |
-| mm | 34 | 29 | 23 | 1 | 4 | 0 |
+| mm | 34 | 29 | 23 | 0 | 5 | 0 |
 | vfs | 37 | 32 | 31 | 0 | 0 | 0 |
 
 ## Unimplemented assertions (10)
@@ -53,11 +53,9 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | MM-029 | Page tables in the kernel: per-process address spaces are built over frames from the allocator |
 | FD-005 | XSH dup2: if old and new are equal, nothing is closed and new is returned |
 
-## Pending T2 verification (1)
+## Pending T2 verification (0)
 
-| ID | Specification reference | Configured test |
-|---|---|---|
-| MM-030 | Higher-half kernel mapping: the kernel is linked in the top 2 GiB and the identity map is dropped | .github/workflows/ci.yml boot-smoke serial marker `mm: higher-half switch: image window at 0xffffffff80000000` and regex `identity map gone=true, direct map reachable=true, image window reachable=true`; kernel/linker.ld links the image at KERNEL_IMAGE_BASE 0xffffffff80000000, boot/boot.S builds the window in PML4 slot 511, and mm::tables::drop_identity_map clears slot 0 and proves the result before the kernel trusts it |
+None.
 
 ## All assertions
 
@@ -82,7 +80,7 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | HAL-005 | hal | 8254 PIT: the programmed divisor is near 100 Hz and converts ticks to a saturating monotonic nanosecond value | `tested-T1` | nolx-hal-core time::tests::divisor_is_in_the_pit_16_bit_range_and_near_100_hz; time::tests::monotonic_clock_starts_at_zero_and_tracks_the_programmed_rate; time::tests::conversion_saturates_instead_of_wrapping |
 | HAL-006 | hal | Periodic clock: at least 100 timer interrupts arrive and the kernel reports the nominal 100 Hz rate | `tested-T2` | .github/workflows/ci.yml boot-smoke timer marker; scripts/check-hal-pit-fallback.sh verifies the PIT/PIC route (CI run 38086516018, revision dc2d8d1) |
 | HAL-007 | hal | x86-64 #PF: the exception report includes vector, error code, RIP, RSP, SS, CR2, and saved registers, then halts | `tested-T2` | scripts/check-hal-faults.sh hal-fault-test-pf (CI run 38086516018, revision dc2d8d1) |
-| HAL-008 | hal | x86-64 #GP: the exception report includes vector, error code, RIP, RSP, SS, and saved registers, then halts | `tested-T2` | scripts/check-hal-faults.sh hal-fault-test-gp (CI run 38086516018, revision dc2d8d1) |
+| HAL-008 | hal | x86-64 #GP: the exception report includes vector, error code, RIP, RSP, SS, and saved registers, then halts | `tested-T2` | scripts/check-hal-faults.sh hal-fault-test-gp (CI run 38114869085, revision b9686fb; re-stated because the test's selector changed with the higher-half switch -- see the comment in trigger_general_protection_test) |
 | HAL-009 | hal | BSP local area: GS-relative access reads the initialized processor number zero | `tested-T2` | .github/workflows/ci.yml boot-smoke serial marker `gs-cpu=0` (CI run 38086516018, revision dc2d8d1) |
 | HAL-010 | hal | GDT: the available 64-bit TSS descriptor encodes the full base, limit, and access byte | `tested-T1` | nolx-hal-core gdt::tests::available_tss_descriptor_encodes_base_limit_and_access_byte |
 | HAL-011 | hal | Local APIC/x2APIC: calibrated local timer, TPR IPL masking, device-vector dispatch, and EOI are integrated | `tested-T2` | .github/workflows/ci.yml boot-smoke APIC/calibration markers and 100-tick timer assertion (CI run 38086516018, revision dc2d8d1) |
@@ -127,7 +125,7 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | MM-027 | mm | Physical allocator: the stress test runs under live timer interrupts, and the free-frame count returns to its starting value afterwards | `tested-T2` | .github/workflows/ci.yml boot-smoke regex `mm selftest: complete: [0-9]+ operations, audit ok, ticks=[1-9][0-9]*` -- 52851 operations over 4 ticks, free frames 122027 -> 122027 (CI run 38088471560, revision a025a42) |
 | MM-028 | mm | VAD tree in the kernel: a process address space is described by a VAD tree whose regions carry protection, kind, and backing | `unimplemented` | nolx-mm-core::vad is the tree; no process address space exists yet |
 | MM-029 | mm | Page tables in the kernel: per-process address spaces are built over frames from the allocator | `implemented` | kernel/src/mm/tables.rs is `KernelTableStore`, the `TableStore` over frames from the allocator, and the kernel's page tables are built and walked through it; per-process address spaces are not created yet |
-| MM-030 | mm | Higher-half kernel mapping: the kernel is linked in the top 2 GiB and the identity map is dropped | `pending-T2` | .github/workflows/ci.yml boot-smoke serial marker `mm: higher-half switch: image window at 0xffffffff80000000` and regex `identity map gone=true, direct map reachable=true, image window reachable=true`; kernel/linker.ld links the image at KERNEL_IMAGE_BASE 0xffffffff80000000, boot/boot.S builds the window in PML4 slot 511, and mm::tables::drop_identity_map clears slot 0 and proves the result before the kernel trusts it |
+| MM-030 | mm | Higher-half kernel mapping: the kernel is linked in the top 2 GiB and the identity map is dropped | `tested-T2` | .github/workflows/ci.yml boot-smoke serial marker `mm: higher-half switch: image window at 0xffffffff80000000, dropped 1 identity-map PML4 entry/entries; identity map gone=true, direct map reachable=true, image window reachable=true` (CI run 38114869085, revision b9686fb; every job green). kernel/linker.ld links the image at KERNEL_IMAGE_BASE 0xffffffff80000000, boot/boot.S builds the window in PML4 slot 511, and mm::tables::drop_identity_map clears slot 0 and probes the direct map, the image window, and a low physical address before the kernel trusts the result |
 | MM-031 | mm | Kernel heap in the kernel: a `GlobalAlloc` over regions taken from the frame allocator, with the size-class bins from nolx-mm-core | `unimplemented` | nolx-mm-core::heap is the allocator; the kernel registers nothing yet |
 | MM-032 | mm | Demand paging and copy-on-write: the four fault causes resolve against the VAD tree and the commit charge | `unimplemented` | docs/architecture/03-memory-manager.md fault table; no fault path allocates yet |
 | MM-033 | mm | Pool accounting in the kernel: the pools are charged from the boot log and reported through the object manager | `unimplemented` | nolx-mm-core::commit is the accounting; nothing charges it yet |
