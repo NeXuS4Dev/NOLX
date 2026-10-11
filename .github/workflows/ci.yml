@@ -233,10 +233,13 @@ jobs:
             "mm: higher-half switch: image window at 0xffffffff80000000" \
             "NOLX: mm online" \
             "NOLX: frame allocator online" \
+            "NOLX: kernel heap online" \
+            "NOLX: kernel heap selftest:" \
             "NOLX: mm selftest: starting" \
             "NOLX: mm selftest: single-frame phase" \
             "NOLX: mm selftest: mixed-order phase" \
             "NOLX: mm selftest: complete" \
+            "NOLX: address space selftest:" \
             "NOLX: objmgr online" \
             "NOLX: init sequence complete, halting the boot processor" \
             "NOLX: timer reached 100 ticks; nominal 100 Hz"
@@ -261,6 +264,23 @@ jobs:
           # and the audit is the evidence that the free lists survived them.
           if ! grep -Eq 'NOLX: mm selftest: complete: [0-9]+ operations, audit ok, ticks=[1-9][0-9]*' build/serial.log; then
             echo "the memory-manager stress test did not complete cleanly under interrupt load"
+            exit 1
+          fi
+          # The heap has to have grown at least one region -- a single 256 KiB region cannot
+          # satisfy the self test's largest request -- and has to have given every byte back.
+          if ! grep -Eq \
+            'NOLX: kernel heap selftest: [0-9]+ allocations, \+[1-9][0-9]* region\(s\) to [0-9]+ KiB, largest free [0-9]+ bytes, in use 0 -> 0 bytes, integrity ok' \
+            build/serial.log; then
+            echo "the kernel heap did not pass its self test"
+            exit 1
+          fi
+          # Demand paging, copy on write, stack growth, and the refusals: the address-space
+          # self test maps pages, resolves faults, and leaves the frame and table counts
+          # exactly where it found them, or it panics.
+          if ! grep -Eq \
+            'NOLX: address space selftest: [2-9][0-9]* space\(s\), [0-9]+ page\(s\), [0-9]+ fault\(s\), [0-9]+ refusal\(s\), [1-9][0-9]* page table\(s\), integrity ok' \
+            build/serial.log; then
+            echo "the address-space self test did not complete cleanly"
             exit 1
           fi
           python3 - <<'PY'

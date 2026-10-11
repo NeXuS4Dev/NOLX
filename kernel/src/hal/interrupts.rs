@@ -1,4 +1,14 @@
-//! Common assembly-to-Rust interrupt boundary and fatal exception reporting.
+//! Common assembly-to-Rust interrupt boundary, resolvable page faults, and fatal exception
+//! reporting.
+//!
+//! There are exactly two things an exception can do here. A page fault may be *resolved*: the
+//! address space the processor is running in committed the page the access wanted, so the
+//! memory manager maps it and the faulting instruction is retried -- the return from this
+//! function is the iret back to it. Anything else is fatal, and reporting is all that is left.
+//!
+//! A page fault is resolvable only when a user address space is active: the kernel's own
+//! address space has nothing to demand-page, so a fault in it is a kernel bug, and the report
+//! says so.
 
 use core::arch::asm;
 
@@ -49,6 +59,12 @@ extern "C" fn nolx_interrupt_dispatch(frame: *mut InterruptFrame) {
         } else {
             pic::end_of_interrupt(vector);
         }
+        return;
+    }
+
+    if vector == 14 && crate::mm::space::handle(read_cr2(), frame.error_code) {
+        // The page is mapped and the instruction can be retried: the address space promised
+        // this memory, and the fault is how a promise becomes a page.
         return;
     }
 

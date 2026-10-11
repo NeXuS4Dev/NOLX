@@ -198,6 +198,13 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
                     let _ = writeln!(console, "NOLX: kernel heap selftest: FAILED: {message}");
                     panic!("kernel heap selftest: {message}");
                 }
+                // And finally the address spaces: page tables built out of frames, the four
+                // fault causes, and the proof that two spaces that share pages give every
+                // frame and every table back.
+                if let Err(message) = mm::space::selftest::run(&mut console) {
+                    let _ = writeln!(console, "NOLX: address space selftest: FAILED: {message}");
+                    panic!("address space selftest: {message}");
+                }
             }
 
             // SAFETY: this boot processor has no runnable work. The selected periodic timer

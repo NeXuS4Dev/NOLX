@@ -12,9 +12,10 @@
 //!
 //! The **kernel heap** sits on top of the frame allocator: `nolx_mm_core::heap` is a
 //! boundary-tagged allocator over one region, and [`heap`] gives it regions, the nonpaged-pool
-//! charges for them, and the `GlobalAlloc` implementation the Rust runtime uses. The page
-//! tables, the higher-half switch, and the VAD tree are the rest of M3; see
-//! `docs/architecture/03-memory-manager.md`. The algorithms behind the allocator
+//! charges for them, and the `GlobalAlloc` implementation the Rust runtime uses. Above that
+//! sits [`space`]: a per-process address space that owns a page-table root, a VAD tree, and a
+//! commit charge, and that resolves the four page faults
+//! `docs/architecture/03-memory-manager.md` names. The algorithms behind the allocator
 //! -- splitting, coalescing, the magazines, the commit accounting -- live in
 //! `crates/nolx-mm-core`, where they are tested on the host without a machine to boot.
 //!
@@ -29,6 +30,7 @@ pub mod heap;
 pub mod phys;
 pub mod pool;
 pub mod selftest;
+pub mod space;
 pub mod store;
 pub mod tables;
 
