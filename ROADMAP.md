@@ -373,8 +373,9 @@ The first M6 slice is in `crates/nolx-exec-core/src/elf.rs`: a bounded, allocati
 ELF64 `ET_EXEC` parser creates a load plan after validating file bounds, x86-64 identity,
 user virtual ranges, segment alignment and overlap, W^X, and executable entry-point
 membership. It also records validated `PT_INTERP`, `PT_TLS`, and `PT_GNU_STACK` metadata.
-The parser shares the user-range constants from `nolx-mm-core`, has host unit tests, and is
-tracked by `ELF-001` in `docs/testing/assertions/elf.md`.
+The parser shares the user-range constants from `nolx-mm-core`; its host tests passed in
+[workflow 38163939179](https://github.com/NeXuS4Dev/NOLX/actions/runs/38163939179), and
+`ELF-001` is recorded as `tested-T1` in `docs/testing/assertions/elf.md`.
 
 This is validation groundwork, **not yet an executable loader**: mapping/copying pages,
 zero-fill, `ET_DYN` and ASLR, relocations, interpreter launch, auxv/initial stack, process
