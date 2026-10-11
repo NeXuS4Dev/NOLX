@@ -541,3 +541,88 @@ mod tests {
         assert_eq!(table.get(h).unwrap().access, READ);
     }
 }
+
+#[cfg(test)]
+mod fuzz_tests {
+    use super::*;
+
+    const FULL: u32 = 0x1F;
+
+    /// A small deterministic generator, so a failure reproduces exactly from the seed.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next_u64(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next_u64() % n as u64) as usize
+        }
+    }
+
+    /// Index of the `n`th occupied slot of the shadow model.
+    fn nth_live(live: &[Option<(Handle, u32)>], n: usize) -> usize {
+        live.iter()
+            .enumerate()
+            .filter(|(_, slot)| slot.is_some())
+            .nth(n)
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn random_open_close_matches_a_shadow_model() {
+        const N: usize = 8;
+        const STEPS: usize = 20_000;
+        let mut table: HandleTable<u32, N> = HandleTable::new();
+        let mut live: [Option<(Handle, u32)>; N] = [None; N];
+        let mut dead: [Option<Handle>; 64] = [None; 64];
+        let mut dead_next = 0usize;
+        let mut next_object = 1u32;
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+
+        for _ in 0..STEPS {
+            let open = live.iter().flatten().count();
+            match rng.below(3) {
+                // Open: refused exactly when every slot is in use.
+                0 => {
+                    let result = table.insert(next_object, FULL, false);
+                    if open == N {
+                        assert_eq!(result, Err(HandleError::TableFull));
+                    } else {
+                        let handle = result.unwrap();
+                        let slot = live.iter_mut().find(|s| s.is_none()).unwrap();
+                        *slot = Some((handle, next_object));
+                    }
+                    next_object += 1;
+                }
+                // Close a live handle: it returns the object it was opened for.
+                1 if open > 0 => {
+                    let pick = nth_live(&live, rng.below(open));
+                    let (handle, object) = live[pick].take().unwrap();
+                    assert_eq!(table.close(handle).unwrap().object, object);
+                    dead[dead_next] = Some(handle);
+                    dead_next = (dead_next + 1) % dead.len();
+                }
+                // Look up a live handle.
+                _ => {
+                    if open > 0 {
+                        let pick = nth_live(&live, rng.below(open));
+                        let (handle, object) = live[pick].unwrap();
+                        assert_eq!(table.get(handle).unwrap().object, object);
+                    }
+                }
+            }
+
+            // Every handle closed so far stays dead, even after its slot has been reused.
+            for handle in dead.iter().flatten() {
+                assert_eq!(table.get(*handle).err(), Some(HandleError::Invalid));
+            }
+            assert_eq!(table.len(), live.iter().flatten().count());
+        }
+    }
+}
