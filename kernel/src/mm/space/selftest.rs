@@ -27,6 +27,7 @@ use crate::mm::space::{self, Fault, Space, ERROR_WRITE};
 use crate::mm::tables;
 use crate::mm::{self, phys};
 use crate::sync::SyncCell;
+use core::mem::MaybeUninit;
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::commit::PoolKind;
 use nolx_mm_core::paging::Protection;
@@ -61,16 +62,12 @@ const SECOND_SPACE_PAGES: u64 = 2;
 /// Bytes of the first space's private range that are shared with the second.
 const SHARED_BYTES: u64 = SECOND_SPACE_PAGES * 0x1000;
 
-/// Print a progress marker. Temporary instrumentation: the boot log is the only window into a
-/// machine that stops without a message, so each phase of the self test announces itself.
-fn mark(console: &mut dyn HalConsole, what: &str) {
-    let _ = writeln!(console, "NOLX: address space selftest: {what}");
-}
-
-/// The address space the test drives.
-static SPACE_A: SyncCell<Option<Space>> = SyncCell::new(None);
-/// The address space it shares pages with.
-static SPACE_B: SyncCell<Option<Space>> = SyncCell::new(None);
+/// The address space the test drives. Uninitialised until `create_first` builds it in place:
+/// the space is tens of kilobytes, and the boot processor's stack is not a place a value of
+/// that size may live, not even for one call.
+static SPACE_A: SyncCell<MaybeUninit<Space>> = SyncCell::new(MaybeUninit::uninit());
+/// The address space it shares pages with, built in place for the same reason.
+static SPACE_B: SyncCell<MaybeUninit<Space>> = SyncCell::new(MaybeUninit::uninit());
 
 /// What the self test did, for the boot log.
 #[derive(Clone, Copy, Debug, Default)]
@@ -135,10 +132,10 @@ pub fn run(console: &mut dyn HalConsole) -> Result<SpaceReport, &'static str> {
     };
 
     create_first(console, &mut report)?;
-    describe_ranges(console, &mut report)?;
-    drive_faults(console, &mut report)?;
-    drive_copy_on_write(console, &mut report)?;
-    teardown(console, &mut report)?;
+    describe_ranges(&mut report)?;
+    drive_faults(&mut report)?;
+    drive_copy_on_write(&mut report)?;
+    teardown(&mut report)?;
 
     if report.frames.1 != report.frames.0 {
         return Err("the address spaces did not give every frame back");
@@ -170,9 +167,11 @@ fn create_first(
     report: &mut SpaceReport,
 ) -> Result<(), &'static str> {
     let kernel_root = tables::current_root();
-    mark(console, "creating the first space");
-    let space = Space::create().ok_or("could not create an address space")?;
-    mark(console, "the first space exists");
+    // Built in the static, not in a local: see `create_in_place`.
+    // SAFETY: single boot processor. The cell is uninitialised until here, and this is its
+    // only writer until teardown.
+    let place = unsafe { &mut *SPACE_A.get() };
+    let space = Space::create_in_place(place).ok_or("could not create an address space")?;
     if space.root() == kernel_root {
         return Err("a new address space reused the kernel's page-table root");
     }
@@ -204,18 +203,12 @@ fn create_first(
         space.live_tables()
     );
 
-    // SAFETY: single boot processor; the self test is the only writer of this cell, and no
-    // other reference to the space exists between here and teardown.
-    unsafe {
-        *SPACE_A.get() = Some(space);
-    }
     report.spaces += 1;
-    mark(console, "the first space is registered");
     Ok(())
 }
 
 /// Describe the ranges: nothing is mapped yet, and everything is committed.
-fn describe_ranges(console: &mut dyn HalConsole, report: &mut SpaceReport) -> Result<(), &'static str> {
+fn describe_ranges(report: &mut SpaceReport) -> Result<(), &'static str> {
     let space = a();
     space.set_stack_floor(STACK_FLOOR);
     space
@@ -268,15 +261,12 @@ fn describe_ranges(console: &mut dyn HalConsole, report: &mut SpaceReport) -> Re
         .check()
         .map_err(|_| "the VAD tree's invariants do not hold after describing the ranges")?;
     report.vads = 4;
-    mark(console, "ranges described");
     Ok(())
 }
 
 /// The four fault causes, and the refusals that go with them.
-fn drive_faults(console: &mut dyn HalConsole, report: &mut SpaceReport) -> Result<(), &'static str> {
-    mark(console, "activating the first space for the faults");
+fn drive_faults(report: &mut SpaceReport) -> Result<(), &'static str> {
     a().activate();
-    mark(console, "the first space is active");
 
     // Demand zero: the first touch of a committed private page.
     let Fault::DemandZero { frame } = expect_zero(PRIVATE_START)? else {
@@ -355,25 +345,21 @@ fn drive_faults(console: &mut dyn HalConsole, report: &mut SpaceReport) -> Resul
         Ok(_) => return Err("a stack fault below the floor was grown anyway"),
     }
 
-    mark(console, "the faults are resolved");
     a().check()
         .map_err(|_| "the VAD tree's invariants do not hold after the faults")?;
     if a().pages_mapped() != FIRST_SPACE_PAGES {
         return Err("the first address space did not map exactly its four pages");
     }
     a().deactivate();
-    mark(console, "the first space is deactivated");
     Ok(())
 }
 
 /// Copy on write: share the private range into a second address space and write in both.
-fn drive_copy_on_write(console: &mut dyn HalConsole, report: &mut SpaceReport) -> Result<(), &'static str> {
-    mark(console, "creating the second space");
-    let second = Space::create().ok_or("could not create a second address space")?;
-    // SAFETY: as in `create_first`: one writer, and no live reference to the space yet.
-    unsafe {
-        *SPACE_B.get() = Some(second);
-    }
+fn drive_copy_on_write(report: &mut SpaceReport) -> Result<(), &'static str> {
+    // SAFETY: as in `create_first`: the cell is uninitialised until here, and nothing else can
+    // write it.
+    let place = unsafe { &mut *SPACE_B.get() };
+    let _second = Space::create_in_place(place).ok_or("could not create a second address space")?;
     report.spaces += 1;
 
     // Sharing happens with the parent active: it is the parent's entries that are made
@@ -385,7 +371,6 @@ fn drive_copy_on_write(console: &mut dyn HalConsole, report: &mut SpaceReport) -
     if pages != SECOND_SPACE_PAGES {
         return Err("sharing did not find the two mapped pages");
     }
-    mark(console, "the pages are shared");
 
     // Both sides are described, both are charged for exactly what was shared, and both point
     // at the same frame, read-only.
@@ -463,7 +448,6 @@ fn drive_copy_on_write(console: &mut dyn HalConsole, report: &mut SpaceReport) -
     }
     write_user(PRIVATE_START, MARKER);
     a().deactivate();
-    mark(console, "copy on write is done in both spaces");
 
     if a().pages_mapped() != FIRST_SPACE_PAGES || b().pages_mapped() != SECOND_SPACE_PAGES {
         return Err("copy on write changed the number of mapped pages");
@@ -472,25 +456,14 @@ fn drive_copy_on_write(console: &mut dyn HalConsole, report: &mut SpaceReport) -
 }
 
 /// Tear both address spaces down and check what the counters say afterwards.
-fn teardown(console: &mut dyn HalConsole, report: &mut SpaceReport) -> Result<(), &'static str> {
-    mark(console, "tearing the spaces down");
+fn teardown(report: &mut SpaceReport) -> Result<(), &'static str> {
     let first_pages = a().pages_mapped();
     let second_pages = b().pages_mapped();
     report.pages_mapped = first_pages + second_pages;
 
-    // SAFETY: the self test is the only owner of both cells, and both spaces are inactive --
-    // `teardown` asserts that itself.
-    let (first, second) = unsafe {
-        (
-            (*SPACE_A.get())
-                .take()
-                .ok_or("the first address space is missing")?,
-            (*SPACE_B.get())
-                .take()
-                .ok_or("the second address space is missing")?,
-        )
-    };
-    let torn = first
+    // The spaces stay where they are: teardown works through a borrow, because moving one out
+    // of its cell would put the whole value on the stack.
+    let torn = a()
         .teardown()
         .map_err(|_| "the first address space did not tear down")?;
     if torn.pages_unmapped != first_pages {
@@ -508,7 +481,7 @@ fn teardown(console: &mut dyn HalConsole, report: &mut SpaceReport) -> Result<()
     if torn.commit_released != committed {
         return Err("the first address space released the wrong commit charge");
     }
-    let torn = second
+    let torn = b()
         .teardown()
         .map_err(|_| "the second address space did not tear down")?;
     if torn.pages_unmapped != second_pages {
@@ -517,7 +490,6 @@ fn teardown(console: &mut dyn HalConsole, report: &mut SpaceReport) -> Result<()
     if torn.vads_removed != 1 {
         return Err("the second address space removed the wrong number of descriptors");
     }
-    mark(console, "both spaces are gone");
     mm::audit().map_err(|_| "the frame-map audit failed after teardown")?;
     report.frames.1 = mm::free_frames();
     let (allocated, released) = tables::totals();
@@ -550,21 +522,14 @@ fn read_user(address: u64) -> u8 {
 
 /// The first address space.
 fn a() -> &'static mut Space {
-    // SAFETY: single boot processor; the cell holds a live `Space` from `create_first` until
-    // `teardown`, and every use of the returned reference ends before the next one begins.
-    unsafe {
-        (*SPACE_A.get())
-            .as_mut()
-            .expect("the first address space is missing")
-    }
+    // SAFETY: single boot processor. `create_first` initialised the cell before any caller
+    // could reach this, `teardown` is the only code that gives the space up, and every use of
+    // the returned reference ends before the next one begins.
+    unsafe { (*SPACE_A.get()).assume_init_mut() }
 }
 
 /// The second address space.
 fn b() -> &'static mut Space {
-    // SAFETY: as `a`.
-    unsafe {
-        (*SPACE_B.get())
-            .as_mut()
-            .expect("the second address space is missing")
-    }
+    // SAFETY: as `a`, with `drive_copy_on_write` in place of `create_first`.
+    unsafe { (*SPACE_B.get()).assume_init_mut() }
 }

@@ -15,8 +15,8 @@
 //! kernel is running on (see `pml4_index(KERNEL_BASE)`). Those entries point at the *same*
 //! PDPTs the kernel uses, so a kernel frame has one mapping no matter which process is running
 //! and no code ever walks two tables for one address. Only the user half -- PML4 entries
-//! `0..256` -- is private to the process, and that is the half [`AddressSpace::create`] leaves
-//! empty.
+//! `0..256` -- is private to the process, and that is the half
+//! [`AddressSpace::create_in_place`] leaves empty.
 //!
 //! # The fault path
 //!
@@ -58,6 +58,8 @@ use nolx_mm_core::vad::{
 use crate::mm::tables::{self, KernelTableStore};
 use crate::mm::{self, phys, PAGE_SIZE};
 use crate::sync::SyncCell;
+use core::mem::MaybeUninit;
+use core::ptr::addr_of_mut;
 
 /// Virtual address descriptors one address space can hold.
 ///
@@ -93,7 +95,7 @@ pub struct AddressSpace<const NODES: usize> {
     /// The PML4 frame: what CR3 is loaded with.
     root: Frame,
     /// Page tables allocated for this space and not yet released. The PML4 is not counted here:
-    /// it is taken by [`AddressSpace::create`] before there is a store to record it in.
+    /// it is taken by [`AddressSpace::create_in_place`] before there is a store to record it in.
     tables: KernelTableStore,
     /// What the address space means.
     vads: VadTree<NODES>,
@@ -110,11 +112,21 @@ pub struct AddressSpace<const NODES: usize> {
 }
 
 impl<const NODES: usize> AddressSpace<NODES> {
-    /// Create an address space: an empty user half, and the kernel's own half shared.
+    /// Create an address space in `place`: an empty user half, and the kernel's own half
+    /// shared.
+    ///
+    /// The space is built *in place*, one field at a time, rather than returned by value, and
+    /// that is a requirement rather than a style choice: a value of this type is most of the
+    /// kernel stack -- the tree alone is [`SPACE_NODES`] descriptors, tens of kilobytes -- so
+    /// a kernel that moves one through a caller's temporaries runs off the end of its stack
+    /// before it has started a single process. The boot self test found exactly that: the
+    /// space and the `Some(space)` that wrapped it put fifty kilobytes of uninitialised
+    /// storage in one frame, and the teardown put a hundred. Nothing in this module may
+    /// materialise an `AddressSpace` by value.
     ///
     /// Returns `None` when the frame allocator or the system PTE pool cannot supply the PML4,
     /// which at boot means the machine cannot run another process at all.
-    pub fn create() -> Option<Self> {
+    pub fn create_in_place(place: &mut MaybeUninit<Self>) -> Option<&mut Self> {
         let root_frame = mm::allocate_frame_zeroed()?;
         mm::mark_page_table(root_frame);
         if mm::pool::charge(PoolKind::SystemPte, PAGE_SIZE as u64).is_err() {
@@ -141,16 +153,23 @@ impl<const NODES: usize> AddressSpace<NODES> {
             }
         }
 
-        Some(Self {
-            root,
-            tables: KernelTableStore::new(),
-            vads: VadTree::new(USER_SPACE_LOW, USER_SPACE_HIGH),
-            commit: CommitCharge::new("address space", COMMIT_LIMIT),
-            mapped: 0,
-            faults: 0,
-            copies: 0,
-            stack_floor: USER_SPACE_LOW,
-        })
+        // SAFETY: `place` is uninitialised storage for exactly this type. Each field is
+        // written exactly once below, through a raw pointer to the field -- never through a
+        // reference to the whole, which would be a reference to uninitialised memory -- and no
+        // write reads the storage it is about to overwrite.
+        unsafe {
+            let space = place.as_mut_ptr();
+            addr_of_mut!((*space).root).write(root);
+            addr_of_mut!((*space).tables).write(KernelTableStore::new());
+            addr_of_mut!((*space).vads).write(VadTree::new(USER_SPACE_LOW, USER_SPACE_HIGH));
+            addr_of_mut!((*space).commit).write(CommitCharge::new("address space", COMMIT_LIMIT));
+            addr_of_mut!((*space).mapped).write(0);
+            addr_of_mut!((*space).faults).write(0);
+            addr_of_mut!((*space).copies).write(0);
+            addr_of_mut!((*space).stack_floor).write(USER_SPACE_LOW);
+        }
+        // SAFETY: every field was written just above, so the storage is initialised.
+        Some(unsafe { place.assume_init_mut() })
     }
 
     /// The PML4 frame.
@@ -400,7 +419,17 @@ impl<const NODES: usize> AddressSpace<NODES> {
     ///
     /// The space must not be the active one. Returns what it gave back, which is what the boot
     /// self test checks against the frame allocator's own counters.
-    pub fn teardown(mut self) -> Result<Teardown, SpaceError> {
+    /// Takes `&mut self` rather than `self` for the reason [`AddressSpace::create_in_place`]
+    /// documents: the value is far too large to travel through a function boundary, and the
+    /// space this gives up lives in a caller's own storage -- a process object, or the boot
+    /// self test's static.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the space has already been torn down. The PML4 is freed exactly once, and a
+    /// second teardown would free a frame the allocator has already handed to someone else.
+    pub fn teardown(&mut self) -> Result<Teardown, SpaceError> {
+        assert!(self.root != 0, "an address space was torn down twice");
         assert!(
             current_pointer().is_null(),
             "tore down an address space while it was active"
@@ -448,6 +477,9 @@ impl<const NODES: usize> AddressSpace<NODES> {
             )));
         }
         mm::free_frame(self.root as usize).map_err(|_| SpaceError::NotMapped)?;
+        // A torn-down space has no root. Leaving the frame number behind would make a second
+        // teardown look legitimate until it freed a frame that now belongs to someone else.
+        self.root = 0;
 
         Ok(Teardown {
             vads_removed,
