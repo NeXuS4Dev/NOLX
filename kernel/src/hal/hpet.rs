@@ -33,8 +33,9 @@ pub enum HpetError {
 
 /// Validate and start the HPET main counter, returning its measured hardware frequency.
 ///
-/// The boot page tables map the standard HPET window uncached. Nonstandard bases are rejected
-/// until the memory manager can install a dedicated uncached mapping.
+/// The direct map covers the standard HPET window uncached, because the boot layer mapped
+/// that window through the same tables the direct map is built from. Nonstandard bases are
+/// rejected until the memory manager can install a dedicated uncached mapping.
 pub fn init(info: &HpetInfo) -> Result<u64, HpetError> {
     if info.base.address_space_id != 0 {
         return Err(HpetError::UnsupportedAddressSpace);
@@ -198,25 +199,25 @@ pub fn wait_ticks(ticks: u64) -> bool {
 }
 
 unsafe fn mmio_read64(base: u64, offset: usize) -> u64 {
-    let address = (base as usize + offset) as *const u64;
+    let address = crate::mm::phys::direct_ptr::<u64>(base + offset as u64);
     // SAFETY: callers validate that the aligned address belongs to the mapped UC HPET block.
     unsafe { core::ptr::read_volatile(address) }
 }
 
 unsafe fn mmio_read32(base: u64, offset: usize) -> u32 {
-    let address = (base as usize + offset) as *const u32;
+    let address = crate::mm::phys::direct_ptr::<u32>(base + offset as u64);
     // SAFETY: callers validate that the aligned address belongs to the mapped UC HPET block.
     unsafe { core::ptr::read_volatile(address) }
 }
 
 unsafe fn mmio_write32(base: u64, offset: usize, value: u32) {
-    let address = (base as usize + offset) as *mut u32;
+    let address = crate::mm::phys::direct_ptr::<u32>(base + offset as u64);
     // SAFETY: callers validate that the aligned address belongs to the mapped UC HPET block.
     unsafe { core::ptr::write_volatile(address, value) }
 }
 
 unsafe fn mmio_write64(base: u64, offset: usize, value: u64) {
-    let address = (base as usize + offset) as *mut u64;
+    let address = crate::mm::phys::direct_ptr::<u64>(base + offset as u64);
     // SAFETY: callers validate that the aligned address belongs to the mapped UC HPET block.
     unsafe { core::ptr::write_volatile(address, value) }
 }

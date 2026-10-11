@@ -12,6 +12,7 @@ use nolx_hal_core::gdt::tss_descriptor;
 use nolx_hal_core::idt::{IdtGate, IDT_ENTRIES};
 use nolx_hal_core::vectors::exception_has_error_code;
 
+use crate::mm::phys;
 use crate::sync::SyncCell;
 
 // Keep the Rust exception-frame model in lockstep with the GAS stub list below.
@@ -81,6 +82,20 @@ impl TaskStateSegment {
 
 const _: () = assert!(size_of::<TaskStateSegment>() == 104);
 
+/// The kernel's own copy of the GDT, aligned for `LGDT`.
+///
+/// The trampoline's GDT lives in the boot layer, at a low address that stops being mapped
+/// when the kernel drops the identity map; a descriptor table the processor reads on every
+/// interrupt has to be somewhere the kernel owns. The descriptors themselves are copied from
+/// the trampoline's table -- one definition of the code and data selectors, checked against
+/// the linked image by `scripts/verify-multiboot.py` -- and the two TSS slots are filled here.
+#[repr(C, align(16))]
+struct AlignedGdt([u64; GDT_ENTRIES]);
+
+/// Descriptors in the GDT: null, kernel code, kernel data, user code, user data, TSS low,
+/// TSS high. The trampoline defines the same layout.
+const GDT_ENTRIES: usize = 7;
+
 /// An aligned TSS wrapper. The processor writes its busy bit into the GDT, not this body.
 #[repr(C, align(16))]
 struct AlignedTss(TaskStateSegment);
@@ -108,6 +123,7 @@ struct DescriptorTablePointer {
 
 const _: () = assert!(size_of::<DescriptorTablePointer>() == 10);
 
+static GDT: SyncCell<AlignedGdt> = SyncCell::new(AlignedGdt([0; GDT_ENTRIES]));
 static TSS: SyncCell<AlignedTss> = SyncCell::new(AlignedTss(TaskStateSegment::empty()));
 static IDT: SyncCell<AlignedIdt> = SyncCell::new(AlignedIdt([IdtGate::MISSING; IDT_ENTRIES]));
 static IST_NMI: SyncCell<IstStack> = SyncCell::new(IstStack::empty());
@@ -115,12 +131,13 @@ static IST_DOUBLE_FAULT: SyncCell<IstStack> = SyncCell::new(IstStack::empty());
 static IST_MACHINE_CHECK: SyncCell<IstStack> = SyncCell::new(IstStack::empty());
 
 extern "C" {
-    /// Start of the boot GDT in `boot/boot.S`.
+    /// Start of the trampoline's GDT in `boot/boot.S`, at its low (link-time) address.
     #[link_name = "gdt64"]
-    static mut BOOT_GDT: u64;
-    /// Top of the boot stack, used as the initial ring-0 stack in the TSS.
-    #[link_name = "boot_stack_top"]
-    static BOOT_STACK_TOP: u8;
+    static BOOT_GDT: u64;
+    /// Top of the kernel's own stack, defined by `kernel/linker.ld`. Ring 0 interrupts find
+    /// their stack here; the trampoline's stack is only used to reach this code.
+    #[link_name = "_kernel_stack_top"]
+    static KERNEL_STACK_TOP: u8;
     /// 256 assembly entry points, in vector order.
     #[link_name = "nolx_isr_stub_table"]
     static ISR_STUB_TABLE: [usize; IDT_ENTRIES];
@@ -131,8 +148,45 @@ extern "C" {
 /// Must run once on the boot processor before external interrupts are enabled. The boot
 /// trampoline entered Rust with interrupts disabled and no other processor running.
 pub fn init() {
+    init_gdt();
     init_tss();
     init_idt();
+}
+
+/// Copy the trampoline's descriptors into the kernel's own GDT and load it.
+///
+/// `mov cr3`-style tricks aside, this is the last step that needs the low mapping: the
+/// trampoline's `gdt64` is read *through the image window*, which maps the boot layer's
+/// frames at the kernel's image offset. After `lgdt` the processor reads descriptors from
+/// kernel memory, and the kernel can drop the identity map.
+fn init_gdt() {
+    let boot_gdt = phys::KERNEL_IMAGE_BASE + ptr::addr_of!(BOOT_GDT) as u64;
+    // SAFETY: `GDT` is written here and by `init_tss`, both during single-processor boot
+    // with interrupts disabled; the pointer is used only to copy descriptors into the table
+    // this function then loads.
+    let gdt = unsafe { ptr::addr_of_mut!((*GDT.get()).0).cast::<u64>() };
+    for index in 0..GDT_ENTRIES {
+        // SAFETY: `gdt64` is a 7-entry table linked into the boot layer, which the image
+        // window maps read-only by way of the kernel's own page tables. The destination is
+        // the kernel's aligned copy.
+        let descriptor = unsafe { ptr::read_volatile((boot_gdt as *const u64).add(index)) };
+        unsafe { gdt.add(index).write(descriptor) };
+    }
+
+    let descriptor = DescriptorTablePointer {
+        limit: (size_of::<AlignedGdt>() - 1) as u16,
+        base: gdt as u64,
+    };
+    // SAFETY: the table is populated and stays live for the lifetime of the kernel. The
+    // selectors already in CS/DS/SS keep their meaning: the new table's first five entries
+    // are byte-for-byte the ones the trampoline loaded.
+    unsafe {
+        asm!(
+            "lgdt [{}]",
+            in(reg) &descriptor,
+            options(nostack, preserves_flags),
+        );
+    }
 }
 
 fn init_tss() {
@@ -143,7 +197,7 @@ fn init_tss() {
     // SAFETY: these raw, unaligned writes follow the packed x86 TSS offsets. The TSS
     // remains exclusively owned by this initializer until `ltr` publishes it to the CPU.
     unsafe {
-        ptr::addr_of_mut!((*tss).rsp0).write_unaligned(ptr::addr_of!(BOOT_STACK_TOP) as u64);
+        ptr::addr_of_mut!((*tss).rsp0).write_unaligned(ptr::addr_of!(KERNEL_STACK_TOP) as u64);
         ptr::addr_of_mut!((*tss).ist1).write_unaligned(stack_top(&IST_NMI));
         ptr::addr_of_mut!((*tss).ist2).write_unaligned(stack_top(&IST_DOUBLE_FAULT));
         ptr::addr_of_mut!((*tss).ist3).write_unaligned(stack_top(&IST_MACHINE_CHECK));
@@ -152,15 +206,15 @@ fn init_tss() {
 
     let [low, high] = tss_descriptor(tss as u64, (size_of::<TaskStateSegment>() - 1) as u32);
 
-    // SAFETY: the boot GDT reserves slots 5 and 6 for the 16-byte TSS descriptor. The
-    // identity mapping is writable during M1/M2, and interrupts are still disabled.
+    // SAFETY: the kernel's GDT reserves slots 5 and 6 for the 16-byte TSS descriptor, and
+    // it is the table currently loaded. Interrupts are still disabled.
     unsafe {
-        let gdt = ptr::addr_of_mut!(BOOT_GDT);
+        let gdt = ptr::addr_of_mut!((*GDT.get()).0).cast::<u64>();
         ptr::write_volatile(gdt.add(5), low);
         ptr::write_volatile(gdt.add(6), high);
     }
 
-    // SAFETY: `TSS_SELECTOR` refers to the descriptor just installed in the boot GDT.
+    // SAFETY: `TSS_SELECTOR` refers to the descriptor just installed in the kernel's GDT.
     // `ltr` reads the descriptor and records its selector in the task register.
     unsafe {
         asm!("ltr ax", in("ax") TSS_SELECTOR, options(nostack, preserves_flags));

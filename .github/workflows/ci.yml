@@ -230,6 +230,7 @@ jobs:
             "hal: active clock source=" \
             "wall-clock: CMOS RTC UTC epoch=" \
             "NOLX: hal online" \
+            "mm: higher-half switch: image window at 0xffffffff80000000" \
             "NOLX: mm online" \
             "NOLX: frame allocator online" \
             "NOLX: mm selftest: starting" \
@@ -245,6 +246,12 @@ jobs:
               exit 1
             fi
           done
+          if ! grep -Eq \
+            'mm: higher-half switch: .*identity map gone=true, direct map reachable=true, image window reachable=true' \
+            build/serial.log; then
+            echo "missing marker: the higher-half switch did not verify its own result"
+            exit 1
+          fi
           if ! grep -Eq 'hal: active clock source=(calibrated LAPIC|TSC deadline)' build/serial.log; then
             echo "the calibrated local-APIC timer was not selected"
             exit 1

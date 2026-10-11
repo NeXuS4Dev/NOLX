@@ -22,8 +22,11 @@
 //! which is the same bootstrap problem the object map has, and it is solved the same way:
 //! the thing that hands out memory cannot itself be handed out.
 
+pub mod phys;
+pub mod pool;
 pub mod selftest;
 pub mod store;
+pub mod tables;
 
 use crate::hal::multiboot::BootInfo;
 use crate::sync::SyncCell;
@@ -31,6 +34,8 @@ use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::buddy::{Buddy, BuddyStats, Frame, FreeError, MAX_ORDER};
 use nolx_mm_core::magazine::{Allocated, FrameCache, FrameCacheStats};
 use store::{DirectMapStore, MAX_MANAGED_FRAMES};
+
+pub use phys::{direct, physical, DIRECT_MAP_BASE, KERNEL_IMAGE_BASE};
 
 /// The boot processor's index into the per-processor structures.
 pub const BOOT_CPU: usize = 0;
@@ -256,7 +261,7 @@ fn reserve_kernel_memory() -> usize {
     let image_end = (kernel_image_end() as usize).div_ceil(PAGE_SIZE);
     reserve(low_reserved, image_end, FrameState::Reserved);
 
-    // Frames the boot layer's identity map does not cover cannot hold free-list links, so
+    // Frames the direct map does not cover cannot hold free-list links, so
     // they stay reserved rather than being described as free and then quietly skipped.
     let len = frame_map_len();
     reserve(
@@ -269,8 +274,13 @@ fn reserve_kernel_memory() -> usize {
 }
 
 /// The address at which the kernel image, and the static heap arena after it, ends.
+///
+/// The linker symbol is a virtual address in the image window; the frame map is indexed by
+/// physical frame, so the window offset comes off here. This is the boundary between the
+/// frames the kernel owns and the frames it can hand out.
 fn kernel_image_end() -> u64 {
-    core::ptr::addr_of!(_kernel_heap_end) as u64
+    let virtual_address = core::ptr::addr_of!(_kernel_heap_end) as u64;
+    phys::physical(virtual_address).unwrap_or(virtual_address)
 }
 
 /// Put frames `[first, last)` into `state`, clamped to the populated part of the map.
@@ -405,6 +415,136 @@ pub fn free_block(frame: usize, order: usize) -> Result<(), FreeError> {
         unsafe { (*FRAME_STATES.get())[index] = FrameState::Free };
     }
     Ok(())
+}
+
+/// Allocate one frame whose contents are known to be zero.
+///
+/// This is what page tables and user mappings need: an entry that is not cleared is an entry
+/// that maps memory nobody asked for, and a page handed to a user process must not contain
+/// the previous owner's bytes. The magazine keeps a pool of frames already known to be zero
+/// -- they came back from a mapping that was zeroed before it was mapped -- so in the common
+/// case this costs nothing but the lookup.
+pub fn allocate_frame_zeroed() -> Option<usize> {
+    let frame = allocate_frame()?;
+    clear_frame(frame);
+    Some(frame)
+}
+
+/// Mark a frame as holding a page table, so the frame map, the allocator's accounting, and
+/// the boot audit agree that it is neither free nor usable as a mapping.
+pub fn mark_page_table(frame: usize) {
+    set_frame_state(frame, FrameState::PageTable);
+}
+
+/// Put one frame into `state`, if it is inside the populated map.
+pub fn set_frame_state(frame: usize, state: FrameState) {
+    // SAFETY: as `reserve`: called by the boot processor, on frames the caller owns.
+    unsafe {
+        if frame < *FRAME_MAP_LEN.get() {
+            (*FRAME_STATES.get())[frame] = state;
+        }
+    }
+}
+
+/// Overwrite a frame with zeros, through the direct map.
+pub fn clear_frame(frame: usize) {
+    let base = phys::direct(address_of(frame));
+    // SAFETY: `frame` is allocated, so the whole page is mapped and owned by the caller; the
+    // write is a plain memset of `PAGE_SIZE` bytes at an aligned address.
+    unsafe {
+        core::ptr::write_bytes(base as *mut u8, 0, PAGE_SIZE);
+    }
+}
+
+/// How many mappings share each frame.
+///
+/// A mapping is a reference: `fork` gives two address spaces one frame, and the frame goes
+/// back to the allocator only when the last mapping of it is gone. The count covers the
+/// frames the allocator manages -- everything above that line is reserved memory that is
+/// never shared.
+static FRAME_REFS: SyncCell<[u16; MAX_MANAGED_FRAMES as usize]> =
+    SyncCell::new([0; MAX_MANAGED_FRAMES as usize]);
+
+/// Which frames are mapped read-only in more than one place, so a write fault must copy.
+///
+/// One bit per frame. A frame can be shared without being a copy-on-write candidate: two
+/// address spaces mapping the same *shared* page never copy it. The bit is what tells the
+/// fault handler which of the two it is looking at.
+static FRAME_COW: SyncCell<[u64; MAX_MANAGED_FRAMES as usize / 64]> =
+    SyncCell::new([0; MAX_MANAGED_FRAMES as usize / 64]);
+
+/// Take a reference to `frame`.
+///
+/// Returns `false` for a frame outside the managed range, which cannot be shared because
+/// nothing outside the range is ever mapped into an address space.
+pub fn retain_frame(frame: usize) -> bool {
+    if frame >= MAX_MANAGED_FRAMES as usize {
+        return false;
+    }
+    // SAFETY: single boot processor; the counts are only touched by mapping and unmapping
+    // code, which does not run in interrupt context.
+    unsafe {
+        let count = &mut (*FRAME_REFS.get())[frame];
+        *count = count.saturating_add(1);
+    }
+    true
+}
+
+/// Give up a reference to `frame`, returning what the count became.
+pub fn release_frame(frame: usize) -> u16 {
+    if frame >= MAX_MANAGED_FRAMES as usize {
+        return 0;
+    }
+    // SAFETY: as [`retain_frame`].
+    unsafe {
+        let count = &mut (*FRAME_REFS.get())[frame];
+        *count = count.saturating_sub(1);
+        *count
+    }
+}
+
+/// How many mappings share `frame`.
+#[must_use]
+pub fn frame_refcount(frame: usize) -> u16 {
+    if frame >= MAX_MANAGED_FRAMES as usize {
+        return 0;
+    }
+    // SAFETY: as [`retain_frame`]; a plain read.
+    unsafe { (*FRAME_REFS.get())[frame] }
+}
+
+/// Record that `frame` is shared and must be copied on write.
+pub fn mark_copy_on_write(frame: usize) {
+    if frame >= MAX_MANAGED_FRAMES as usize {
+        return;
+    }
+    // SAFETY: as [`retain_frame`].
+    unsafe {
+        let word = &mut (*FRAME_COW.get())[frame / 64];
+        *word |= 1u64 << (frame % 64);
+    }
+}
+
+/// Stop treating `frame` as a copy-on-write candidate: it has exactly one owner now.
+pub fn clear_copy_on_write(frame: usize) {
+    if frame >= MAX_MANAGED_FRAMES as usize {
+        return;
+    }
+    // SAFETY: as [`retain_frame`].
+    unsafe {
+        let word = &mut (*FRAME_COW.get())[frame / 64];
+        *word &= !(1u64 << (frame % 64));
+    }
+}
+
+/// Whether `frame` is mapped read-only in more than one place.
+#[must_use]
+pub fn is_copy_on_write(frame: usize) -> bool {
+    if frame >= MAX_MANAGED_FRAMES as usize {
+        return false;
+    }
+    // SAFETY: as [`retain_frame`]; a plain read.
+    unsafe { (*FRAME_COW.get())[frame / 64] & (1u64 << (frame % 64)) != 0 }
 }
 
 /// Mark one frame allocated, if it is inside the populated map.

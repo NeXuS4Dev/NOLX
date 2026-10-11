@@ -125,10 +125,33 @@ The four allocator assertions that were `pending-T2` are now `tested-T2`, record
 workflow run 38088471560 on revision `a025a42` -- the same bar M2 was held to: the claim, the
 marker that carries it, and the run that shows it happening.
 
+Landed since the checkpoint above (2026-10-11):
+
+* the higher-half switch -- the image is linked in the top 2 GiB at
+  `0xffff_ffff_8000_0000` and mapped there by the trampoline in PML4 slot 511, the direct map
+  carries the low 2 GiB of RAM and the APIC/HPET windows at `0xffff_8000_0000_0000`, and the
+  kernel drops the boot identity map once its own GDT, IDT, and stack are live. The switch
+  verifies itself: it probes a direct-map frame, an image-window address, and a low physical
+  address that must no longer translate, and the boot stops if any probe answers wrong. The
+  kernel is built with `-C code-model=kernel`, which is what makes the top-2-GiB address
+  reachable; `nolx_mm_core::paging` pins that with a compile-time assertion, so a layout that
+  the code model cannot address fails to build instead of failing to link.
+* `kernel/src/mm/tables.rs` -- `KernelTableStore`, the `TableStore` over frames from the
+  frame allocator, plus `activate`, `invalidate_page`, and the walker probes. This is the
+  mechanism per-process address spaces will be built from.
+* the image-window layout as a flat-copy contract: `scripts/verify-multiboot.py` now checks
+  that every stored section sits at `file_offset = copy_base + (load - load_base)` and that
+  the window covers the whole kernel region, because a loader that copies the image as one
+  block (QEMU's Multiboot loader does) will otherwise load the wrong bytes into the boot
+  layer's page tables. The boot layer's zero-initialised state is stored in the file rather
+  than as a NOBITS hole for the same reason.
+* `kernel/src/mm/phys.rs` (the two windows and the physical-to-pointer conversion) and
+  `kernel/src/mm/pool.rs` (the charged pools, not yet wired to the object manager).
+
 Still to do in M3:
 
-* page tables in the kernel (per-process address spaces over the frame allocator) and the
-  higher-half switch, which `kernel/linker.ld` and `boot/boot.S` both reserve for M3;
+* per-process address spaces over the frame allocator (MM-028, MM-029): a VAD tree per
+  process, page tables built with `KernelTableStore`, and address-space switching;
 * the kernel heap registered as a `GlobalAlloc`, over regions taken from the frame allocator;
 * demand paging, copy-on-write, and the four fault causes from the memory-manager design;
 * NUMA node lists, and the pool accounting wired to the object manager.

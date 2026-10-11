@@ -30,7 +30,14 @@ PYTHON     ?= python3
 # executable, which is an ET_DYN with VMAs relative to zero. The Multiboot kludge fields in
 # boot/boot.S are absolute addresses and the linker script pins the image at 1 MiB, so a PIE
 # kernel would report addresses that are not where it actually loads.
-KERNEL_RUSTFLAGS := -C relocation-model=static -C link-arg=-T$(CURDIR)/kernel/linker.ld \
+#
+# `-C code-model=kernel` matters just as much: the image is linked in the top 2 GiB
+# (`KERNEL_IMAGE_BASE` in kernel/linker.ld), and the kernel code model is the one that lets
+# code there address its own statics with 32-bit sign-extended absolute operands. With the
+# default (small) code model, rustc emits absolute 32-bit displacements that are valid only
+# below 2 GiB and the link fails with `R_X86_64_32S out of range` for every static.
+KERNEL_RUSTFLAGS := -C relocation-model=static -C code-model=kernel \
+                    -C link-arg=-T$(CURDIR)/kernel/linker.ld \
                     -C link-arg=-no-pie -C link-arg=--build-id=none
 
 .PHONY: all check kernel bootcheck fscheck report iso run run-kernel mkfs fmt lint clean help \

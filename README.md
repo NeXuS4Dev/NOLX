@@ -70,7 +70,7 @@ Milestone tracking lives in [ROADMAP.md](ROADMAP.md). Current state:
 | M0 — Architecture, ABI and on-disk formats frozen | **done** |
 | M1 — Boot layer: Multiboot → long mode → kernel entry | **done** — boot layer machine-verified, kernel entry reached under QEMU |
 | M2 — HAL: console, GDT, IDT, PIC/APIC, timer | **done** — ACPI/HPET discovery, xAPIC/x2APIC, I/O APIC routing, TPR/EOI, calibrated LAPIC/TSC-deadline paths with PIC/PIT fallback; every HAL T2 assertion now has a passing QEMU run |
-| M3 — Physical/virtual memory, kernel heap | **in progress** — frame map with kernel reservations, buddy allocator with per-CPU magazines, boot-time stress test under live interrupts; page tables, kernel heap, and the higher-half switch remain |
+| M3 — Physical/virtual memory, kernel heap | **in progress** — frame map with kernel reservations, buddy allocator with per-CPU magazines, boot-time stress test under live interrupts, and the higher-half switch (image in the top 2 GiB, identity map dropped and verified at boot); per-process address spaces, the kernel heap, and demand paging remain |
 | M4+ | planned |
 
 ### What has actually been verified
