@@ -12,12 +12,12 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 |---|---|---|
 | `unimplemented` | 5 | 100.0% |
 | `implemented` | 5 | 95.2% |
-| `tested-T1` | 73 | 89.4% |
-| `pending-T2` | 1 | — |
-| `tested-T2` | 20 | 19.2% |
+| `tested-T1` | 73 | 90.4% |
+| `pending-T2` | 0 | — |
+| `tested-T2` | 21 | 20.2% |
 | `tested-T3` | 0 | 0.0% |
 
-**93 of 104 assertions have a passing automated test; 1 are awaiting T2 results.**
+**94 of 104 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
@@ -25,7 +25,7 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 |---|---|---|---|---|---|---|
 | hal | 23 | 23 | 11 | 0 | 8 | 0 |
 | mm | 34 | 34 | 23 | 0 | 11 | 0 |
-| obj | 10 | 10 | 8 | 1 | 1 | 0 |
+| obj | 10 | 10 | 8 | 0 | 2 | 0 |
 | vfs | 37 | 32 | 31 | 0 | 0 | 0 |
 
 ## Unimplemented assertions (5)
@@ -48,11 +48,9 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | HAL-021 | I/O APIC routes: GSI windows and ISA overrides are validated, redirections start masked, and NMI sources use MADT polarity/trigger flags |
 | FD-005 | XSH dup2: if old and new are equal, nothing is closed and new is returned |
 
-## Pending T2 verification (1)
+## Pending T2 verification (0)
 
-| ID | Specification reference | Configured test |
-|---|---|---|
-| OBJ-010 | At boot, `open` enforces the monitor's decisions for a SYSTEM, reader, refused, backup, and low-integrity token against a device and a labelled log, and the audit log agrees with what was asked | `kernel/src/obj/boot.rs` `selftest`, part two. Boot marker `NOLX: srm selftest: 10 access checks (6 granted, 4 denied)`. |
+None.
 
 ## All assertions
 
@@ -136,7 +134,7 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | OBJ-007 | obj | SeAccessCheck: a deny entry written before an allow refuses the rights it covers; the owner holds READ_CONTROL and WRITE_DAC implicitly; group membership and the everyone principal match; a null DACL grants and an empty DACL denies | `tested-T1` | `crates/nolx-obj-core/src/security.rs` tests `deny_written_before_allow_wins_for_the_same_principal`, `owner_holds_read_control_and_write_dac_implicitly_but_not_read`, `group_membership_is_matched_through_the_token`, and `null_dacl_grants_everything_and_empty_dacl_denies_everything`. |
 | OBJ-008 | obj | Mandatory integrity labels refuse write-class rights to a lower token but not reads; BACKUP grants reads and RESTORE grants writes only where the DACL has not refused them | `tested-T1` | `security.rs` tests `integrity_label_refuses_write_class_to_a_lower_token`, `backup_privilege_reads_what_the_dacl_does_not_grant`, and `restore_privilege_writes_but_does_not_override_a_deny`. |
 | OBJ-009 | obj | Every access decision made through `open` is recorded, and the audit totals stay exact after the bounded log wraps | `tested-T1` | `security.rs` test `audit_log_keeps_exact_totals_past_its_capacity`; at boot the self test requires the audit delta to equal the number of checks. |
-| OBJ-010 | obj | At boot, `open` enforces the monitor's decisions for a SYSTEM, reader, refused, backup, and low-integrity token against a device and a labelled log, and the audit log agrees with what was asked | `pending-T2` | `kernel/src/obj/boot.rs` `selftest`, part two. Boot marker `NOLX: srm selftest: 10 access checks (6 granted, 4 denied)`. |
+| OBJ-010 | obj | At boot, `open` enforces the monitor's decisions for a SYSTEM, reader, refused, backup, and low-integrity token against a device and a labelled log, and the audit log agrees with what was asked | `tested-T2` | `kernel/src/obj/boot.rs` `selftest`, part two. Boot marker `NOLX: srm selftest: 10 access checks (6 granted, 4 denied)`. |
 | PN-001 | vfs | XBD 4.12 Pathname Resolution: a pathname beginning with a slash resolves against the root | `tested-T1` | crates/nolx-vfs path::tests::leading_slash_ignores_the_start_node |
 | PN-002 | vfs | XBD 4.12 Pathname Resolution: the empty pathname is invalid | `tested-T1` | crates/nolx-vfs path::tests::empty_path_is_enoent |
 | PN-003 | vfs | XBD 4.12 Pathname Resolution: the last component may be empty, and then refers to the directory itself | `tested-T1` | crates/nolx-vfs path::tests::trailing_slash_requires_a_directory |
