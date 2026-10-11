@@ -181,7 +181,10 @@ mod fuzz_tests {
     impl Model {
         /// Drop one pointer reference. Returns `true` if the object was deleted.
         fn release(&mut self) -> bool {
-            let counts = self.counts.as_mut().expect("released an object that was deleted");
+            let counts = self
+                .counts
+                .as_mut()
+                .expect("released an object that was deleted");
             let deleted = counts.release().expect("pointer count underflowed");
             if deleted {
                 self.counts = None;
