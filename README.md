@@ -120,6 +120,11 @@ This repository is honest about which artifacts were executed and which were not
   121253 -> 121253; page tables allocated 0 -> 7, released 0 -> 7; system PTE peak 36 KiB;
   audit ok`). The pools are reported through
   the object manager, and the machine's one NUMA node and its zonelist are printed at boot.
+  Running the address-space self test under a stack-pointer probe found the space itself
+  costing more stack than the kernel has: `AddressSpace<256>` is 26 KB, and moving one
+  through a local, an `Option`, and a `teardown(self)` reserved 108,640 bytes of a 64 KiB
+  kernel stack, writing past it into `.bss` silently. The space is now built in place and
+  torn down through a borrow, which puts the same self test at 14,768 bytes of stack.
 * **CI-verified (2026-10-10):** workflow run
   [38086516018](https://github.com/NeXuS4Dev/NOLX/actions/runs/38086516018) on revision
   `dc2d8d1` passed every job: boot layer, NOLXFS layout, host tests, fmt + clippy + unsafe
@@ -127,6 +132,15 @@ This repository is honest about which artifacts were executed and which were not
   asserts every boot marker, checks the wall clock advanced from its RTC anchor, boots the
   `#PF`/`#GP` fault images, and exercises the PIC/PIT fallback with the local APIC hidden.
   The eight HAL assertions that were `pending-T2` are now `tested-T2`.
+* **CI-verified (2026-10-11):** workflow run
+  [38125065287](https://github.com/NeXuS4Dev/NOLX/actions/runs/38125065287) on revision
+  `2e7279b` passed every job. Its boot smoke test asserts the address-space self test's
+  report -- two spaces, four described ranges, six faults resolved across the four causes,
+  five refusals, six pages mapped, the free-frame and page-table counters back where they
+  started, and the system PTE pool charged for every table -- and that run promotes
+  MM-028/029/031/032/033/034 from `pending-T2` to `tested-T2`. Getting there is what the
+  stack fix above is: the first CI run of that revision died on a `#GP` with the stack
+  pointer 54 KiB deep, and QEMU's own exception log is what named the phase.
 * **CI-verified (2026-10-10):** workflow run
   [38088471560](https://github.com/NeXuS4Dev/NOLX/actions/runs/38088471560) on revision
   `a025a42`, all six jobs green. Its boot smoke test asserts the frame allocator's markers

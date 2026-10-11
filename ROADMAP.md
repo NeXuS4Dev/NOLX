@@ -186,6 +186,11 @@ Landed since the checkpoint above, in two steps:
   fault returns to the faulting instruction. Teardown is what makes the accounting provable:
   the boot self test creates two address spaces, drives all four causes, and then requires the
   free-frame count and the live page-table count to return to exactly where they started.
+  An address space is tens of kilobytes -- 256 VAD descriptors is the bulk of it -- so it is
+  built in place and torn down through a borrow: the first version moved one through a local,
+  an `Option`, and a `teardown(self)`, which reserved 108 KiB of the 64 KiB kernel stack and
+  wrote past the end of it into `.bss`. CI caught it as a `#GP` whose QEMU exception log
+  showed the stack pointer 54 KiB deep; the self test now runs at 14,768 bytes.
 * **pool accounting and the node list** (MM-033, MM-034). `kernel/src/obj/pool.rs` is the
   executive's view of the three pools -- it reports what the heap and the page tables charged
   and runs the pool accounting's own check while printing. `crates/nolx-mm-core/src/numa.rs`
@@ -194,9 +199,11 @@ Landed since the checkpoint above, in two steps:
   the frame map describes; `mm::allocate_frames` now walks that zonelist before it allocates,
   so the per-node allocators that SRAT parsing will add have one place to plug into.
 
-The six `pending-T2` rows (MM-028, MM-029, MM-031, MM-032, MM-033, MM-034) are asserted by
-`.github/workflows/ci.yml` boot-smoke markers and regexes. They are promoted to `tested-T2`
-when a workflow run on this revision passes, exactly as the four allocator assertions were.
+The six rows (MM-028, MM-029, MM-031, MM-032, MM-033, MM-034) are asserted by
+`.github/workflows/ci.yml` boot-smoke markers and regexes, and they are `tested-T2` as of
+workflow run [38125065287](https://github.com/NeXuS4Dev/NOLX/actions/runs/38125065287) on
+revision `2e7279b`, which passed every job, exactly as the four allocator assertions were
+promoted.
 
 ## M4 — Object Manager and handles
 
