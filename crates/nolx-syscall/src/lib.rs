@@ -423,4 +423,116 @@ mod tests {
             assert_eq!(syscall::name_of(*number), Some(*name));
         }
     }
+
+    // ---------------------------------------------------------------- M6: T1 syscall
+    // table uniqueness and ABI round-trip.
+
+    #[test]
+    fn syscall_numbers_are_unique_and_never_renumbered() {
+        // The reservation policy in `nolx-types/src/syscall.rs` says a number is never
+        // reused or renumbered. Uniqueness is the testable half; the tombstone rule is
+        // enforced by review and by the pinning test below.
+        let mut seen = [false; 1024];
+        for (number, _) in syscall::TABLE {
+            let index = usize::from(*number);
+            assert!(index < seen.len(), "number {number} outside test window");
+            assert!(!seen[index], "syscall number {number} assigned twice");
+            seen[index] = true;
+        }
+    }
+
+    #[test]
+    fn syscall_names_round_trip_through_the_table() {
+        for (number, name) in syscall::TABLE {
+            assert_eq!(syscall::number_of(name), Some(*number));
+            assert_eq!(syscall::name_of(*number), Some(*name));
+            // The ABI round trip: number -> name -> number is the identity.
+            assert_eq!(
+                syscall::number_of(syscall::name_of(*number).unwrap()),
+                Some(*number)
+            );
+        }
+    }
+
+    #[test]
+    fn the_m6_dispatch_surface_numbers_are_pinned() {
+        // These are the calls the ring-3 fast path implements. If one moves, every user
+        // binary built before the change silently calls the wrong thing -- the exact bug
+        // the reservation policy exists to prevent.
+        assert_eq!(syscall::SYS_EXIT, 0);
+        assert_eq!(syscall::SYS_WAITID, 4);
+        assert_eq!(syscall::SYS_GETPID, 5);
+        assert_eq!(syscall::SYS_POSIX_SPAWN, 31);
+        assert_eq!(syscall::SYS_WRITE, 105);
+        assert_eq!(
+            syscall::HIGHEST,
+            syscall::TABLE.iter().map(|(n, _)| *n).max().unwrap()
+        );
+    }
+
+    #[test]
+    fn arguments_round_trip_through_the_register_convention() {
+        // The `syscall` instruction's register mapping, taken through a full trap frame:
+        // what `TrapFrame::args` reads must be what a caller's `syscall6` writes.
+        let values = [0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666];
+        let frame = TrapFrame {
+            rax: u64::from(syscall::SYS_WRITE),
+            rdi: values[0],
+            rsi: values[1],
+            rdx: values[2],
+            r10: values[3],
+            r8: values[4],
+            r9: values[5],
+            ..TrapFrame::default()
+        };
+        assert_eq!(frame.args(), values);
+        assert_eq!(frame.syscall_number(), syscall::SYS_WRITE);
+        assert_eq!(syscall::name_of(frame.syscall_number()), Some("write"));
+    }
+
+    #[test]
+    fn return_values_round_trip_through_the_error_convention() {
+        // Success stays non-negative, failure is exactly `-errno`, and `decode` is its
+        // inverse. This is the whole ABI in one test: libc depends on nothing else.
+        for value in [0i64, 1, 42, 4096, i64::from(u32::MAX)] {
+            assert_eq!(decode(value), Ok(value));
+        }
+        for errno_value in [
+            errno::E2BIG,
+            errno::EAGAIN,
+            errno::EBADF,
+            errno::EINVAL,
+            errno::ENOENT,
+            errno::ENOMEM,
+            errno::ENOSYS,
+            errno::ESRCH,
+        ] {
+            let raw = -i64::from(errno_value);
+            assert_eq!(decode(raw), Err(errno_value));
+            // `-errno` never collides with a success value.
+            assert!(raw < 0);
+        }
+    }
+
+    #[test]
+    fn the_syscall_boundary_carries_six_args_and_no_clobbered_registers() {
+        assert_eq!(MAX_ARGS, 6);
+        // `rcx` and `r11` are consumed by the instruction itself: an argument placed there
+        // is destroyed, so the ABI's argument list must be exactly the six safe registers.
+        let frame = TrapFrame {
+            rcx: 0xDEAD,
+            r11: 0xBEEF,
+            rdi: 1,
+            rsi: 2,
+            rdx: 3,
+            r10: 4,
+            r8: 5,
+            r9: 6,
+            ..TrapFrame::default()
+        };
+        let args = frame.args();
+        assert_eq!(args, [1, 2, 3, 4, 5, 6]);
+        assert!(!args.contains(&0xDEAD));
+        assert!(!args.contains(&0xBEEF));
+    }
 }

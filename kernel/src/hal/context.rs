@@ -81,6 +81,58 @@ pub fn initialize_kernel_stack(
     Ok(frame_pointer)
 }
 
+/// Initialise a kernel stack so its first resume drops into ring 3.
+///
+/// The frame is the one the shared restore path expects: full CPU state, user code and
+/// data segments with RPL 3, interrupt flag set, and `entry_rsp` already the user stack
+/// pointer the loader built. The stack is a fixed-size process kernel stack, so this
+/// cannot fail the way [`initialize_kernel_stack`] takes a caller's slice.
+pub fn initialize_user_stack(
+    stack_top: u64,
+    entry_rip: u64,
+    entry_rsp: u64,
+) -> *mut InterruptFrame {
+    let frame_bytes = size_of::<InterruptFrame>() as u64;
+    let frame_address = (stack_top - frame_bytes) & !0xF;
+    let frame = InterruptFrame {
+        r15: 0,
+        r14: 0,
+        r13: 0,
+        r12: 0,
+        r11: 0,
+        r10: 0,
+        r9: 0,
+        r8: 0,
+        rbp: 0,
+        rdi: 0,
+        rsi: 0,
+        rdx: 0,
+        rcx: 0,
+        rbx: 0,
+        rax: 0,
+        vector: 0,
+        error_code: 0,
+        instruction_pointer: entry_rip,
+        code_segment: crate::hal::syscall::USER_CODE_RPL3,
+        flags: 0x202,
+        stack_pointer: entry_rsp,
+        stack_segment: crate::hal::syscall::USER_DATA_RPL3,
+    };
+    // SAFETY: `frame_address` is 16-byte aligned and lies below `stack_top`, the top of a
+    // kernel stack this caller exclusively owns; the write initialises the frame.
+    unsafe {
+        let place = frame_address as *mut InterruptFrame;
+        place.write(frame);
+        place
+    }
+}
+
+/// Whether a frame will resume at ring 3.
+#[must_use]
+pub const fn frame_returns_to_user(frame: &InterruptFrame) -> bool {
+    frame.code_segment & 3 == 3
+}
+
 /// Halt the current ring-0 thread until a maskable interrupt arrives.
 ///
 /// The caller must have IF set and at least one interrupt source unmasked. The M5 kernel

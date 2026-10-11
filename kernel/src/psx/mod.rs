@@ -5,12 +5,16 @@
 //! here. If a behaviour is specified in *The Open Group Base Specifications, Issue 8*, its
 //! code lives in this module -- not in the I/O manager, not in a filesystem driver.
 //!
-//! In M3 this is the dispatch skeleton. The table exists first, deliberately, because it is
-//! the contract: libc, the tests, and the conformance dashboard are all written against it.
+//! In M3 this was the dispatch skeleton; M6 fills in the ring-3 fast path's five calls.
+//! The table contract remains the point: libc, the tests, and the conformance dashboard
+//! are all written against it.
 
 use nolx_hal_core::console::HalConsole;
 use nolx_types::errno;
 use nolx_types::syscall;
+
+/// The numeric type of a syscall number, as the ABI defines it.
+pub type Number = syscall::Number;
 
 /// The result of a syscall: a non-negative value, or a negative `errno`.
 pub type SysResult = i64;
@@ -68,9 +72,96 @@ pub struct Entry {
 /// get wrong, no capacity limit, and no way for a number that is absent from
 /// [`syscall::TABLE`] to acquire a handler.
 ///
-/// It is empty in M3 because nothing is implemented yet. Rows are added as milestones land,
-/// which is what makes the growth of this slice a usable progress measure.
-static HANDLERS: &[Entry] = &[];
+/// M6 fills in the ring-3 fast path's five calls. Each one is the POSIX behaviour in this
+/// module; the process-table mechanics it drives live in [`crate::exec::user`], which is
+/// the same split the milestone's design fixes: psx decides *what* a call means, the
+/// executive performs it.
+static HANDLERS: &[Entry] = &[
+    Entry {
+        number: syscall::SYS_EXIT,
+        handler: handle_exit,
+    },
+    Entry {
+        number: syscall::SYS_WAITID,
+        handler: handle_waitid,
+    },
+    Entry {
+        number: syscall::SYS_GETPID,
+        handler: handle_getpid,
+    },
+    Entry {
+        number: syscall::SYS_POSIX_SPAWN,
+        handler: handle_posix_spawn,
+    },
+    Entry {
+        number: syscall::SYS_WRITE,
+        handler: handle_write,
+    },
+];
+
+/// POSIX `exit`: the calling process terminates with the low 8 bits of `status`.
+///
+/// The `_Exit` semantics are deliberate: no flushing, no atexit, no signal delivery. Those
+/// belong to libc and to later milestones; a kernel that invented them here would be
+/// implementing a different contract than the one libc will assume.
+fn handle_exit(args: SyscallArgs) -> SysResult {
+    crate::exec::user::exit_current(args.a0 as i32);
+    0
+}
+
+/// POSIX `waitid`: report one child's state change into a `siginfo_t`.
+///
+/// Only `P_PID` + `WEXITED` are implemented: the milestone's contract is "the parent
+/// observes the child's exit status", and pretending to support process groups or
+/// `WNOWAIT` without a job control story would be the kind of partial support that
+/// programs cannot detect until production.
+fn handle_waitid(args: SyscallArgs) -> SysResult {
+    let (idtype, id, info_user, options) = (args.a0 as i32, args.a1, args.a2, args.a3 as i32);
+    if idtype != nolx_types::abi::idtype::P_PID || options != nolx_types::abi::waitopt::WEXITED {
+        return -i64::from(errno::EINVAL);
+    }
+    if id == 0 {
+        return -i64::from(errno::ECHILD);
+    }
+    crate::exec::user::waitid(id, info_user)
+}
+
+/// POSIX `getpid`: the calling process's identity. No caching, no getpid-as-a-constant.
+fn handle_getpid(_args: SyscallArgs) -> SysResult {
+    crate::exec::user::current_pid() as i64
+}
+
+/// POSIX `posix_spawn`'s file-actions-free core: create a process from an embedded image.
+///
+/// The `path` names a program the kernel embeds (see [`nolx_exec_core::programs_gen`]);
+/// `argv` is a user-space NULL-terminated pointer table; `envp` must be NULL for now. A
+/// VFS-backed spawn replaces the lookup without touching this contract.
+fn handle_posix_spawn(args: SyscallArgs) -> SysResult {
+    let (pid_out, path_user, argv_user, envp_user) = (args.a0, args.a1, args.a2, args.a3);
+    if envp_user != 0 {
+        // No environment support yet: refusing beats silently dropping variables.
+        return -i64::from(errno::ENOSYS);
+    }
+    match crate::exec::user::spawn_from_user(pid_out, path_user, argv_user) {
+        Ok(child) => child as i64,
+        Err(code) => -i64::from(code),
+    }
+}
+
+/// POSIX `write` to the standard output descriptors: bytes reach the console, byte-exact.
+///
+/// Only descriptors 1 and 2 exist in M6; anything else is `EBADF`, because returning a
+/// success for a descriptor the kernel does not have is how log files end up empty.
+fn handle_write(args: SyscallArgs) -> SysResult {
+    let (fd, buffer, length) = (args.a0, args.a1, args.a2);
+    if fd != 1 && fd != 2 {
+        return -i64::from(errno::EBADF);
+    }
+    match crate::exec::user::write_console(buffer, length) {
+        Ok(written) => written as i64,
+        Err(code) => -i64::from(code),
+    }
+}
 
 /// The answer for every syscall that has no handler yet.
 ///

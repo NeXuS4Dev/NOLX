@@ -163,9 +163,9 @@ jobs:
 
   # ---------------------------------------------------------------- does it boot?
   #
-  # The kernel is not far enough along to reach user mode, so this asserts the boot
-  # markers that exist today and nothing more. As each milestone lands its marker is
-  # added here -- the list is the project's honest progress record.
+  # The list below is the project's honest progress record: a marker is asserted when the
+  # kernel emits it, and not before. M6 reaches ring 3: the same run carries the M5
+  # kernel-thread round-robin and the user-mode "hello world" T2 test.
   boot-smoke:
     name: QEMU boot smoke test
     runs-on: ubuntu-latest
@@ -221,6 +221,7 @@ jobs:
             "cpu: max leaf" \
             "gs-cpu=0" \
             "hal: GDT/TSS loaded; 256-entry IDT installed" \
+            "hal: syscall/sysret fast path armed (STAR kernel 0x08/0x10, user 0x1b/0x23)" \
             "hal: 8259 PIC remapped to vectors 32..47; all IRQs masked" \
             "acpi: RSDP revision=" \
             "hpet: counter enabled at" \
@@ -252,6 +253,9 @@ jobs:
             "NOLX: process selftest: 2 processes, 2 address spaces, PEB/job metadata, thread context, isolated/inherited handles, token-checked open/deny, teardown returned resources" \
             "NOLX: executive scheduler prepared: BSP idle context, three kernel threads, 16 KiB stacks" \
             "NOLX: round-robin T2:" \
+            "NOLX: user mode T2: init spawned (pid 1), entering ring 3" \
+            "hello: hello from ring 3" \
+            "init: child exited with status 42" \
             "NOLX: init sequence complete, halting the boot processor" \
             "NOLX: timer reached 100 ticks; nominal 100 Hz"
           do
@@ -264,6 +268,16 @@ jobs:
             'NOLX: round-robin T2: ABCABCABCABC complete: 3 kernel threads, 12 timer quanta, order verified=true' \
             build/serial.log; then
             echo "the three kernel threads did not produce the exact interleaved round-robin trace"
+            exit 1
+          fi
+          if ! grep -qF \
+            'NOLX: user mode T2: hello ran in ring 3, hello exited with status 42, init observed 42 and exited with status 42' \
+            build/serial.log; then
+            echo "the ring-3 hello world did not run to a parent-observed exit status 42"
+            exit 1
+          fi
+          if grep -qF 'NOLX: user mode T2: FAIL' build/serial.log; then
+            echo "the ring-3 test reported an evidence-chain failure"
             exit 1
           fi
           if ! grep -Eq \

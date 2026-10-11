@@ -185,11 +185,28 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         let mut timer_marker_reported = false;
         let mut memory_selftest_done = false;
         let mut round_robin_reported = false;
+        let mut user_test_started = false;
+        let mut user_test_reported = false;
         loop {
             if !round_robin_reported && exec::round_robin_complete() {
                 round_robin_reported = true;
                 if !exec::report_round_robin(&mut console) {
                     panic!("round-robin context-switch test produced an unexpected trace");
+                }
+            }
+
+            // The M6 ring-3 phase runs right after the kernel-thread round-robin, while the
+            // clock is live: the same boot run carries both T2 tests. It must finish before
+            // the memory-manager selftests below, which activate their own address spaces
+            // and so cannot interleave with live user threads.
+            if round_robin_reported && !user_test_started {
+                user_test_started = true;
+                exec::begin_user_test(&mut console);
+            }
+            if user_test_started && !user_test_reported && exec::user_test_complete() {
+                user_test_reported = true;
+                if !exec::report_user_test(&mut console) {
+                    panic!("user mode T2 test produced an unexpected evidence chain");
                 }
             }
 
@@ -211,7 +228,7 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
             // timer interrupts keep arriving instead of in the quiet window before they
             // start. A failure is fatal: a memory manager that did not survive its own self
             // test must not go on to serve allocations.
-            if timer_marker_reported && !memory_selftest_done {
+            if timer_marker_reported && user_test_reported && !memory_selftest_done {
                 memory_selftest_done = true;
                 if let Err(message) = mm::selftest::run(&mut console) {
                     let _ = writeln!(console, "NOLX: mm selftest: FAILED: {message}");

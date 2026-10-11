@@ -129,56 +129,63 @@ mod tests {
     use super::*;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    static SUM: AtomicUsize = AtomicUsize::new(0);
+    // One accumulator per test: a single shared counter would make the two tests race when
+    // the harness runs them in parallel, which is a test bug rather than a queue bug.
+    static DPC_SUM: AtomicUsize = AtomicUsize::new(0);
+    static WORKER_SUM: AtomicUsize = AtomicUsize::new(0);
 
-    fn add(value: usize) {
-        SUM.fetch_add(value, Ordering::Relaxed);
+    fn add_dpc(value: usize) {
+        DPC_SUM.fetch_add(value, Ordering::Relaxed);
+    }
+
+    fn add_worker(value: usize) {
+        WORKER_SUM.fetch_add(value, Ordering::Relaxed);
     }
 
     #[test]
     fn dpcs_are_fifo_bounded_and_drained_in_dispatch_sized_batches() {
-        SUM.store(0, Ordering::Relaxed);
+        DPC_SUM.store(0, Ordering::Relaxed);
         let mut dpcs = DpcQueue::<3>::new();
         for value in 1..=3 {
             dpcs.queue(DeferredCall {
-                routine: add,
+                routine: add_dpc,
                 context: value,
             })
             .unwrap();
         }
         assert_eq!(
             dpcs.queue(DeferredCall {
-                routine: add,
+                routine: add_dpc,
                 context: 4
             }),
             Err(QueueError::Full)
         );
         assert_eq!(dpcs.drain(2), 2);
-        assert_eq!(SUM.load(Ordering::Relaxed), 3);
+        assert_eq!(DPC_SUM.load(Ordering::Relaxed), 3);
         assert_eq!(dpcs.len(), 1);
         assert_eq!(dpcs.drain(8), 1);
-        assert_eq!(SUM.load(Ordering::Relaxed), 6);
+        assert_eq!(DPC_SUM.load(Ordering::Relaxed), 6);
         assert!(dpcs.is_empty());
     }
 
     #[test]
     fn worker_queue_has_independent_capacity_and_execution_context() {
-        SUM.store(0, Ordering::Relaxed);
+        WORKER_SUM.store(0, Ordering::Relaxed);
         let mut workers = SystemWorkQueue::<2>::new();
         workers
             .queue(DeferredCall {
-                routine: add,
+                routine: add_worker,
                 context: 10,
             })
             .unwrap();
         workers
             .queue(DeferredCall {
-                routine: add,
+                routine: add_worker,
                 context: 20,
             })
             .unwrap();
         assert_eq!(workers.drain(1), 1);
-        assert_eq!(SUM.load(Ordering::Relaxed), 10);
+        assert_eq!(WORKER_SUM.load(Ordering::Relaxed), 10);
         assert_eq!(workers.pop().unwrap().context, 20);
         assert!(workers.is_empty());
     }

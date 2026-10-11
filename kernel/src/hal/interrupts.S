@@ -57,8 +57,20 @@ nolx_interrupt_common:
     /* The interrupted code may have set DF. The C ABI requires it clear in Rust. */
     cld
 
-    /* Push order is the reverse of InterruptFrame's field order. */
+    /*
+     * Ring-3 entries must switch %gs to the kernel's per-CPU block first: between the
+     * interrupt and this point the processor still holds the user GS base. The interrupted
+     * %rax is pushed first so it can be used as scratch; the saved copy is untouched.
+     */
     pushq   %rax
+    movq    0x20(%rsp), %rax            /* saved CS, at vector+error+rip */
+    andq    $3, %rax
+    cmpq    $3, %rax
+    jne     1f
+    swapgs
+1:
+
+    /* Push order is the reverse of InterruptFrame's field order. */
     pushq   %rbx
     pushq   %rcx
     pushq   %rdx
@@ -83,8 +95,24 @@ nolx_interrupt_common:
     movq    %rsp, %rdi
     andq    $-16, %rsp
     call    nolx_interrupt_dispatch
-    movq    %rax, %rsp
+    jmp     nolx_frame_restore
 
+    /*
+     * Shared restore path: RAX names the InterruptFrame to resume. The restore target may
+     * run at another privilege level than the one that was interrupted, so return-to-user
+     * swaps %gs back exactly when the frame's saved CS has RPL 3 -- independent of whether
+     * this entry swapped on the way in.
+     */
+    .globl nolx_frame_restore
+    .type nolx_frame_restore, @function
+nolx_frame_restore:
+    movq    %rax, %rsp
+    movq    0x90(%rsp), %rax            /* InterruptFrame.code_segment */
+    andq    $3, %rax
+    cmpq    $3, %rax
+    jne     2f
+    swapgs
+2:
     popq    %r15
     popq    %r14
     popq    %r13

@@ -7,6 +7,7 @@ mod context_switch;
 pub mod process;
 mod selftest;
 pub mod thread;
+pub mod user;
 
 pub use nolx_exec_core::scheduler::{
     nice_to_priority, priority_range, to_internal_priority, to_posix_priority, Policy,
@@ -74,11 +75,17 @@ pub fn init(console: &mut dyn HalConsole) {
     );
 }
 
-/// Route a clock tick through the executive scheduler and return the context to restore.
+/// Route a clock tick through the running phase's scheduler and return the frame to
+/// restore: the M5 kernel-thread round-robin while it runs, then the ring-3 user threads.
 pub(crate) fn on_timer_interrupt(
     frame: *mut crate::hal::interrupts::InterruptFrame,
 ) -> *mut crate::hal::interrupts::InterruptFrame {
-    context_switch::on_timer(frame)
+    if user::selftest::running() {
+        // SAFETY: the interrupt stub built `frame` on the interrupted thread's kernel stack.
+        unsafe { user::on_timer(frame) }
+    } else {
+        context_switch::on_timer(frame)
+    }
 }
 
 /// Begin the QEMU T2 kernel-thread round-robin test after the periodic clock is armed.
@@ -97,4 +104,20 @@ pub(crate) fn round_robin_complete() -> bool {
 /// Print the QEMU T2 round-robin result; return false if its trace was not exact.
 pub(crate) fn report_round_robin(console: &mut crate::hal::console::Console) -> bool {
     context_switch::report(console)
+}
+
+/// Begin the M6 ring-3 test after the round-robin finishes: spawn `init`, enter ring 3.
+pub(crate) fn begin_user_test(console: &mut crate::hal::console::Console) {
+    user::selftest::begin(console);
+}
+
+/// Whether the ring-3 test has finished and its result is ready.
+#[must_use]
+pub(crate) fn user_test_complete() -> bool {
+    user::selftest::complete()
+}
+
+/// Print the M6 ring-3 result marker; return false if the evidence chain was not exact.
+pub(crate) fn report_user_test(console: &mut crate::hal::console::Console) -> bool {
+    user::selftest::report(console)
 }

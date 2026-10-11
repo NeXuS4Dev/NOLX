@@ -20,6 +20,7 @@ fn main() {
     let sources = [
         manifest.join("../boot/boot.S"),
         manifest.join("src/hal/interrupts.S"),
+        manifest.join("src/hal/syscall.S"),
     ];
 
     for source in sources {

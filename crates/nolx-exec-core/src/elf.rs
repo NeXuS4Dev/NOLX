@@ -1,9 +1,10 @@
 //! Bounded validation of x86-64 ELF executable images before the kernel maps user pages.
 //!
 //! This module deliberately produces a load plan rather than touching page tables or
-//! allocating memory. It accepts fixed-address `ET_EXEC` images and records the program
-//! headers used by the next loader stage. Position-independent relocation, page mapping,
-//! auxv construction, and the user-mode transition remain separate work.
+//! allocating memory. It accepts fixed-address `ET_EXEC` images and position-independent
+//! `ET_DYN` images and records the program headers used by the next loader stage.
+//! Page mapping, relocation application, auxv construction, and the user-mode transition
+//! are in [`crate::image`]; this module decides whether an image may be loaded at all.
 
 use nolx_mm_core::vad::{USER_SPACE_HIGH, USER_SPACE_LOW};
 
@@ -20,8 +21,10 @@ const ELFDATA2LSB: u8 = 1;
 const EV_CURRENT: u32 = 1;
 const EV_CURRENT_IDENT: u8 = 1;
 const ET_EXEC: u16 = 2;
+const ET_DYN: u16 = 3;
 const EM_X86_64: u16 = 62;
 const PT_LOAD: u32 = 1;
+const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
 const PT_TLS: u32 = 7;
 const PT_GNU_STACK: u32 = 0x6474_e551;
@@ -43,7 +46,7 @@ pub enum ElfError {
     UnsupportedEndian,
     /// The ELF identification or header version is not the current version.
     UnsupportedVersion,
-    /// The image is not an x86-64 fixed-address executable (`ET_EXEC`).
+    /// The image is not an x86-64 executable (`ET_EXEC`) or shared object (`ET_DYN`).
     UnsupportedTypeOrMachine,
     /// The ELF header does not have the ELF64 header size.
     InvalidHeaderSize,
@@ -85,6 +88,19 @@ pub enum ElfError {
     InvalidTlsSegment,
     /// More than one `PT_GNU_STACK` header was present.
     DuplicateGnuStack,
+    /// More than one `PT_DYNAMIC` header was present.
+    DuplicateDynamic,
+    /// The `PT_DYNAMIC` payload lies outside every load segment.
+    DynamicOutsideLoadSegments,
+}
+
+/// Which ELF object type the image carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ElfKind {
+    /// Fixed-address executable: its virtual addresses are absolute.
+    Exec,
+    /// Position-independent object: its virtual addresses are relative and need a slide.
+    Dyn,
 }
 
 /// Permission flags from an ELF `PT_LOAD` program header.
@@ -211,6 +227,7 @@ impl TlsSegment {
 /// Validated metadata needed by the next stage of the ELF loader.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Elf64LoadPlan<'a> {
+    kind: ElfKind,
     entry_point: u64,
     image_base: u64,
     image_end: u64,
@@ -219,10 +236,35 @@ pub struct Elf64LoadPlan<'a> {
     interpreter: Option<&'a [u8]>,
     tls: Option<TlsSegment>,
     stack_executable: bool,
+    dynamic: Option<DynamicSegment>,
+    program_header_address: Option<u64>,
+    program_header_count: u16,
+}
+
+/// The `PT_DYNAMIC` file range, kept for relocation discovery in [`crate::image`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DynamicSegment {
+    file_offset: u64,
+    file_size: u64,
+}
+
+impl DynamicSegment {
+    /// Offset of the dynamic table in the file.
+    #[must_use]
+    pub const fn file_offset(self) -> u64 {
+        self.file_offset
+    }
+
+    /// Size in bytes of the dynamic table in the file.
+    #[must_use]
+    pub const fn file_size(self) -> u64 {
+        self.file_size
+    }
 }
 
 impl<'a> Elf64LoadPlan<'a> {
-    /// Validate a little-endian x86-64 `ET_EXEC` image without allocating or mapping pages.
+    /// Validate a little-endian x86-64 `ET_EXEC` or `ET_DYN` image without allocating or
+    /// mapping pages.
     pub fn parse(image: &'a [u8]) -> Result<Self, ElfError> {
         if image.len() < ELF_HEADER_SIZE {
             return Err(ElfError::FileTooShort);
@@ -239,7 +281,12 @@ impl<'a> Elf64LoadPlan<'a> {
         if image[6] != EV_CURRENT_IDENT || read_u32(image, 20)? != EV_CURRENT {
             return Err(ElfError::UnsupportedVersion);
         }
-        if read_u16(image, 16)? != ET_EXEC || read_u16(image, 18)? != EM_X86_64 {
+        let kind = match read_u16(image, 16)? {
+            ET_EXEC => ElfKind::Exec,
+            ET_DYN => ElfKind::Dyn,
+            _ => return Err(ElfError::UnsupportedTypeOrMachine),
+        };
+        if read_u16(image, 18)? != EM_X86_64 {
             return Err(ElfError::UnsupportedTypeOrMachine);
         }
         if read_u16(image, 52)? != ELF_HEADER_SIZE_U16 {
@@ -269,6 +316,7 @@ impl<'a> Elf64LoadPlan<'a> {
         let mut segment_count = 0;
         let mut interpreter = None;
         let mut tls = None;
+        let mut dynamic = None;
         let mut stack_executable = false;
         let mut saw_gnu_stack = false;
         let mut image_base = u64::MAX;
@@ -279,7 +327,7 @@ impl<'a> Elf64LoadPlan<'a> {
             let header = program_headers
                 .get(start..start + PROGRAM_HEADER_SIZE)
                 .ok_or(ElfError::ProgramHeaderTableOutOfBounds)?;
-            let kind = read_u32(header, 0)?;
+            let phdr_kind = read_u32(header, 0)?;
             let flags = read_u32(header, 4)?;
             let file_offset = read_u64(header, 8)?;
             let virtual_address = read_u64(header, 16)?;
@@ -287,7 +335,7 @@ impl<'a> Elf64LoadPlan<'a> {
             let memory_size = read_u64(header, 40)?;
             let alignment = read_u64(header, 48)?;
 
-            match kind {
+            match phdr_kind {
                 PT_LOAD => {
                     if file_size > memory_size {
                         return Err(ElfError::SegmentSizeInconsistent);
@@ -300,7 +348,7 @@ impl<'a> Elf64LoadPlan<'a> {
                     let end = virtual_address
                         .checked_add(memory_size)
                         .ok_or(ElfError::AddressOverflow)?;
-                    validate_user_range(virtual_address, end)?;
+                    validate_image_range(kind, virtual_address, end)?;
                     if flags & PF_W != 0 && flags & PF_X != 0 {
                         return Err(ElfError::WritableExecutableSegment);
                     }
@@ -353,7 +401,7 @@ impl<'a> Elf64LoadPlan<'a> {
                     let end = virtual_address
                         .checked_add(memory_size)
                         .ok_or(ElfError::InvalidTlsSegment)?;
-                    validate_user_range(virtual_address, end)
+                    validate_image_range(kind, virtual_address, end)
                         .map_err(|_| ElfError::InvalidTlsSegment)?;
                     tls = Some(TlsSegment {
                         file_offset,
@@ -361,6 +409,25 @@ impl<'a> Elf64LoadPlan<'a> {
                         file_size,
                         memory_size,
                         alignment,
+                    });
+                }
+                PT_DYNAMIC => {
+                    if dynamic.is_some() {
+                        return Err(ElfError::DuplicateDynamic);
+                    }
+                    if file_size == 0 {
+                        continue;
+                    }
+                    file_range(image, file_offset, file_size)?;
+                    let end = virtual_address
+                        .checked_add(file_size)
+                        .ok_or(ElfError::AddressOverflow)?;
+                    if end <= virtual_address {
+                        return Err(ElfError::AddressOverflow);
+                    }
+                    dynamic = Some(DynamicSegment {
+                        file_offset,
+                        file_size,
                     });
                 }
                 PT_GNU_STACK => {
@@ -388,7 +455,33 @@ impl<'a> Elf64LoadPlan<'a> {
             validate_tls_containment(tls_segment, &segments)?;
         }
 
+        // The dynamic table is read from the file directly, but the tags inside it are
+        // virtual addresses, so the table itself must live where the file-to-virtual
+        // translation is defined: inside a load segment.
+        if let Some(table) = dynamic {
+            let table_end = table.file_offset + table.file_size;
+            let contained = segments.iter().flatten().any(|segment| {
+                let segment_file_end = segment.file_offset + segment.file_size;
+                segment.file_offset <= table.file_offset && table_end <= segment_file_end
+            });
+            if !contained {
+                return Err(ElfError::DynamicOutsideLoadSegments);
+            }
+        }
+
+        let program_header_address = segments.iter().flatten().find_map(|segment| {
+            let segment_file_end = segment.file_offset + segment.file_size;
+            if segment.file_offset <= program_header_offset
+                && program_header_offset + table_size <= segment_file_end
+            {
+                Some(segment.virtual_address + (program_header_offset - segment.file_offset))
+            } else {
+                None
+            }
+        });
+
         Ok(Self {
+            kind,
             entry_point,
             image_base,
             image_end,
@@ -397,7 +490,16 @@ impl<'a> Elf64LoadPlan<'a> {
             interpreter,
             tls,
             stack_executable,
+            dynamic,
+            program_header_address,
+            program_header_count: program_header_count_u16,
         })
+    }
+
+    /// Whether the image is `ET_EXEC` or `ET_DYN`.
+    #[must_use]
+    pub const fn kind(&self) -> ElfKind {
+        self.kind
     }
 
     /// The validated initial instruction pointer.
@@ -445,6 +547,31 @@ impl<'a> Elf64LoadPlan<'a> {
     pub const fn stack_executable(&self) -> bool {
         self.stack_executable
     }
+
+    /// The `PT_DYNAMIC` file range, when the image carries a dynamic table.
+    #[must_use]
+    pub const fn dynamic(&self) -> Option<DynamicSegment> {
+        self.dynamic
+    }
+
+    /// Virtual address of the program-header table once loaded, when it lies inside a load
+    /// segment. `AT_PHDR` is built from this.
+    #[must_use]
+    pub const fn program_headers_address(&self) -> Option<u64> {
+        self.program_header_address
+    }
+
+    /// Number of program-header entries, for `AT_PHNUM`.
+    #[must_use]
+    pub const fn program_header_count(&self) -> u16 {
+        self.program_header_count
+    }
+
+    /// Size of one program-header entry, for `AT_PHENT`.
+    #[must_use]
+    pub const fn program_header_entry_size(&self) -> u16 {
+        PROGRAM_HEADER_SIZE_U16
+    }
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, ElfError> {
@@ -489,9 +616,24 @@ fn validate_alignment(
     Ok(())
 }
 
-fn validate_user_range(start: u64, end: u64) -> Result<(), ElfError> {
-    if start < USER_SPACE_LOW || end > USER_SPACE_HIGH || start >= end {
+fn validate_image_range(kind: ElfKind, start: u64, end: u64) -> Result<(), ElfError> {
+    if start >= end {
         return Err(ElfError::SegmentOutsideUserRange);
+    }
+    match kind {
+        // Fixed addresses must already lie in the process user interval.
+        ElfKind::Exec => {
+            if start < USER_SPACE_LOW || end > USER_SPACE_HIGH {
+                return Err(ElfError::SegmentOutsideUserRange);
+            }
+        }
+        // `ET_DYN` addresses are relative to the load bias; only the span is checkable
+        // here, and [`crate::image`] re-checks the biased range when it picks the slide.
+        ElfKind::Dyn => {
+            if end > USER_SPACE_HIGH || end - start > USER_SPACE_HIGH - USER_SPACE_LOW {
+                return Err(ElfError::SegmentOutsideUserRange);
+            }
+        }
     }
     Ok(())
 }
@@ -685,11 +827,16 @@ mod tests {
         );
 
         let mut image = valid_image();
-        put_u16(&mut image, 16, 3);
+        put_u16(&mut image, 16, 4); // ET_CORE
         assert_eq!(
             Elf64LoadPlan::parse(&image),
             Err(ElfError::UnsupportedTypeOrMachine)
         );
+
+        // `ET_DYN` is accepted: the loader biases it in the second stage.
+        let mut image = valid_image();
+        put_u16(&mut image, 16, 3);
+        assert_eq!(Elf64LoadPlan::parse(&image).unwrap().kind(), ElfKind::Dyn);
     }
 
     #[test]

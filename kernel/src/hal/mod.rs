@@ -20,6 +20,7 @@ pub mod ioapic;
 pub mod multiboot;
 pub mod pic;
 pub mod rtc;
+pub mod syscall;
 pub mod tables;
 pub mod timer;
 
@@ -66,6 +67,7 @@ pub fn init(console: &mut dyn HalConsole) {
     let features = cpu::init();
     enable_no_execute(&features);
     tables::init();
+    syscall::init();
     pic::init();
     timer::init();
 
@@ -96,6 +98,10 @@ pub fn init(console: &mut dyn HalConsole) {
         );
     }
     let _ = writeln!(console, "hal: GDT/TSS loaded; 256-entry IDT installed");
+    let _ = writeln!(
+        console,
+        "hal: syscall/sysret fast path armed (STAR kernel 0x08/0x10, user 0x1b/0x23)"
+    );
     let _ = writeln!(
         console,
         "hal: 8259 PIC remapped to vectors 32..47; all IRQs masked"

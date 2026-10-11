@@ -735,6 +735,16 @@ early_exception_common:
 
 /* ================================================================== GDT */
 
+/*
+ * The long-mode GDT.
+ *
+ * The user entries are ordered data-below-code (0x18 data, 0x20 code), not the intuitive
+ * code-below-data. That is the `sysret` convention: the instruction derives SS from
+ * STAR[63:48]+8 and CS from STAR[63:48]+16, so with STAR[63:48] = 0x10 the user data
+ * selector must sit at 0x18 and the user code selector at 0x20. `syscall` takes its
+ * kernel selectors from STAR[47:32] = 0x08 (code) and +8 (data), which the kernel pair
+ * already satisfies. Order here is ABI; see crates/nolx-syscall.
+ */
     .section .boot.data, "aw", @progbits
     .align 8
     .globl gdt64
@@ -742,8 +752,8 @@ gdt64:
     .quad 0x0000000000000000            /* 0x00 null               */
     .quad 0x00AF9A000000FFFF            /* 0x08 kernel code, 64-bit */
     .quad 0x00CF92000000FFFF            /* 0x10 kernel data         */
-    .quad 0x00AFFA000000FFFF            /* 0x18 user code, 64-bit   */
-    .quad 0x00CFF2000000FFFF            /* 0x20 user data           */
+    .quad 0x00CFF2000000FFFF            /* 0x18 user data (sysret SS) */
+    .quad 0x00AFFA000000FFFF            /* 0x20 user code, 64-bit (sysret CS) */
 tss_desc_placeholder:
     .quad 0x0000000000000000            /* 0x28 TSS low: filled in by the HAL */
     .quad 0x0000000000000000            /* 0x30 TSS high                  */

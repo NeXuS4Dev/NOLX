@@ -272,15 +272,17 @@ def main(argv: list[str]) -> int:
                 db=bool((d >> 54) & 1),
             )
 
+        # The user entries are data-at-0x18, code-at-0x20: the `sysret` convention
+        # (SS = STAR[63:48]+8, CS = STAR[63:48]+16 with STAR[63:48] = 0x10).
         expected = {
             1: ("kernel code", dict(present=True, dpl=0, system=True, type=0xA,
                                     long_mode=True, db=False)),
             2: ("kernel data", dict(present=True, dpl=0, system=True, type=0x2,
                                     long_mode=False, db=True)),
-            3: ("user code", dict(present=True, dpl=3, system=True, type=0xA,
-                                  long_mode=True, db=False)),
-            4: ("user data", dict(present=True, dpl=3, system=True, type=0x2,
+            3: ("user data", dict(present=True, dpl=3, system=True, type=0x2,
                                   long_mode=False, db=True)),
+            4: ("user code", dict(present=True, dpl=3, system=True, type=0xA,
+                                  long_mode=True, db=False)),
         }
         check(descs[0] == 0, "GDT entry 0 must be the null descriptor")
         for index, (label, want) in expected.items():
@@ -291,7 +293,7 @@ def main(argv: list[str]) -> int:
             check(got["long_mode"] == (not got["db"]),
                   f"GDT[{index}] ({label}): L and D/B must be mutually exclusive")
         ok("GDT descriptors: null, kernel code (L, DPL0), kernel data, "
-           "user code (L, DPL3), user data")
+           "user data (sysret SS), user code (L, DPL3, sysret CS)")
         check(descs[5] == 0 and descs[6] == 0,
               "the TSS descriptor slot must be zero at link time; the HAL fills it in")
         ok("TSS slot reserved and zeroed at link time")

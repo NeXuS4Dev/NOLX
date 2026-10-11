@@ -92,8 +92,9 @@ const _: () = assert!(size_of::<TaskStateSegment>() == 104);
 #[repr(C, align(16))]
 struct AlignedGdt([u64; GDT_ENTRIES]);
 
-/// Descriptors in the GDT: null, kernel code, kernel data, user code, user data, TSS low,
-/// TSS high. The trampoline defines the same layout.
+/// Descriptors in the GDT: null, kernel code, kernel data, user data, user code, TSS low,
+/// TSS high. The trampoline defines the same layout; the user pair is data-below-code for
+/// `sysret` (see `boot/boot.S`).
 const GDT_ENTRIES: usize = 7;
 
 /// An aligned TSS wrapper. The processor writes its busy bit into the GDT, not this body.
@@ -225,6 +226,20 @@ fn stack_top(stack: &SyncCell<IstStack>) -> u64 {
     // SAFETY: each IST region is exclusively assigned to a CPU stack. The pointer is used
     // only to compute its one-past-end stack top; Rust never creates a slice over it.
     unsafe { stack.get().cast::<u8>().add(size_of::<IstStack>()) as u64 }
+}
+
+/// Set `TSS.RSP0`: the stack every privilege-level-0 entry from ring 3 switches to.
+///
+/// The dispatcher calls this on every context switch, because RSP0 is per-*thread* state:
+/// a `syscall`, an IRQ, or an exception raised in user mode must land on the kernel stack
+/// of the thread that was interrupted, not of whichever thread ran last in the kernel.
+pub fn set_rsp0(top: u64) {
+    // SAFETY: boot-time structure stays live for the lifetime of the kernel; this write is
+    // the documented per-thread update performed by the scheduler with interrupts disabled.
+    unsafe {
+        let tss = ptr::addr_of_mut!((*TSS.get()).0);
+        ptr::addr_of_mut!((*tss).rsp0).write_unaligned(top);
+    }
 }
 
 fn init_idt() {

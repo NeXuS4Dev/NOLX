@@ -170,6 +170,10 @@ pub mod codes {
     pub const EREMCHG: i32 = 71;
     /// Bad font file format (reserved).
     pub const ELIBBAD: i32 = 72;
+    /// No child processes: `waitid` found none matching.
+    pub const ECHILD: i32 = 73;
+    /// Bad address: a user pointer failed validation.
+    pub const EFAULT: i32 = 74;
     /// Highest defined error number. `sysconf(_SC_...)` does not expose this; it exists so
     /// the kernel can validate a user-supplied `errno` without a table walk.
     ///
@@ -177,7 +181,7 @@ pub mod codes {
     /// is added or removed, and getting it wrong silently either rejects valid errors or
     /// accepts invented ones. The test `elast_tracks_the_table` is what catches a mismatch
     /// between this and [`TABLE`].
-    pub const ELAST: i32 = ELIBBAD;
+    pub const ELAST: i32 = EFAULT;
 }
 
 /// `true` if `code` is an error number this kernel can produce.
@@ -286,6 +290,8 @@ pub const TABLE: &[(i32, &str)] = &[
     (codes::EDQUOT, "Disk quota exceeded"),
     (codes::EREMCHG, "Remote address changed"),
     (codes::ELIBBAD, "Accessing a corrupted shared library"),
+    (codes::ECHILD, "No child processes"),
+    (codes::EFAULT, "Bad address"),
 ];
 
 #[cfg(test)]
