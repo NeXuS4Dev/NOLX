@@ -86,6 +86,13 @@ impl<const L: usize> FixedText<L> {
     }
 }
 
+/// What a node is.
+///
+/// The symlink variant carries its whole target inline. That makes the enum as large as a
+/// path, which clippy flags. Boxing it would need an allocator this `no_std` crate does not
+/// have, and the namespace is a fixed array sized at compile time, so the extra bytes are a
+/// fixed cost paid per slot rather than a per-object cost. The allow is deliberate.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum Kind<T> {
     Directory,
