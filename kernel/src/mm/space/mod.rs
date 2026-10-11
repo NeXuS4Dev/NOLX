@@ -2,7 +2,7 @@
 //!
 //! An address space is a page-table root, a VAD tree describing what the address space *means*,
 //! and a commit charge describing what it costs. The two halves are deliberately separate: the
-//! tree is where POSIX semantics live (`mprotect` splits a region, `munmap` merges its
+//! tree is where the POSIX semantics live (`mprotect` splits a region, `munmap` merges its
 //! neighbours back, a guard page is a VAD of kind `Guard`), and the page tables are where the
 //! hardware looks. This module keeps them in step, and [`resolve`] is the one place that repairs
 //! the difference when the hardware wins the race -- a page a program has committed but not yet
@@ -92,7 +92,8 @@ pub type Space = AddressSpace<SPACE_NODES>;
 pub struct AddressSpace<const NODES: usize> {
     /// The PML4 frame: what CR3 is loaded with.
     root: Frame,
-    /// Page tables allocated for this space and not yet released.
+    /// Page tables allocated for this space and not yet released. The PML4 is not counted here:
+    /// it is taken by [`AddressSpace::create`] before there is a store to record it in.
     tables: KernelTableStore,
     /// What the address space means.
     vads: VadTree<NODES>,
@@ -209,7 +210,7 @@ impl<const NODES: usize> AddressSpace<NODES> {
     ///
     /// The page tables are the truth about what is *mapped*: a range the tree describes but
     /// that has never been touched answers `None` here, which is exactly the difference
-    /// between a `MAP_NORESERVE` reservation and a resident page.
+    /// between a reservation and a resident page.
     #[must_use]
     pub fn translate(&self, address: u64) -> Option<Mapping> {
         PageTables::new(self.root).translate(&self.tables, address)
@@ -290,9 +291,7 @@ impl<const NODES: usize> AddressSpace<NODES> {
                     PageTables::new(self.root)
                         .protect(&mut self.tables, page, flags)
                         .map_err(SpaceError::Table)?;
-                    // SAFETY: the address belongs to this address space, which is the one the
-                    // processor runs in whenever a caller can reach this method.
-                    unsafe { tables::invalidate_page(page) };
+                    self.shoot_down(page);
                 }
             }
             page += PAGE_SIZE as u64;
@@ -310,9 +309,8 @@ impl<const NODES: usize> AddressSpace<NODES> {
     /// here a write in either address space takes the fault path, copies the page, and leaves
     /// the other one alone.
     ///
-    /// `self` must be the active address space: the parent's entries are changed under a
-    /// processor that may have them cached in its TLB, and only the active space can have
-    /// them shot down one page at a time.
+    /// `self` must be the active address space: the parent's entries change under a processor
+    /// that may have them cached, and only the active space can have them shot down.
     ///
     /// Returns the number of pages shared.
     pub fn share_into(
@@ -325,6 +323,7 @@ impl<const NODES: usize> AddressSpace<NODES> {
             current_pointer() == self as *const Self as *mut (),
             "shared an address space that the processor is not running in"
         );
+
         let mut failure: Option<SpaceError> = None;
         self.vads.visit_range(start, end, |vad| {
             if failure.is_some() || vad.is_free() {
@@ -376,9 +375,7 @@ impl<const NODES: usize> AddressSpace<NODES> {
                 PageTables::new(self.root)
                     .protect(&mut self.tables, page, flags)
                     .map_err(SpaceError::Table)?;
-                // SAFETY: the address is in this address space, and the page table under it
-                // was just changed.
-                unsafe { tables::invalidate_page(page) };
+                self.shoot_down(page);
 
                 mm::retain_frame(frame);
                 if let Err(error) = PageTables::new(target.root).map_page(
@@ -411,8 +408,8 @@ impl<const NODES: usize> AddressSpace<NODES> {
         let mut vads_removed = 0;
         let mut pages_unmapped = 0;
         let mut commit_released = 0;
-        // Child tables this space holds right now: the pages below free them as they empty,
-        // so this is what the teardown is about to give back.
+        // Child tables this space holds right now: the pages below free them as they empty, so
+        // this is what the teardown is about to give back.
         let tables_freed = self.tables.live_tables();
 
         // Release the lowest live descriptor until none is left. The free holes are the tree's
@@ -443,8 +440,8 @@ impl<const NODES: usize> AddressSpace<NODES> {
                 "the PML4 charge was not in the system PTE pool",
             )));
         }
-        // Every child table was reclaimed by `unmap` as its last entry went, so the store
-        // must agree: what is left to free is the PML4 itself.
+        // Every child table was reclaimed by `unmap` as its last entry went, so the store must
+        // agree: what is left to free is the PML4 itself.
         if self.tables.live_tables() != 0 {
             return Err(SpaceError::Commit(CommitError::Accounting(
                 "page tables outlived the mappings they belonged to",
@@ -478,13 +475,20 @@ impl<const NODES: usize> AddressSpace<NODES> {
                     mm::clear_copy_on_write(frame);
                     let _ = mm::free_frame(frame);
                 }
-                // SAFETY: the page belongs to this address space, and its entry has just been
-                // cleared.
-                unsafe { tables::invalidate_page(page) };
+                self.shoot_down(page);
             }
             page += PAGE_SIZE as u64;
         }
         Ok(unmapped)
+    }
+
+    /// Flush one address from the TLB if the page tables changed under the running processor.
+    fn shoot_down(&self, address: u64) {
+        if current_pointer() == self as *const Self as *mut () {
+            // SAFETY: the address belongs to the address space the processor is running in,
+            // and its entry was just changed; `invlpg` is the flush for one page.
+            unsafe { tables::invalidate_page(address) };
+        }
     }
 
     /// Check the tree's invariants and the space's own accounting.
@@ -509,8 +513,8 @@ impl<const NODES: usize> AddressSpace<NODES> {
         }
         let write = error_code & ERROR_WRITE != 0;
         // A hole is where a grow-down region gets its chance: the fault is below the stack,
-        // not inside anything, which is what stack growth looks like from the hardware's
-        // point of view.
+        // not inside anything, which is what stack growth looks like from the hardware's point
+        // of view.
         let Some(vad) = self
             .vads
             .find(address)
@@ -565,8 +569,7 @@ impl<const NODES: usize> AddressSpace<NODES> {
             }
             return Err(FaultError::Table(error));
         }
-        // SAFETY: the address is in this address space, and its entry was just filled in.
-        unsafe { tables::invalidate_page(address) };
+        self.shoot_down(address);
         self.mapped += 1;
         self.faults += 1;
         Ok(Fault::DemandZero { frame })
@@ -591,9 +594,7 @@ impl<const NODES: usize> AddressSpace<NODES> {
             PageTables::new(self.root)
                 .protect(&mut self.tables, address, writable)
                 .map_err(FaultError::Table)?;
-            // SAFETY: the address is in this address space, and its entry was just made
-            // writable.
-            unsafe { tables::invalidate_page(address) };
+            self.shoot_down(address);
             self.faults += 1;
             return Ok(Fault::CopyOnWrite {
                 source: frame,
@@ -639,12 +640,11 @@ impl<const NODES: usize> AddressSpace<NODES> {
             let _ = mm::free_frame(fresh);
             return Err(FaultError::Table(error));
         }
-        // SAFETY: the address is in this address space, and it was just remapped.
-        unsafe { tables::invalidate_page(address) };
+        self.shoot_down(address);
 
-        // This space no longer references the old frame. The marker stays set while the
-        // frame is still mapped read-only somewhere; the next writer takes this same path,
-        // and finds the frame with one owner and uses the shortcut above.
+        // This space no longer references the old frame. The marker stays set while the frame
+        // is still mapped read-only somewhere; the next writer takes this same path, and finds
+        // the frame with one owner and uses the shortcut above.
         mm::release_frame(frame);
         self.copies += 1;
         self.faults += 1;
@@ -693,7 +693,7 @@ impl<const NODES: usize> AddressSpace<NODES> {
             backing: None,
         })
         .map_err(|_| FaultError::NotMapped)?;
-        self.demand_zero(page, stack.protection)?;
+        let _ = self.demand_zero(page, stack.protection)?;
         Ok(Fault::StackGrowth {
             from: stack.start,
             to: page,
@@ -718,8 +718,8 @@ impl AddressSpace<SPACE_NODES> {
             current_pointer().is_null(),
             "an address space was activated while another was active"
         );
-        // Capture the kernel's root *before* CR3 changes: after the switch, `current_root`
-        // would read this address space's PML4.
+        // Capture the kernel's root *before* CR3 changes: afterwards, the running root is this
+        // address space's PML4, and `current_root` would read that one instead.
         let _ = kernel_root();
         // SAFETY: single boot processor. The root maps this code, this stack, and the direct
         // map -- the kernel half is shared with the address space the kernel is running in.
@@ -842,9 +842,9 @@ fn charge_for(request: &VadRequest) -> u64 {
 
 /// The address space the processor is running in.
 ///
-/// Null means the kernel's own address space: there is no VAD tree to consult, and every fault
-/// is a kernel bug. That is the state the machine boots in, and the state it returns to when a
-/// process's address space is torn down.
+/// A null pointer means the kernel's own address space: there is no VAD tree to consult, and
+/// every fault is a kernel bug. That is the state the machine boots in, and the state it
+/// returns to when a process's address space is torn down.
 static CURRENT: SyncCell<*mut ()> = SyncCell::new(core::ptr::null_mut());
 
 /// The kernel's own page-table root, captured the first time an address space is activated.
@@ -861,15 +861,6 @@ fn set_current(space: *mut ()) {
     unsafe {
         *CURRENT.get() = space;
     }
-}
-
-/// The active space as a [`Space`].
-///
-/// # Safety
-///
-/// The caller must not hold the reference across an access to a user address.
-unsafe fn active_space() -> *mut Space {
-    current_pointer() as *mut Space
 }
 
 fn kernel_root() -> Frame {
@@ -904,7 +895,7 @@ pub unsafe fn active() -> Option<&'static mut Space> {
     }
     // SAFETY: the caller upholds the no-aliasing rule above; `activate` only ever stores a
     // pointer to an `AddressSpace<SPACE_NODES>`, so the erased pointer is a `*mut Space`.
-    Some(unsafe { &mut *active_space() })
+    Some(unsafe { &mut *(current_pointer() as *mut Space) })
 }
 
 /// Resolve a page fault in the active address space.

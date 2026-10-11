@@ -115,8 +115,10 @@ This repository is honest about which artifacts were executed and which were not
   page refused rather than copied; guard-page, file-backed, and out-of-address-space refusals;
   stack growth that coalesces into the stack's own descriptor; and the free-frame and
   page-table counts returning to exactly where they started -- reported as
-  `NOLX: address space selftest: 2 space(s), 7 page(s), 7 fault(s), 7 refusal(s), 7 page
-  table(s), 36 KiB peak in the system PTE pool, integrity ok`). The pools are reported through
+  `NOLX: address space selftest: 2 space(s), 4 VAD(s), 6 fault cause(s) resolved (3
+  demand-zero, 2 copy-on-write, 1 stack growth), 5 refusal(s); 6 page(s) mapped; free frames
+  121253 -> 121253; page tables allocated 0 -> 7, released 0 -> 7; system PTE peak 36 KiB;
+  audit ok`). The pools are reported through
   the object manager, and the machine's one NUMA node and its zonelist are printed at boot.
 * **CI-verified (2026-10-10):** workflow run
   [38086516018](https://github.com/NeXuS4Dev/NOLX/actions/runs/38086516018) on revision

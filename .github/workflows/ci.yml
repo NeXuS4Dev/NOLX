@@ -295,7 +295,7 @@ jobs:
           # self test maps pages, resolves faults, and leaves the frame and table counts
           # exactly where it found them, or it panics.
           if ! grep -Eq \
-            'NOLX: address space selftest: [2-9][0-9]* space\(s\), [0-9]+ page\(s\), [0-9]+ fault\(s\), [0-9]+ refusal\(s\), [1-9][0-9]* page table\(s\), [1-9][0-9]* KiB peak in the system PTE pool, integrity ok' \
+            'NOLX: address space selftest: [2-9][0-9]* space\(s\), [0-9]+ VAD\(s\), [1-9][0-9]* fault cause\(s\) resolved \([1-9][0-9]* demand-zero, [1-9][0-9]* copy-on-write, [1-9][0-9]* stack growth\), [1-9][0-9]* refusal\(s\); [1-9][0-9]* page\(s\) mapped; free frames ([0-9]+) -> \1; page tables allocated ([0-9]+) -> ([0-9]+), released \2 -> \3; system PTE peak [1-9][0-9]* KiB; audit ok' \
             build/serial.log; then
             echo "the address-space self test did not complete cleanly"
             exit 1

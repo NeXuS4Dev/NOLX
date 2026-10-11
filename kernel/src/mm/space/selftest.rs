@@ -1,710 +1,551 @@
-//! The address-space self test: page tables, faults, and the frame budget.
+//! The address-space power-on self test.
 //!
-//! Every claim [`super`] makes about an address space is exercised here at boot, on the machine
-//! the kernel is actually running on, with the timer live. It is the same code path the
-//! interrupt dispatcher will use for vector 14 -- [`super::resolve`] on the active space -- so a
-//! regression that would become a bug check in a running system becomes a failed boot instead.
+//! A page fault is the one exception a kernel can survive, and the machinery that survives it
+//! is the machinery that hands a process memory it has not touched yet. That machinery is also
+//! the easiest place in the kernel to create a *silent* corruption: a page mapped without
+//! zeroing, a copy-on-write page shared instead of copied, a frame released twice. So the boot
+//! path does not trust it -- it builds two address spaces, faults on purpose, writes into the
+//! pages, and then insists that every frame, every page table, and every commit byte came back
+//! exactly where it started.
 //!
-//! The faults are driven by hand because there is no way to make ring 0 take a recoverable page
-//! fault: a CPL 0 fault is not something the kernel can `iretq` out of. So the test asks the
-//! resolver the question the hardware would ask, with the same addresses and the same error
-//! codes, and checks the answers:
+//! What is exercised, in order:
 //!
-//! * a first read of a committed page maps a zeroed frame (demand zero);
-//! * a write to a page two address spaces share copies it, byte for byte (copy on write);
-//! * a write to a page the VAD calls read-only is refused (protection);
-//! * an access inside a mapped-file range is refused for now (the Cache Manager is M7);
-//! * a hit on a guard page, and a stack fault that stays a stack, are told apart;
-//! * a stack fault beyond the growth limit, or below the floor, is refused.
-//!
-//! It ends the way [`crate::mm::selftest`] ends: with the counters back where they started.
-//! Two address spaces are created and torn down, every descriptor removed, every page unmapped,
-//! and the frame allocator's free count and the page-table totals must be exactly what they were
-//! before the first `create`. A kernel that cannot account for its own frames has no business
-//! running a process.
+//! * a new address space: an empty user half, the kernel's own half shared (the direct map and
+//!   the image window translate in the new root before it is ever loaded into CR3);
+//! * demand zero: a committed private page, a read-only page, and the zero fill;
+//! * the refusals: an address in no VAD, an address in the kernel half, a write to a page the
+//!   VAD calls read-only, and an explicit guard page;
+//! * stack growth: a fault below a grow-down region extends it and coalesces back into the
+//!   stack's own descriptor, and a fault below the space's floor is refused;
+//! * copy on write: sharing a page into a second address space, writing in each, and checking
+//!   that the data on the two sides moved independently -- the single thing `fork` needs to be
+//!   correct, and the single thing a bug in this code would get wrong;
+//! * teardown: both spaces unmapped, every table reclaimed, the free-frame count and the
+//!   live-page-table count back where they started, and the frame-map audit clean.
 
-use core::fmt;
-
-use nolx_hal_core::console::HalConsole;
-use nolx_mm_core::paging::Protection;
-use nolx_mm_core::vad::{Backing, VadFlags, VadKind, VadRequest, USER_SPACE_LOW};
-
-use crate::mm::space::{resolve, Fault, FaultError, Space, SpaceError, ERROR_WRITE, SPACE_NODES};
+use crate::mm::space::{self, Fault, Space, ERROR_WRITE};
 use crate::mm::tables;
 use crate::mm::{self, phys};
 use crate::sync::SyncCell;
+use nolx_hal_core::console::HalConsole;
+use nolx_mm_core::commit::PoolKind;
+use nolx_mm_core::paging::Protection;
+use nolx_mm_core::vad::{VadFlags, VadKind, VadRequest};
 
-/// A private anonymous mapping: 256 KiB, sixty-four pages, all of them demand-zero.
-const PRIVATE: u64 = 0x10_0000;
-const PRIVATE_END: u64 = 0x14_0000;
-/// The first page of [`PRIVATE`]: the demand-zero and copy-on-write subject.
-const TEST_PAGE: u64 = PRIVATE;
-/// The second page: a second frame, allocated in the same pass.
-const SECOND_PAGE: u64 = PRIVATE + 0x1000;
-/// The third page: the `mprotect(PROT_READ)` subject.
-const RO_PAGE: u64 = PRIVATE + 0x2000;
-/// A guard page in the middle of the address space.
-const GUARD_PAGE: u64 = 0x20_0000;
-/// A file-backed range: no Cache Manager yet, so a fault inside it must be refused.
-const FILE_PAGE: u64 = 0x21_0000;
-const FILE_END: u64 = 0x22_0000;
-/// The stack, growing down from 0x31_0000.
-const STACK_TOP: u64 = 0x31_0000;
-const STACK_START: u64 = 0x30_0000;
-/// Below this the stack must not grow: the test's stand-in for a process's `RLIMIT_STACK`.
-const STACK_FLOOR: u64 = 0x2F_C000;
-/// An address no mapping and no stack can reach: four gigabytes above the private range.
-const WILD: u64 = 0x1_0010_0000;
-/// The byte the test writes into a page before sharing it, so the copy can be proven a copy.
-const MARKER: u8 = 0xA5;
+/// A private read-write range: one megabyte, all of it demand-zero until touched.
+const PRIVATE_START: u64 = 0x40_0000;
+const PRIVATE_END: u64 = 0x50_0000;
+/// A read-only range: the write refusal subject.
+const RO_START: u64 = 0x60_0000;
+const RO_END: u64 = 0x61_0000;
+/// An explicit guard page: a fault here is a program error, not a mapping hint.
+const GUARD_START: u64 = 0x70_0000;
+/// A grow-down stack, and the floor it may not grow past.
+const STACK_START: u64 = 0x80_0000;
+const STACK_TOP: u64 = 0x81_0000;
+const STACK_FLOOR: u64 = 0x7E_0000;
+/// The one page below the stack that the fault phase grows it down by. The grown page is
+/// committed, so the first space carries one page more than its descriptors were written with.
+const GROWN_START: u64 = STACK_START - 0x1000;
+const GROWN_BYTES: u64 = 0x1000;
+/// A hole between two mappings: nothing owns this address, and nothing may map it.
+const HOLE: u64 = 0x55_0000;
+/// The byte written into pages whose contents must survive a copy-on-write share.
+const MARKER: u8 = 0x5A;
+/// The byte written after a copy-on-write, to show the two sides move independently.
+const SECOND_MARKER: u8 = 0xA5;
+/// The user pages the first address space maps: two private, one read-only, one stack page.
+const FIRST_SPACE_PAGES: u64 = 4;
+/// The user pages the second address space maps: the two it shares.
+const SECOND_SPACE_PAGES: u64 = 2;
+/// Bytes of the first space's private range that are shared with the second.
+const SHARED_BYTES: u64 = SECOND_SPACE_PAGES * 0x1000;
 
 /// The address space the test drives.
 static SPACE_A: SyncCell<Option<Space>> = SyncCell::new(None);
 /// The address space it shares pages with.
 static SPACE_B: SyncCell<Option<Space>> = SyncCell::new(None);
 
-/// What the test did, for the boot log.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// What the self test did, for the boot log.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct SpaceReport {
     /// Address spaces created and torn down.
     pub spaces: u64,
-    /// Pages demand-paged in, across both spaces.
-    pub pages: u64,
-    /// Faults resolved, across both spaces.
-    pub faults: u64,
-    /// Accesses the resolver refused on purpose.
+    /// Live descriptors described across both spaces.
+    pub vads: u64,
+    /// Faults resolved by demand zero.
+    pub demand_zero: u64,
+    /// Faults resolved by copying a shared page.
+    pub copy_on_write: u64,
+    /// Faults resolved by growing a grow-down region.
+    pub stack_growth: u64,
+    /// Faults refused, with the reason checked.
     pub refusals: u64,
-    /// Pages copied by the copy-on-write path.
-    pub copies: u64,
-    /// Page tables the two address spaces allocated and freed.
-    pub tables: u64,
+    /// Pages mapped in total, across both spaces.
+    pub pages_mapped: u64,
+    /// Free frames before and after.
+    pub frames: (u64, u64),
+    /// Page tables allocated and released, before and after: the counters are
+    /// `(allocated before, released before, allocated after, released after)`.
+    pub tables: (u64, u64, u64, u64),
+    /// Highest charge the system PTE pool reached, in bytes.
+    pub pool_peak: u64,
 }
 
-impl SpaceReport {
-    /// The system PTE pool's peak, in KiB, from the memory manager's own accounting.
-    #[must_use]
-    pub fn system_pte_peak(&self) -> u64 {
-        let snapshot = crate::mm::pool::snapshot();
-        let entry = snapshot
-            .iter()
-            .find(|pool| pool.kind == nolx_mm_core::commit::PoolKind::SystemPte);
-        entry.map_or(0, |pool| pool.peak / 1024)
+impl core::fmt::Display for SpaceReport {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            formatter,
+            "{} space(s), {} VAD(s), {} fault cause(s) resolved ({} demand-zero, {} copy-on-write, \
+             {} stack growth), {} refusal(s); {} page(s) mapped; free frames {} -> {}; page tables \
+             allocated {} -> {}, released {} -> {}; system PTE peak {} KiB; audit ok",
+            self.spaces,
+            self.vads,
+            self.demand_zero + self.copy_on_write + self.stack_growth,
+            self.demand_zero,
+            self.copy_on_write,
+            self.stack_growth,
+            self.refusals,
+            self.pages_mapped,
+            self.frames.0,
+            self.frames.1,
+            self.tables.0,
+            self.tables.2,
+            self.tables.1,
+            self.tables.3,
+            self.pool_peak / 1024,
+        )
     }
 }
 
-/// Run the self test, reporting what it did.
-///
-/// # Errors
-///
-/// Returns the check that failed. The caller prints it and panics: an address space that
-/// mismanages its frames is not a condition the kernel can continue from.
-pub fn run(console: &mut dyn HalConsole) -> Result<SpaceReport, Failure> {
-    let frames_before = mm::free_frames();
-    let (tables_before, released_before) = tables::totals();
+/// Run the self test. A failure is reported and then panics: a kernel whose address spaces do
+/// not account for their frames cannot be trusted with a process.
+pub fn run(console: &mut dyn HalConsole) -> Result<SpaceReport, &'static str> {
+    let (allocated, released) = tables::totals();
+    let mut report = SpaceReport {
+        frames: (mm::free_frames(), 0),
+        tables: (allocated, released, 0, 0),
+        ..SpaceReport::default()
+    };
+
+    create_first(console, &mut report)?;
+    describe_ranges(&mut report)?;
+    drive_faults(&mut report)?;
+    drive_copy_on_write(&mut report)?;
+    teardown(&mut report)?;
+
+    if report.frames.1 != report.frames.0 {
+        return Err("the address spaces did not give every frame back");
+    }
+    // The table counters cover the whole boot, so what the self test took and gave back is the
+    // *difference* across it: a table the boot layer built is not the test's to release.
+    let allocated = report.tables.2 - report.tables.0;
+    let released = report.tables.3 - report.tables.1;
+    if allocated == 0 {
+        return Err("the address spaces did not allocate a page table at all");
+    }
+    if allocated != released {
+        return Err("the address spaces did not give every page table back");
+    }
+    report.pool_peak = mm::pool::snapshot()
+        .iter()
+        .find(|snapshot| snapshot.kind == PoolKind::SystemPte)
+        .map_or(0, |snapshot| snapshot.peak);
+    if report.pool_peak < allocated * 4096 {
+        return Err("the system PTE pool was not charged for the page tables the test allocated");
+    }
+    let _ = writeln!(console, "NOLX: address space selftest: {report}");
+    Ok(report)
+}
+
+/// The first address space: an empty user half and the kernel's half shared.
+fn create_first(
+    console: &mut dyn HalConsole,
+    report: &mut SpaceReport,
+) -> Result<(), &'static str> {
     let kernel_root = tables::current_root();
-    let mut report = SpaceReport::default();
-
-    // --- An address space starts empty in the user half, shared in the kernel half. -------
+    let space = Space::create().ok_or("could not create an address space")?;
+    if space.root() == kernel_root {
+        return Err("a new address space reused the kernel's page-table root");
+    }
+    if space.commit_used() != 0 || space.pages_mapped() != 0 || space.live_tables() != 0 {
+        return Err("a new address space was not empty");
+    }
+    if space.translate(PRIVATE_START).is_some() {
+        return Err("a new address space already maps a user address");
+    }
+    // The kernel half has to be reachable *before* the root is ever loaded: a switch to a root
+    // whose direct map is missing is not a fault, it is a triple fault.
+    if space
+        .translate(phys::DIRECT_MAP_BASE + phys::KERNEL_LOAD_ADDR)
+        .is_none()
     {
-        let space = Space::create().ok_or(Failure::new("could not create an address space"))?;
-        if space.root() == kernel_root {
-            return Err(Failure::new(
-                "a new address space reused the kernel's page-table root",
-            ));
-        }
-        if space.commit_used() != 0 || space.live_tables() != 0 {
-            return Err(Failure::new("a new address space was not empty"));
-        }
-        if space.translate(PRIVATE).is_some() {
-            return Err(Failure::new(
-                "a new address space already mapped a user address",
-            ));
-        }
-        // The direct map and the image window must be there before a line of the kernel runs
-        // on this root, or activating it is a triple fault.
-        let probe = phys::KERNEL_LOAD_ADDR;
-        if space.translate(phys::DIRECT_MAP_BASE + probe).is_none() {
-            return Err(Failure::new(
-                "a new address space does not share the direct map",
-            ));
-        }
-        if space.translate(phys::KERNEL_IMAGE_BASE + probe).is_none() {
-            return Err(Failure::new(
-                "a new address space does not share the kernel image",
-            ));
-        }
-        // SAFETY: single boot processor, and the self test is the only reader or writer of
-        // this cell for the whole of boot.
-        unsafe {
-            *SPACE_A.get() = Some(space);
-        }
-        report.spaces += 1;
+        return Err("a new address space does not share the direct map");
     }
-
-    // --- Describe the ranges; no frame is taken until something touches them. -------------
-    a().set_stack_floor(STACK_FLOOR);
-    a().reserve(VadRequest::private_anonymous(PRIVATE, PRIVATE_END))
-        .map_err(|error| failure("could not describe the private range", error))?;
-    a().reserve(VadRequest {
-        start: GUARD_PAGE,
-        end: GUARD_PAGE + 0x1000,
-        kind: VadKind::Guard,
-        protection: Protection::from_bits(0),
-        maximum: Protection::from_bits(0),
-        flags: VadFlags::empty(),
-        backing: None,
-    })
-    .map_err(|error| failure("could not describe the guard page", error))?;
-    a().reserve(VadRequest {
-        start: FILE_PAGE,
-        end: FILE_END,
-        kind: VadKind::MappedFile,
-        protection: Protection::from_bits(Protection::READ),
-        maximum: Protection::from_bits(Protection::READ),
-        flags: VadFlags::empty(),
-        backing: Some(Backing {
-            object: 1,
-            offset: 0,
-        }),
-    })
-    .map_err(|error| failure("could not describe the file-backed range", error))?;
-    a().reserve(VadRequest {
-        start: STACK_START,
-        end: STACK_TOP,
-        kind: VadKind::Stack,
-        protection: Protection::read_write(),
-        maximum: Protection::read_write(),
-        flags: VadFlags::from_bits(VadFlags::GROWSDOWN),
-        backing: None,
-    })
-    .map_err(|error| failure("could not describe the stack", error))?;
-
-    let committed = (PRIVATE_END - PRIVATE) + (STACK_TOP - STACK_START);
-    if a().commit_used() != committed {
-        return Err(Failure::count(
-            "the commit charge",
-            committed,
-            a().commit_used(),
-        ));
+    if space
+        .translate(phys::KERNEL_IMAGE_BASE + phys::KERNEL_LOAD_ADDR)
+        .is_none()
+    {
+        return Err("a new address space does not share the image window");
     }
-    a().check()
-        .map_err(|detail| Failure::invariant("describing the ranges broke the VAD tree", detail))?;
-    let described = live_descriptors();
+    let _ = writeln!(
+        console,
+        "NOLX: address space online: PML4 {:#x}, user half empty, direct map and image window \
+         shared with {} live table(s) under it",
+        space.root() << 12,
+        space.live_tables()
+    );
 
-    // --- Activate, and resolve faults the way the dispatcher will. ------------------------
+    // SAFETY: single boot processor; the self test is the only writer of this cell, and no
+    // other reference to the space exists between here and teardown.
+    unsafe {
+        *SPACE_A.get() = Some(space);
+    }
+    report.spaces += 1;
+    Ok(())
+}
+
+/// Describe the ranges: nothing is mapped yet, and everything is committed.
+fn describe_ranges(report: &mut SpaceReport) -> Result<(), &'static str> {
+    let space = a();
+    space.set_stack_floor(STACK_FLOOR);
+    space
+        .reserve(VadRequest::private_anonymous(PRIVATE_START, PRIVATE_END))
+        .map_err(|_| "could not describe a private range")?;
+    space
+        .reserve(VadRequest {
+            start: RO_START,
+            end: RO_END,
+            kind: VadKind::Private,
+            // Read-only, and it can never become writable: `maximum` is what `mprotect` is
+            // checked against, so a later write is refused by the tree, not by the hardware.
+            protection: Protection::from_bits(Protection::READ),
+            maximum: Protection::from_bits(Protection::READ),
+            flags: VadFlags::empty(),
+            backing: None,
+        })
+        .map_err(|_| "could not describe a read-only range")?;
+    space
+        .reserve(VadRequest {
+            start: GUARD_START,
+            end: GUARD_START + 0x1000,
+            kind: VadKind::Guard,
+            protection: Protection::from_bits(0),
+            maximum: Protection::from_bits(0),
+            flags: VadFlags::empty(),
+            backing: None,
+        })
+        .map_err(|_| "could not describe a guard page")?;
+    space
+        .reserve(VadRequest {
+            start: STACK_START,
+            end: STACK_TOP,
+            kind: VadKind::Stack,
+            protection: Protection::read_write(),
+            maximum: Protection::read_write(),
+            flags: VadFlags::from_bits(VadFlags::GROWSDOWN),
+            backing: None,
+        })
+        .map_err(|_| "could not describe a stack")?;
+
+    let committed = (PRIVATE_END - PRIVATE_START) + (RO_END - RO_START) + (STACK_TOP - STACK_START);
+    if space.commit_used() != committed {
+        return Err("the commit charge does not match the committed ranges");
+    }
+    if space.live_tables() != 0 {
+        return Err("describing ranges allocated a page table");
+    }
+    space
+        .check()
+        .map_err(|_| "the VAD tree's invariants do not hold after describing the ranges")?;
+    report.vads = 4;
+    Ok(())
+}
+
+/// The four fault causes, and the refusals that go with them.
+fn drive_faults(report: &mut SpaceReport) -> Result<(), &'static str> {
     a().activate();
 
-    // 1. The first touch of a committed page: a zeroed frame appears.
-    let Fault::DemandZero { frame } =
-        expect("demand zero of the first page", resolve(TEST_PAGE, 0))?
-    else {
-        return Err(Failure::new(
-            "the first touch of a committed page was not demand-zero",
-        ));
+    // Demand zero: the first touch of a committed private page.
+    let Fault::DemandZero { frame } = expect_zero(PRIVATE_START)? else {
+        return Err("a committed page was not resolved by demand zero");
     };
-    report.pages += 1;
-    report.faults += 1;
-    if a().translate(TEST_PAGE).is_none() {
-        return Err(Failure::new(
-            "demand zero returned without mapping the page",
-        ));
-    }
     if mm::frame_refcount(frame) != 1 {
-        return Err(Failure::count(
-            "the references to a demand-zero page",
-            1,
-            u64::from(mm::frame_refcount(frame)),
-        ));
+        return Err("a demand-zero page is not referenced exactly once");
     }
-    // The frame was just allocated to this address space; the direct map is the kernel's view
-    // of it, and nothing else is looking at the page.
-    let pointer = phys::direct_ptr::<u8>(mm::address_of(frame));
-    // SAFETY: as above: one byte, inside a page this code owns.
-    unsafe {
-        if core::ptr::read(pointer) != 0 {
-            return Err(Failure::new("a demand-zero page was not zero"));
-        }
-        core::ptr::write(pointer, MARKER);
+    // The page must be *zero*: handing a process a frame with the previous owner's bytes in it
+    // is the bug this check exists for.
+    // SAFETY: the frame was just allocated to this address space and the direct map is the
+    // kernel's view of it; nothing else is looking at the page.
+    let bytes =
+        unsafe { core::slice::from_raw_parts(phys::direct_ptr::<u8>(mm::address_of(frame)), 4096) };
+    if bytes.iter().any(|byte| *byte != 0) {
+        return Err("a demand-zero page is not zeroed");
     }
 
-    // 2. A second page, so that copy on write has a neighbour that must not move.
-    let Fault::DemandZero { frame: second } =
-        expect("demand zero of the second page", resolve(SECOND_PAGE, 0))?
-    else {
-        return Err(Failure::new(
-            "the second committed page was not demand-zero",
-        ));
-    };
-    report.pages += 1;
-    report.faults += 1;
-
-    // 3. The accesses the address space must refuse.
-    expect_error("a wild address", resolve(WILD, 0), FaultError::NotMapped)?;
-    report.refusals += 1;
-    expect_error(
-        "a hit on the guard page",
-        resolve(GUARD_PAGE, 0),
-        FaultError::GuardPage,
-    )?;
-    report.refusals += 1;
-    expect_error(
-        "an access inside a file-backed range",
-        resolve(FILE_PAGE, ERROR_WRITE),
-        FaultError::Unsupported,
-    )?;
-    report.refusals += 1;
-    expect_error(
-        "an address below the user range",
-        resolve(USER_SPACE_LOW - 1, 0),
-        FaultError::KernelAddress,
-    )?;
-    report.refusals += 1;
-    a().deactivate();
-
-    // --- mprotect: the tree decides first, and the page tables follow. ---------------------
-    a().protect(
-        RO_PAGE,
-        RO_PAGE + 0x1000,
-        Protection::from_bits(Protection::READ),
-    )
-    .map_err(|error| failure("could not make one page read-only", error))?;
-    if live_descriptors() <= described {
-        return Err(Failure::new(
-            "mprotect did not split the descriptor at the page boundary",
-        ));
+    // A second page in the same range, then the writes: a page is written only after the fault
+    // that mapped it, and what was written has to still be there.
+    let _ = expect_zero(PRIVATE_START + 0x1000)?;
+    write_user(PRIVATE_START, MARKER);
+    write_user(PRIVATE_START + 0x1000, MARKER);
+    if read_user(PRIVATE_START) != MARKER || read_user(PRIVATE_START + 0x1000) != MARKER {
+        return Err("a demand-zero page did not keep what was written to it");
     }
-    a().activate();
-    if !matches!(
-        expect("a read of the read-only page", resolve(RO_PAGE, 0))?,
-        Fault::DemandZero { .. }
-    ) {
-        return Err(Failure::new(
-            "a read-only page was not faulted in as a demand-zero page",
-        ));
-    }
-    report.pages += 1;
-    report.faults += 1;
-    expect_error(
-        "a write to a read-only page",
-        resolve(RO_PAGE, ERROR_WRITE),
-        FaultError::Protection,
-    )?;
-    report.refusals += 1;
-    a().deactivate();
-    a().protect(RO_PAGE, RO_PAGE + 0x1000, Protection::read_write())
-        .map_err(|error| failure("could not make the page writable again", error))?;
-    if live_descriptors() != described {
-        return Err(Failure::new(
-            "identical neighbours did not coalesce back into one descriptor",
-        ));
+    report.demand_zero += 2;
+
+    // The read-only range faults in read-only, and a write to it is refused by the *tree*
+    // before any frame is taken.
+    let _ = expect_zero(RO_START)?;
+    report.demand_zero += 1;
+    match space::resolve(RO_START, ERROR_WRITE) {
+        Err(space::FaultError::Protection) => report.refusals += 1,
+        Err(_) => return Err("a write to a read-only page was refused for another reason"),
+        Ok(_) => return Err("a write to a read-only page was resolved"),
     }
 
-    // --- Stack growth: a fault below the stack is a stack, until it is not. ---------------
-    a().activate();
-    expect_error(
-        "a fault far below the stack",
-        resolve(STACK_START - 0x101_000, 0),
-        FaultError::NotMapped,
-    )?;
-    report.refusals += 1;
-    match expect("the first stack fault", resolve(STACK_START - 0x1000, 0))? {
-        Fault::StackGrowth { from, to } => {
-            if from != STACK_START || to != STACK_START - 0x1000 {
-                return Err(Failure::value(
-                    "where the stack grew from",
-                    STACK_START,
-                    from,
-                ));
-            }
-        }
-        _ => return Err(Failure::new("a fault below the stack did not grow it")),
+    // An address in no VAD, an address in the kernel half, and the guard page: three
+    // refusals, each with its own reason.
+    match space::resolve(HOLE, ERROR_WRITE) {
+        Err(space::FaultError::NotMapped) => report.refusals += 1,
+        Err(_) => return Err("an address in no VAD was refused for another reason"),
+        Ok(_) => return Err("an address in no VAD was mapped"),
     }
-    report.pages += 1;
-    report.faults += 1;
-    match expect("the second stack fault", resolve(STACK_START - 0x3000, 0))? {
-        Fault::StackGrowth { from, to } => {
-            if from != STACK_START - 0x1000 || to != STACK_START - 0x3000 {
-                return Err(Failure::value(
-                    "where the second stack fault grew from",
-                    STACK_START - 0x1000,
-                    from,
-                ));
-            }
-        }
-        _ => {
-            return Err(Failure::new(
-                "the second stack fault did not grow the stack",
-            ))
-        }
+    match space::resolve(phys::DIRECT_MAP_BASE, 0) {
+        Err(space::FaultError::KernelAddress) => report.refusals += 1,
+        Err(_) => return Err("a fault in the kernel half was refused for another reason"),
+        Ok(_) => return Err("a fault in the kernel half was resolved"),
     }
-    report.pages += 1;
-    report.faults += 1;
-    expect_error(
-        "a stack fault below the floor",
-        resolve(STACK_START - 0x5000, 0),
-        FaultError::StackLimit,
-    )?;
-    report.refusals += 1;
-    // The grown pages coalesced back into the stack's own descriptor: a stack is one VAD, not
-    // one per page.
-    {
-        let grown = *a()
-            .vads()
-            .find(STACK_START - 0x3000)
-            .ok_or(Failure::new("the grown stack page has no descriptor"))?;
-        if grown.kind != VadKind::Stack
-            || grown.start != STACK_START - 0x3000
-            || grown.end != STACK_TOP
-        {
-            return Err(Failure::new(
-                "stack growth did not coalesce into the stack's descriptor",
-            ));
-        }
+    match space::resolve(GUARD_START, 0) {
+        Err(space::FaultError::GuardPage) => report.refusals += 1,
+        Err(_) => return Err("a fault on a guard page was refused for another reason"),
+        Ok(_) => return Err("a fault on a guard page was mapped"),
     }
+
+    // Stack growth: the fault below the region extends it, and the new descriptor coalesces
+    // with the stack's own, so a growing stack stays one VAD.
+    let grown = GROWN_START;
+    match space::resolve(grown, ERROR_WRITE) {
+        Ok(Fault::StackGrowth { from, to }) if from == STACK_START && to == grown => {
+            report.stack_growth += 1;
+        }
+        _ => return Err("a fault below the stack did not grow it by one page"),
+    }
+    write_user(grown, MARKER);
+    let space = a();
+    match space.vads().find(grown) {
+        Some(vad) if vad.kind == VadKind::Stack && vad.start == grown && vad.end == STACK_TOP => {}
+        _ => return Err("stack growth did not coalesce with the stack's descriptor"),
+    }
+    // Below the floor the same fault is refused: that refusal is what SIGSEGV will be built on.
+    match space::resolve(STACK_FLOOR - 0x1000, ERROR_WRITE) {
+        Err(space::FaultError::StackLimit) => report.refusals += 1,
+        Err(_) => return Err("a stack fault below the floor was refused for another reason"),
+        Ok(_) => return Err("a stack fault below the floor was grown anyway"),
+    }
+
     a().check()
-        .map_err(|detail| Failure::invariant("stack growth broke the VAD tree", detail))?;
+        .map_err(|_| "the VAD tree's invariants do not hold after the faults")?;
+    if a().pages_mapped() != FIRST_SPACE_PAGES {
+        return Err("the first address space did not map exactly its four pages");
+    }
     a().deactivate();
+    Ok(())
+}
 
-    // --- Copy on write: share two pages with a second address space. ----------------------
-    let space_b = Space::create().ok_or(Failure::new("could not create a second address space"))?;
-    // SAFETY: as above; the second cell, written once by this boot-time test.
+/// Copy on write: share the private range into a second address space and write in both.
+fn drive_copy_on_write(report: &mut SpaceReport) -> Result<(), &'static str> {
+    let second = Space::create().ok_or("could not create a second address space")?;
+    // SAFETY: as in `create_first`: one writer, and no live reference to the space yet.
     unsafe {
-        *SPACE_B.get() = Some(space_b);
+        *SPACE_B.get() = Some(second);
     }
     report.spaces += 1;
 
+    // Sharing happens with the parent active: it is the parent's entries that are made
+    // read-only, and only the running address space can have them shot down.
     a().activate();
+    let pages = a()
+        .share_into(b(), PRIVATE_START, PRIVATE_START + SHARED_BYTES)
+        .map_err(|_| "sharing two pages into a second address space failed")?;
+    if pages != SECOND_SPACE_PAGES {
+        return Err("sharing did not find the two mapped pages");
+    }
+
+    // Both sides are described, both are charged for exactly what was shared, and both point
+    // at the same frame, read-only.
+    if b().commit_used() != SHARED_BYTES {
+        return Err("the second address space was not charged for the shared range");
+    }
     let shared = a()
-        .share_into(b(), PRIVATE, PRIVATE + 0x2000)
-        .map_err(|error| failure("sharing two pages with the second space", error))?;
+        .translate(PRIVATE_START)
+        .ok_or("the parent lost its page")?;
+    let other = b()
+        .translate(PRIVATE_START)
+        .ok_or("the child cannot see the shared page")?;
+    if shared.entry.frame() != other.entry.frame() {
+        return Err("sharing did not point both spaces at the same frame");
+    }
+    if shared.entry.is_writable() || other.entry.is_writable() {
+        return Err("a shared page is still writable");
+    }
+    if mm::frame_refcount(shared.entry.frame() as usize) != 2 {
+        return Err("a shared frame is not referenced exactly twice");
+    }
+    if !mm::is_copy_on_write(shared.entry.frame() as usize) {
+        return Err("a shared frame is not marked copy-on-write");
+    }
+    if read_user(PRIVATE_START) != MARKER {
+        return Err("the child cannot read the shared page");
+    }
     a().deactivate();
-    if shared != 2 {
-        return Err(Failure::count("the pages shared", 2, shared));
-    }
-    if mm::frame_refcount(frame) != 2 {
-        return Err(Failure::count(
-            "the references to a shared page",
-            2,
-            u64::from(mm::frame_refcount(frame)),
-        ));
-    }
-    if !mm::is_copy_on_write(frame) {
-        return Err(Failure::new(
-            "a shared read-only page is not marked copy-on-write",
-        ));
-    }
-    if b().translate(TEST_PAGE).is_none() {
-        return Err(Failure::new(
-            "the second address space cannot see the shared page",
-        ));
-    }
-    if b().commit_used() != 0x2000 {
-        return Err(Failure::count(
-            "the second address space's commit charge",
-            0x2000,
-            b().commit_used(),
-        ));
-    }
 
-    // Write in B: the page must be copied, and the copy must contain what A wrote.
+    // Write in the child: the frame must be *copied*, the copy must carry the parent's bytes,
+    // and the parent must not see the child's write.
+    // The child stays active across the resolve, the read of the copy, and the write that
+    // must not fault again: the fault handler and the user access both need the child's
+    // tables to be the ones the processor is running on.
     b().activate();
-    let copy = expect("a write to a shared page", resolve(TEST_PAGE, ERROR_WRITE))?;
-    b().deactivate();
-    let Fault::CopyOnWrite {
-        source,
-        destination,
-    } = copy
-    else {
-        return Err(Failure::new("a write to a shared page did not copy it"));
-    };
-    if source == destination {
-        return Err(Failure::new(
-            "a shared page was made writable instead of being copied",
-        ));
-    }
-    // The frame was just allocated to B, and the direct map is the kernel's view of it.
-    // SAFETY: one byte, inside a page this code owns.
-    let copied = unsafe { core::ptr::read(phys::direct_ptr::<u8>(mm::address_of(destination))) };
-    if copied != MARKER {
-        return Err(Failure::value(
-            "the byte in the copy-on-write copy",
-            u64::from(MARKER),
-            u64::from(copied),
-        ));
-    }
-    if mm::frame_refcount(source) != 1 || mm::frame_refcount(destination) != 1 {
-        return Err(Failure::new(
-            "the pages after a copy-on-write do not have one owner each",
-        ));
-    }
-    report.copies += 1;
-    report.faults += 1;
-
-    // Write in A: its frame now has one owner, so the entry goes writable without a copy.
-    a().activate();
-    match expect(
-        "a write in the last owner's space",
-        resolve(TEST_PAGE, ERROR_WRITE),
-    )? {
-        Fault::CopyOnWrite {
+    let outcome = space::resolve(PRIVATE_START, ERROR_WRITE);
+    let (source, destination) = match outcome {
+        Ok(Fault::CopyOnWrite {
             source,
             destination,
-        } if source == frame && destination == frame => {}
-        _ => {
-            return Err(Failure::new(
-                "the last owner of a shared page did not reuse its own frame",
-            ))
-        }
+        }) => (source, destination),
+        Ok(_) => return Err("a write to a shared page was resolved without copying"),
+        Err(_) => return Err("a write to a shared page was refused"),
+    };
+    if source == destination {
+        return Err("a write to a shared page reused the frame instead of copying it");
     }
+    if read_user(PRIVATE_START) != MARKER {
+        return Err("the copy-on-write copy does not contain the parent's data");
+    }
+    write_user(PRIVATE_START, SECOND_MARKER);
+    if read_user(PRIVATE_START) != SECOND_MARKER {
+        return Err("the copy-on-write copy did not become writable");
+    }
+    b().deactivate();
+    report.copy_on_write += 1;
+
+    // Both sides now have one owner each, and the parent's contents did not move.
+    if mm::frame_refcount(source) != 1 || mm::frame_refcount(destination) != 1 {
+        return Err("a page after copy-on-write does not have exactly one owner");
+    }
+    a().activate();
+    if read_user(PRIVATE_START) != MARKER {
+        return Err("the parent's page changed when the child wrote to its copy");
+    }
+    // The parent's entry is read-only but its frame is no longer shared: the next write makes
+    // it writable again instead of copying, which is what an unshared page should cost.
+    match space::resolve(PRIVATE_START, ERROR_WRITE) {
+        Ok(Fault::CopyOnWrite {
+            source: from,
+            destination: to,
+        }) if from == source && to == source => report.copy_on_write += 1,
+        Ok(_) => return Err("the parent's page was copied although it had no other owner"),
+        Err(_) => return Err("a write in the parent after the copy was refused"),
+    }
+    write_user(PRIVATE_START, MARKER);
     a().deactivate();
-    report.faults += 1;
-    if a().translate(TEST_PAGE).is_none() || b().translate(TEST_PAGE).is_none() {
-        return Err(Failure::new(
-            "an address space lost a page to copy on write",
-        ));
-    }
-    // SAFETY: both frames belong to address spaces the test owns, reached through the direct
-    // map; nothing else is looking at them.
-    unsafe {
-        if core::ptr::read(phys::direct_ptr::<u8>(mm::address_of(frame))) != MARKER {
-            return Err(Failure::new(
-                "the original page lost its contents to copy on write",
-            ));
-        }
-        if core::ptr::read(phys::direct_ptr::<u8>(mm::address_of(second))) != 0 {
-            return Err(Failure::new(
-                "an untouched page lost its contents to copy on write",
-            ));
-        }
-    }
 
-    // --- Tear both spaces down, and check the budget. -------------------------------------
-    let a_pages = a().pages_mapped();
-    let b_pages = b().pages_mapped();
-    let live_a = live_descriptors();
-    let live_b = live_descriptors_of(b());
-    report.pages = a().pages_mapped() + b().pages_mapped();
-    report.faults = a().faults_resolved() + b().faults_resolved();
+    if a().pages_mapped() != FIRST_SPACE_PAGES || b().pages_mapped() != SECOND_SPACE_PAGES {
+        return Err("copy on write changed the number of mapped pages");
+    }
+    Ok(())
+}
 
-    let torn_a = take_a().teardown().map_err(teardown_failure)?;
-    let torn_b = take_b().teardown().map_err(teardown_failure)?;
-    if torn_a.pages_unmapped != a_pages {
-        return Err(Failure::count(
-            "the pages A's teardown unmapped",
-            a_pages,
-            torn_a.pages_unmapped,
-        ));
-    }
-    if torn_b.pages_unmapped != b_pages {
-        return Err(Failure::count(
-            "the pages B's teardown unmapped",
-            b_pages,
-            torn_b.pages_unmapped,
-        ));
-    }
-    if torn_a.vads_removed != live_a || torn_b.vads_removed != live_b {
-        return Err(Failure::new("teardown did not remove every descriptor"));
-    }
-    report.tables = torn_a.tables_freed + torn_b.tables_freed;
+/// Tear both address spaces down and check what the counters say afterwards.
+fn teardown(report: &mut SpaceReport) -> Result<(), &'static str> {
+    let first_pages = a().pages_mapped();
+    let second_pages = b().pages_mapped();
+    report.pages_mapped = first_pages + second_pages;
 
-    let frames_after = mm::free_frames();
-    if frames_after != frames_before {
-        return Err(Failure::value(
-            "the free frames after the address spaces were torn down",
-            frames_before,
-            frames_after,
-        ));
+    // SAFETY: the self test is the only owner of both cells, and both spaces are inactive --
+    // `teardown` asserts that itself.
+    let (first, second) = unsafe {
+        (
+            (*SPACE_A.get())
+                .take()
+                .ok_or("the first address space is missing")?,
+            (*SPACE_B.get())
+                .take()
+                .ok_or("the second address space is missing")?,
+        )
+    };
+    let torn = first
+        .teardown()
+        .map_err(|_| "the first address space did not tear down")?;
+    if torn.pages_unmapped != first_pages {
+        return Err("the first address space did not free every page it mapped");
     }
-    let (tables_after, released_after) = tables::totals();
-    if tables_after - released_after != tables_before - released_before {
-        return Err(Failure::value(
-            "the live page tables after teardown",
-            tables_before - released_before,
-            tables_after - released_after,
-        ));
+    if torn.vads_removed != report.vads {
+        return Err("the first address space did not remove every descriptor");
     }
-    let _ = released_before;
+    // Every committed byte came back: the private range, the read-only range, the stack, and
+    // the page stack growth charged for after the descriptors were described.
+    let committed = (PRIVATE_END - PRIVATE_START)
+        + (RO_END - RO_START)
+        + (STACK_TOP - STACK_START)
+        + GROWN_BYTES;
+    if torn.commit_released != committed {
+        return Err("the first address space released the wrong commit charge");
+    }
+    let torn = second
+        .teardown()
+        .map_err(|_| "the second address space did not tear down")?;
+    if torn.pages_unmapped != second_pages {
+        return Err("the second address space did not free every page it mapped");
+    }
+    if torn.vads_removed != 1 {
+        return Err("the second address space removed the wrong number of descriptors");
+    }
+    mm::audit().map_err(|_| "the frame-map audit failed after teardown")?;
+    report.frames.1 = mm::free_frames();
+    let (allocated, released) = tables::totals();
+    report.tables.2 = allocated;
+    report.tables.3 = released;
+    Ok(())
+}
 
-    // The system PTE pool's peak is the evidence that page-table allocation charged it: the
-    // tables are all freed again by teardown, so the current charge is back to zero and only
-    // the peak remembers that the pool was used at all.
-    let peak = report.system_pte_peak();
-    let _ = writeln!(
-        console,
-        "NOLX: address space selftest: {} space(s), {} page(s), {} fault(s), {} refusal(s), \
-         {} page table(s), {} KiB peak in the system PTE pool, integrity ok",
-        report.spaces, report.pages, report.faults, report.refusals, report.tables, peak
-    );
-    Ok(report)
+/// A fault the test expected to be resolved by demand zero.
+fn expect_zero(address: u64) -> Result<Fault, &'static str> {
+    match space::resolve(address, 0) {
+        Ok(fault @ Fault::DemandZero { .. }) => Ok(fault),
+        Ok(_) => Err("a committed page was resolved by something other than demand zero"),
+        Err(_) => Err("a committed page was refused instead of being faulted in"),
+    }
+}
+
+/// Write one byte to a user address in the active address space.
+fn write_user(address: u64, value: u8) {
+    // SAFETY: the address is inside a mapping this test made writable, in the address space
+    // that is loaded; the write is one byte to a page this code owns.
+    unsafe { core::ptr::write_volatile(address as *mut u8, value) };
+}
+
+/// Read one byte from a user address in the active address space.
+fn read_user(address: u64) -> u8 {
+    // SAFETY: as [`write_user`]: the address is inside a mapping the test made present.
+    unsafe { core::ptr::read_volatile(address as *const u8) }
 }
 
 /// The first address space.
 fn a() -> &'static mut Space {
-    // SAFETY: the cell holds a `Space` this test created and has not torn down; single boot
-    // processor, and the borrow ends with the statement at every call site.
-    unsafe { (*SPACE_A.get()).as_mut().expect("no address space A") }
+    // SAFETY: single boot processor; the cell holds a live `Space` from `create_first` until
+    // `teardown`, and every use of the returned reference ends before the next one begins.
+    unsafe {
+        (*SPACE_A.get())
+            .as_mut()
+            .expect("the first address space is missing")
+    }
 }
 
 /// The second address space.
 fn b() -> &'static mut Space {
     // SAFETY: as `a`.
-    unsafe { (*SPACE_B.get()).as_mut().expect("no address space B") }
-}
-
-/// Take the first address space out of its cell, for teardown.
-fn take_a() -> Space {
-    // SAFETY: as `a`; the cell is left empty, so nothing can alias the space afterwards.
-    unsafe { (*SPACE_A.get()).take().expect("no address space A") }
-}
-
-/// Take the second address space out of its cell, for teardown.
-fn take_b() -> Space {
-    // SAFETY: as `b`.
-    unsafe { (*SPACE_B.get()).take().expect("no address space B") }
-}
-
-/// Live (non-hole) descriptors in the active address space.
-fn live_descriptors() -> u64 {
-    live_descriptors_of(a())
-}
-
-/// Live (non-hole) descriptors in `space`.
-fn live_descriptors_of(space: &Space) -> u64 {
-    let mut live = 0;
-    space.vads().visit(|vad| {
-        if !vad.is_free() {
-            live += 1;
-        }
-    });
-    live
-}
-
-/// Unwrap a resolution the test expected to succeed.
-fn expect(what: &'static str, outcome: Result<Fault, FaultError>) -> Result<Fault, Failure> {
-    outcome.map_err(|refused| Failure::refused(what, refused))
-}
-
-/// Unwrap a resolution the test expected to refuse, with a particular reason.
-fn expect_error(
-    what: &'static str,
-    outcome: Result<Fault, FaultError>,
-    wanted: FaultError,
-) -> Result<(), Failure> {
-    match outcome {
-        Err(refused) if refused == wanted => Ok(()),
-        Err(refused) => Err(Failure::refused(what, refused)),
-        Ok(_) => Err(Failure::new(
-            "an access the address space does not permit was resolved anyway",
-        )),
+    unsafe {
+        (*SPACE_B.get())
+            .as_mut()
+            .expect("the second address space is missing")
     }
 }
-
-/// A failure of a range operation.
-fn failure(what: &'static str, error: SpaceError) -> Failure {
-    Failure {
-        what,
-        detail: Detail::Space(error),
-    }
-}
-
-/// A failure while tearing an address space down.
-fn teardown_failure(error: SpaceError) -> Failure {
-    Failure {
-        what: "an address space did not tear down cleanly",
-        detail: Detail::Space(error),
-    }
-}
-
-/// Why the self test failed: which check, and what it saw.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Failure {
-    /// The check that failed, phrased so it completes "the address-space self test ...".
-    pub what: &'static str,
-    /// What the check saw.
-    pub detail: Detail,
-}
-
-impl Failure {
-    /// A check that failed with nothing more to say.
-    fn new(what: &'static str) -> Self {
-        Self {
-            what,
-            detail: Detail::None,
-        }
-    }
-
-    /// A count that was not what it should have been.
-    fn count(what: &'static str, expected: u64, actual: u64) -> Self {
-        Self {
-            what,
-            detail: Detail::Count { expected, actual },
-        }
-    }
-
-    /// A value that was not what it should have been.
-    fn value(what: &'static str, expected: u64, actual: u64) -> Self {
-        Self {
-            what,
-            detail: Detail::Count { expected, actual },
-        }
-    }
-
-    /// A fault the resolver refused for the wrong reason.
-    fn refused(what: &'static str, refused: FaultError) -> Self {
-        Self {
-            what,
-            detail: Detail::Refused(refused),
-        }
-    }
-
-    /// A VAD tree that broke one of its invariants.
-    fn invariant(what: &'static str, detail: &'static str) -> Self {
-        Self {
-            what,
-            detail: Detail::Invariant(detail),
-        }
-    }
-}
-
-impl fmt::Display for Failure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}: {}", self.what, self.detail)
-    }
-}
-
-/// What a failed check observed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Detail {
-    /// Nothing beyond the check itself.
-    None,
-    /// The number that was wanted, and the number seen.
-    Count {
-        /// The number the check expected.
-        expected: u64,
-        /// The number it saw.
-        actual: u64,
-    },
-    /// How the resolver refused an access.
-    Refused(FaultError),
-    /// How a range operation failed.
-    Space(SpaceError),
-    /// The VAD-tree invariant that broke.
-    Invariant(&'static str),
-}
-
-impl fmt::Display for Detail {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::None => Ok(()),
-            Self::Count { expected, actual } => {
-                write!(formatter, "expected {expected}, saw {actual}")
-            }
-            Self::Refused(error) => write!(formatter, "refused as {error:?}"),
-            Self::Space(error) => write!(formatter, "{error:?}"),
-            Self::Invariant(detail) => write!(formatter, "the VAD tree says: {detail}"),
-        }
-    }
-}
-
-/// The number of descriptors the address space type admits, for the log.
-pub const NODES: usize = SPACE_NODES;
