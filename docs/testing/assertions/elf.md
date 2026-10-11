@@ -1,0 +1,5 @@
+# Assertions: M6 ELF image validation
+
+Source: M6 ELF64 loader contract in `ROADMAP.md`. This slice validates a bounded fixed-address image plan; it does not yet map pages, apply relocations, start an interpreter, construct auxv, or enter ring 3.
+
+ELF-001 | An x86-64 ELF64 executable yields only a bounded load plan whose file ranges, user virtual ranges, alignment, non-overlapping PT_LOAD segments, executable entry point, PT_INTERP path, PT_TLS template, and PT_GNU_STACK permission metadata have been validated | implemented | `crates/nolx-exec-core/src/elf.rs` tests `plans_nonoverlapping_executable_and_data_segments`, `rejects_short_bad_magic_and_unsupported_images`, `rejects_program_header_table_outside_the_file`, `rejects_missing_or_unbounded_program_header_tables`, `rejects_more_load_segments_than_the_fixed_plan_holds`, `rejects_inconsistent_sizes_and_writable_executable_segments`, `rejects_out_of_user_range_overlapping_and_non_executable_entry`, `records_interpreter_tls_and_executable_stack_metadata`, `rejects_malformed_interpreter_path`, and `rejects_tls_not_backed_by_a_load_segment`.

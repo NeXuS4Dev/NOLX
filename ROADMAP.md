@@ -99,9 +99,10 @@ pull request, so the evidence can be read rather than trusted.
 - Tests: T1 buddy allocator + VAD tree property tests (split/coalesce invariants,
   fragmentation bounds, overlap rejection); T2 stress allocation under interrupt load.
 
-M3 is **implemented**. Every M3 assertion has code behind it and a boot-time self test that
-exercises it on the machine; what is left before the milestone can be called done is the
-workflow run that promotes the six `pending-T2` rows to `tested-T2`.
+M3 is **done**. Its 23 host assertions (MM-001–MM-023) are `tested-T1`, and all eleven
+boot assertions (MM-024–MM-034) are `tested-T2` in `docs/testing/assertions/mm.md`; there are
+no M3 `pending-T2` rows left to promote. The latest full CI run, [38162486568](https://github.com/NeXuS4Dev/NOLX/actions/runs/38162486568)
+on revision `606b3c7`, passed the QEMU boot smoke job again, reasserting the M3 boot markers.
 
 ### M3 progress checkpoint — 2026-10-10
 
@@ -365,6 +366,20 @@ interleaved-output markers pass in QEMU; and every M5 assertion has a recorded t
   `fork`/`vfork`/`posix_spawn`/`exec*` on top of, including a true COW `fork`.
 - Tests: T2 "hello world" ELF runs and exits with a status the parent observes;
   T1 syscall table uniqueness/ABI round-trip.
+
+### M6 implementation checkpoint — 2026-10-11
+
+The first M6 slice is in `crates/nolx-exec-core/src/elf.rs`: a bounded, allocation-free
+ELF64 `ET_EXEC` parser creates a load plan after validating file bounds, x86-64 identity,
+user virtual ranges, segment alignment and overlap, W^X, and executable entry-point
+membership. It also records validated `PT_INTERP`, `PT_TLS`, and `PT_GNU_STACK` metadata.
+The parser shares the user-range constants from `nolx-mm-core`, has host unit tests, and is
+tracked by `ELF-001` in `docs/testing/assertions/elf.md`.
+
+This is validation groundwork, **not yet an executable loader**: mapping/copying pages,
+zero-fill, `ET_DYN` and ASLR, relocations, interpreter launch, auxv/initial stack, process
+creation, and the ring-3/syscall return path remain open. M6 remains in progress; no T2
+"hello world" claim is made by this slice.
 
 ## M7 — I/O Manager, VFS, and the first filesystems
 

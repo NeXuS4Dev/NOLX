@@ -12,6 +12,8 @@
 use nolx_obj_core::handle::HandleTable;
 use nolx_obj_core::security::Token;
 
+/// Bounded validation of x86-64 ELF executable load plans.
+pub mod elf;
 /// Bounded deferred procedure-call and system-worker queues.
 pub mod deferred;
 /// Waitable dispatcher objects and the common multi-object wait operation.

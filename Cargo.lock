@@ -14,6 +14,7 @@ dependencies = [
 name = "nolx-exec-core"
 version = "0.1.0"
 dependencies = [
+ "nolx-mm-core",
  "nolx-obj-core",
 ]
 
