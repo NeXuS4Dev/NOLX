@@ -253,9 +253,23 @@ directly below `.bss`, and the self test's frames grew with the extra code. Doub
 restored the boot. The headroom is not measured yet; a stack high-water mark or guard page is the
 next step to stop guessing.
 
-Not yet done in M4: wiring object headers and the namespace into the kernel (`kernel/src/obj`), the
-Security Reference Monitor, the `NOLX: objmgr online` self test with its T2 assertions, and the
-per-process handle tables that M5 processes will own.
+### M4 implementation checkpoints 4–5 — Security Reference Monitor and T1 (verified in CI)
+
+* **Checkpoint 4, `crates/nolx-obj-core/src/security.rs`** -- SIDs, ACEs, ACLs, tokens (user,
+  groups, privileges, integrity level), and `access_check` (the `SeAccessCheck` equivalent).
+  Mandatory labels refuse write-class rights to a lower-integrity token. Deny entries are checked
+  in order, and a privilege never overrides a deny entry (stricter than NT, by design). Every
+  decision is recorded in a bounded audit log that keeps exact totals past capacity. At boot,
+  `kernel/src/obj/boot.rs` runs ten access cases against a device and a labelled log; the boot
+  marker `NOLX: srm selftest: 10 access checks (6 granted, 4 denied)` is asserted by the boot
+  smoke test (OBJ-010, `tested-T2`).
+* **Checkpoint 5, T1** -- the handle table has a seeded fuzz test (`random_open_close_matches_a_shadow_model`)
+  that runs 20,000 random open, close, and lookup steps against a shadow model. It checks that
+  every closed handle stays dead after its slot is reused. OBJ-007 to OBJ-009 cover the
+  refcount, ACL, and namespace rules as `tested-T1`.
+* **Still open in M4:** the refcount lifecycle lives in the kernel (`boot.rs`), which host tests
+  cannot reach. A host-testable refcount model with a fuzz test is the remaining T1 item. Per-process
+  handle tables are owned by M5.
 
 ## M5 — Executive core: processes, threads, dispatcher
 
