@@ -30,4 +30,6 @@ nolx-hal-core = { path = "../crates/nolx-hal-core" }
 # the kernel reaches the same code through the traits it implements (`BlockStore`,
 # `TableStore`) over the direct map.
 nolx-mm-core = { path = "../crates/nolx-mm-core" }
+# The handle-table and namespace rules the object manager applies at boot. `no_std`, safe.
+nolx-obj-core = { path = "../crates/nolx-obj-core" }
 nolx-types = { path = "../crates/nolx-types" }

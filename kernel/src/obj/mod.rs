@@ -5,10 +5,12 @@
 //! nodes all get their lifetime management, security checking, and auditing from here
 //! rather than each implementing its own.
 //!
-//! This module is a skeleton in M3: the object header layout, the type table, which are the
-//! parts everything else depends on, and the pool accounting the executive reports through
-//! [`pool`]. Handle tables and the namespace land in M4.
+//! M3 landed the object header layout, the type table, and the pool accounting the executive
+//! reports through [`pool`]. M4 adds the handle tables and the namespace rules in
+//! `crates/nolx-obj-core`, and [`boot`] wires them to real headers: the header pool, the root
+//! namespace, and the boot self test.
 
+pub mod boot;
 pub mod pool;
 
 use core::sync::atomic::{AtomicI32, AtomicU16, Ordering};
