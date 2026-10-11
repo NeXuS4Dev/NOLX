@@ -98,9 +98,7 @@ fn with_namespace<R>(f: impl FnOnce(&mut Namespace<ObjectId, NAMESPACE_NODES>) -
 
 /// Run `f` with the descriptor table. The same single-processor, non-reentrant rule as
 /// [`with_namespace`] applies.
-fn with_descriptors<R>(
-    f: impl FnOnce(&mut [Option<SecurityDescriptor>; MAX_OBJECTS]) -> R,
-) -> R {
+fn with_descriptors<R>(f: impl FnOnce(&mut [Option<SecurityDescriptor>; MAX_OBJECTS]) -> R) -> R {
     // SAFETY: as `with_namespace`: the boot processor is the only user, and `f` cannot re-enter.
     let descriptors = unsafe { &mut *DESCRIPTORS.get() };
     f(descriptors)
@@ -365,8 +363,7 @@ pub fn selftest(console: &mut dyn HalConsole) -> Result<(), ObjError> {
     let reader = Token::new(Sid::user(1000), IntegrityLevel::Medium);
     let refused_user = Token::new(Sid::user(1001), IntegrityLevel::Medium);
     let backup_operator =
-        Token::new(Sid::user(1002), IntegrityLevel::Medium)
-            .with_privileges(privilege::BACKUP);
+        Token::new(Sid::user(1002), IntegrityLevel::Medium).with_privileges(privilege::BACKUP);
     let low_reader = Token::new(Sid::user(1000), IntegrityLevel::Low);
 
     // The device: the owner is SYSTEM; user 1001 is refused everything before anything else

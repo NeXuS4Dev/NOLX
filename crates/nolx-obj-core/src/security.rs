@@ -250,9 +250,7 @@ impl Token {
     /// or the everyone principal.
     #[must_use]
     pub fn matches(&self, sid: Sid) -> bool {
-        sid == Sid::WORLD
-            || sid == self.user
-            || self.groups[..self.group_count].contains(&sid)
+        sid == Sid::WORLD || sid == self.user || self.groups[..self.group_count].contains(&sid)
     }
 }
 
