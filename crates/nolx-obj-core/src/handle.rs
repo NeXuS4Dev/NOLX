@@ -518,10 +518,7 @@ mod tests {
         let mut child: HandleTable<u32, 1> = HandleTable::new();
         parent.insert(1, FULL, true).unwrap();
         parent.insert(2, FULL, true).unwrap();
-        assert_eq!(
-            parent.inherit_into(&mut child, |&o| o),
-            Err(HandleError::TableFull)
-        );
+        assert_eq!(parent.inherit_into(&mut child, |&o| o), Err(HandleError::TableFull));
     }
 
     #[test]
