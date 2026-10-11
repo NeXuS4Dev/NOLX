@@ -101,8 +101,8 @@ pull request, so the evidence can be read rather than trusted.
 
 M3 is **done**. Its 23 host assertions (MM-001–MM-023) are `tested-T1`, and all eleven
 boot assertions (MM-024–MM-034) are `tested-T2` in `docs/testing/assertions/mm.md`; there are
-no M3 `pending-T2` rows left to promote. The latest full CI run, [38162486568](https://github.com/NeXuS4Dev/NOLX/actions/runs/38162486568)
-on revision `606b3c7`, passed the QEMU boot smoke job again, reasserting the M3 boot markers.
+no M3 `pending-T2` rows left to promote. Full CI run [38162486568](https://github.com/NeXuS4Dev/NOLX/actions/runs/38162486568)
+on revision `606b3c7` passed all six jobs, including QEMU boot smoke, reasserting the M3 boot markers.
 
 ### M3 progress checkpoint — 2026-10-10
 
