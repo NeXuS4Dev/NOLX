@@ -202,8 +202,13 @@ jobs:
           timeout 30 qemu-system-x86_64 \
             -kernel build/nolx.elf \
             -m 512M -nographic -no-reboot \
+            -d int,cpu_reset,guest_errors -D /tmp/qemu.log \
             | tee build/serial.log || true
           cat build/serial.log >> /tmp/job.log
+          echo "--- QEMU exception log (temporary instrumentation) ---" >> /tmp/job.log
+          tail -c 8000 /tmp/qemu.log >> /tmp/job.log 2>/dev/null || true
+          echo "" >> /tmp/job.log
+          echo "--- end of QEMU exception log ---" >> /tmp/job.log
       # These are the markers the kernel actually reaches today. The list is the project's
       # honest progress record: a marker is added when the kernel emits it, not before.
       - name: Assert the boot markers

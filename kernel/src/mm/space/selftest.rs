@@ -61,6 +61,12 @@ const SECOND_SPACE_PAGES: u64 = 2;
 /// Bytes of the first space's private range that are shared with the second.
 const SHARED_BYTES: u64 = SECOND_SPACE_PAGES * 0x1000;
 
+/// Print a progress marker. Temporary instrumentation: the boot log is the only window into a
+/// machine that stops without a message, so each phase of the self test announces itself.
+fn mark(console: &mut dyn HalConsole, what: &str) {
+    let _ = writeln!(console, "NOLX: address space selftest: {what}");
+}
+
 /// The address space the test drives.
 static SPACE_A: SyncCell<Option<Space>> = SyncCell::new(None);
 /// The address space it shares pages with.
@@ -129,10 +135,10 @@ pub fn run(console: &mut dyn HalConsole) -> Result<SpaceReport, &'static str> {
     };
 
     create_first(console, &mut report)?;
-    describe_ranges(&mut report)?;
-    drive_faults(&mut report)?;
-    drive_copy_on_write(&mut report)?;
-    teardown(&mut report)?;
+    describe_ranges(console, &mut report)?;
+    drive_faults(console, &mut report)?;
+    drive_copy_on_write(console, &mut report)?;
+    teardown(console, &mut report)?;
 
     if report.frames.1 != report.frames.0 {
         return Err("the address spaces did not give every frame back");
@@ -164,7 +170,9 @@ fn create_first(
     report: &mut SpaceReport,
 ) -> Result<(), &'static str> {
     let kernel_root = tables::current_root();
+    mark(console, "creating the first space");
     let space = Space::create().ok_or("could not create an address space")?;
+    mark(console, "the first space exists");
     if space.root() == kernel_root {
         return Err("a new address space reused the kernel's page-table root");
     }
@@ -202,11 +210,12 @@ fn create_first(
         *SPACE_A.get() = Some(space);
     }
     report.spaces += 1;
+    mark(console, "the first space is registered");
     Ok(())
 }
 
 /// Describe the ranges: nothing is mapped yet, and everything is committed.
-fn describe_ranges(report: &mut SpaceReport) -> Result<(), &'static str> {
+fn describe_ranges(console: &mut dyn HalConsole, report: &mut SpaceReport) -> Result<(), &'static str> {
     let space = a();
     space.set_stack_floor(STACK_FLOOR);
     space
@@ -259,12 +268,15 @@ fn describe_ranges(report: &mut SpaceReport) -> Result<(), &'static str> {
         .check()
         .map_err(|_| "the VAD tree's invariants do not hold after describing the ranges")?;
     report.vads = 4;
+    mark(console, "ranges described");
     Ok(())
 }
 
 /// The four fault causes, and the refusals that go with them.
-fn drive_faults(report: &mut SpaceReport) -> Result<(), &'static str> {
+fn drive_faults(console: &mut dyn HalConsole, report: &mut SpaceReport) -> Result<(), &'static str> {
+    mark(console, "activating the first space for the faults");
     a().activate();
+    mark(console, "the first space is active");
 
     // Demand zero: the first touch of a committed private page.
     let Fault::DemandZero { frame } = expect_zero(PRIVATE_START)? else {
@@ -343,17 +355,20 @@ fn drive_faults(report: &mut SpaceReport) -> Result<(), &'static str> {
         Ok(_) => return Err("a stack fault below the floor was grown anyway"),
     }
 
+    mark(console, "the faults are resolved");
     a().check()
         .map_err(|_| "the VAD tree's invariants do not hold after the faults")?;
     if a().pages_mapped() != FIRST_SPACE_PAGES {
         return Err("the first address space did not map exactly its four pages");
     }
     a().deactivate();
+    mark(console, "the first space is deactivated");
     Ok(())
 }
 
 /// Copy on write: share the private range into a second address space and write in both.
-fn drive_copy_on_write(report: &mut SpaceReport) -> Result<(), &'static str> {
+fn drive_copy_on_write(console: &mut dyn HalConsole, report: &mut SpaceReport) -> Result<(), &'static str> {
+    mark(console, "creating the second space");
     let second = Space::create().ok_or("could not create a second address space")?;
     // SAFETY: as in `create_first`: one writer, and no live reference to the space yet.
     unsafe {
@@ -370,6 +385,7 @@ fn drive_copy_on_write(report: &mut SpaceReport) -> Result<(), &'static str> {
     if pages != SECOND_SPACE_PAGES {
         return Err("sharing did not find the two mapped pages");
     }
+    mark(console, "the pages are shared");
 
     // Both sides are described, both are charged for exactly what was shared, and both point
     // at the same frame, read-only.
@@ -447,6 +463,7 @@ fn drive_copy_on_write(report: &mut SpaceReport) -> Result<(), &'static str> {
     }
     write_user(PRIVATE_START, MARKER);
     a().deactivate();
+    mark(console, "copy on write is done in both spaces");
 
     if a().pages_mapped() != FIRST_SPACE_PAGES || b().pages_mapped() != SECOND_SPACE_PAGES {
         return Err("copy on write changed the number of mapped pages");
@@ -455,7 +472,8 @@ fn drive_copy_on_write(report: &mut SpaceReport) -> Result<(), &'static str> {
 }
 
 /// Tear both address spaces down and check what the counters say afterwards.
-fn teardown(report: &mut SpaceReport) -> Result<(), &'static str> {
+fn teardown(console: &mut dyn HalConsole, report: &mut SpaceReport) -> Result<(), &'static str> {
+    mark(console, "tearing the spaces down");
     let first_pages = a().pages_mapped();
     let second_pages = b().pages_mapped();
     report.pages_mapped = first_pages + second_pages;
@@ -499,6 +517,7 @@ fn teardown(report: &mut SpaceReport) -> Result<(), &'static str> {
     if torn.vads_removed != 1 {
         return Err("the second address space removed the wrong number of descriptors");
     }
+    mark(console, "both spaces are gone");
     mm::audit().map_err(|_| "the frame-map audit failed after teardown")?;
     report.frames.1 = mm::free_frames();
     let (allocated, released) = tables::totals();
