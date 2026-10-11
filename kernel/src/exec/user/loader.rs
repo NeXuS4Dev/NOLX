@@ -133,21 +133,21 @@ fn entropy() -> u64 {
     tsc.rotate_left(17) ^ mix
 }
 
-/// The physical frame behind one page of `space`, demand-zeroed if it was not resident.
+/// The physical address behind one page of `space`, demand-zeroed if it was not resident.
 ///
 /// `resolve_here` resolves *faults*: an already-present page is a `Protection` refusal to
 /// it (a fault on a present page can only be a permission fault). So the resident case is
 /// answered from `translate` first, and only a missing page goes through the fault path --
 /// which is exactly what the zero-fill-then-copy order of the page plan needs.
-fn resident_frame(space: &mut Space, address: u64) -> Result<usize, LoadError> {
+fn resident_frame(space: &mut Space, address: u64) -> Result<u64, LoadError> {
     let page = address & !(PAGE_SIZE as u64 - 1);
     if let Some(mapping) = space.translate(page) {
-        return Ok(mapping.physical as usize);
+        return Ok(mapping.physical);
     }
     space.resolve_here(page, 0).map_err(|_| LoadError::Page)?;
     space
         .translate(page)
-        .map(|mapping| mapping.physical as usize)
+        .map(|mapping| mapping.physical)
         .ok_or(LoadError::Page)
 }
 
@@ -162,7 +162,7 @@ pub(crate) fn write_user(space: &mut Space, address: u64, bytes: &[u8]) -> Resul
         // SAFETY: the frame was just resolved in `space` and is exclusively referenced by
         // it; the direct map is the kernel's view of every frame.
         unsafe {
-            let target = phys::direct_ptr::<u8>((frame * PAGE_SIZE + offset) as u64);
+            let target = phys::direct_ptr::<u8>(frame + offset as u64);
             core::ptr::copy_nonoverlapping(bytes[done..].as_ptr(), target, chunk);
         }
         done += chunk;
@@ -225,7 +225,7 @@ pub fn read_user(space: &mut Space, address: u64, out: &mut [u8]) -> Result<(), 
         // SAFETY: the frame was just resolved in `space`; the direct map reads it as the
         // kernel's view of user memory.
         unsafe {
-            let source = phys::direct_ptr::<u8>((frame * PAGE_SIZE + offset) as u64);
+            let source = phys::direct_ptr::<u8>(frame + offset as u64);
             core::ptr::copy_nonoverlapping(source, out[done..].as_mut_ptr(), chunk);
         }
         done += chunk;
