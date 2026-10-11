@@ -177,10 +177,22 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         // SAFETY: the complete IDT and selected timer route are live. Do not let the compiler
         // move initialization across STI.
         unsafe { core::arch::asm!("sti", options(nostack)) };
+        // The BSP starts three independent kernel stacks and lets the hardware clock preempt
+        // them through the common interrupt-frame switch path. The test announces its output
+        // with interrupts masked so no worker can print ahead of the prefix.
+        exec::begin_round_robin(&mut console);
 
         let mut timer_marker_reported = false;
         let mut memory_selftest_done = false;
+        let mut round_robin_reported = false;
         loop {
+            if !round_robin_reported && exec::round_robin_complete() {
+                round_robin_reported = true;
+                if !exec::report_round_robin(&mut console) {
+                    panic!("round-robin context-switch test produced an unexpected trace");
+                }
+            }
+
             let ticks = hal::timer::ticks();
             if !timer_marker_reported && ticks >= 100 {
                 let elapsed_ns = hal::timer::monotonic_ns();

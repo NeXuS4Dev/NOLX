@@ -600,6 +600,7 @@ pub fn open_private<const N: usize>(
         token,
         table,
         desired,
+        false,
     )
 }
 
@@ -656,12 +657,13 @@ fn open_id<const N: usize>(
     token: &Token,
     table: &mut HandleTable<ObjectId, N>,
     desired: u32,
+    inheritable: bool,
 ) -> Result<Handle, ObjError> {
     let granted = check_access(id, token, desired)?;
     let object_type = object_type_of(id)?;
     let header = header_of(id)?;
     header.add_handle();
-    let handle = match table.insert(id, granted, false) {
+    let handle = match table.insert(id, granted, inheritable) {
         Ok(handle) => handle,
         Err(error) => {
             header.drop_handle();
@@ -690,7 +692,42 @@ pub fn open<const N: usize>(
     table: &mut HandleTable<ObjectId, N>,
     desired: u32,
 ) -> Result<Handle, ObjError> {
-    open_id(lookup(path)?, token, table, desired)
+    open_id(lookup(path)?, token, table, desired, false)
+}
+
+/// Open a handle marked inheritable for a process created with handle inheritance enabled.
+pub fn open_inheritable<const N: usize>(
+    path: &str,
+    token: &Token,
+    table: &mut HandleTable<ObjectId, N>,
+    desired: u32,
+) -> Result<Handle, ObjError> {
+    open_id(lookup(path)?, token, table, desired, true)
+}
+
+/// Copy every inheritable handle from `source` into `target`, retaining each object reference.
+pub fn inherit_handles<const N: usize, const M: usize>(
+    source: &HandleTable<ObjectId, N>,
+    target: &mut HandleTable<ObjectId, M>,
+) -> Result<usize, ObjError> {
+    let inherited = source.iter().filter(|(_, entry)| entry.inheritable).count();
+    if inherited > target.capacity().saturating_sub(target.len()) {
+        return Err(ObjError::Handle(HandleError::TableFull));
+    }
+    for (_, entry) in source.iter().filter(|(_, entry)| entry.inheritable) {
+        let _ = header_of(entry.object)?;
+    }
+    source
+        .inherit_into(target, |object| {
+            // The source entry itself owns a live handle reference, and the preflight above
+            // validated its object header. The closure cannot fail, so each copied entry can
+            // safely retain the object before HandleTable inserts the inherited value.
+            if let Ok(header) = header_of(*object) {
+                header.add_handle();
+            }
+            *object
+        })
+        .map_err(ObjError::Handle)
 }
 
 /// Duplicate `source_handle` from `source` into `target`, per `DuplicateHandle` rules.

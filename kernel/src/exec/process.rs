@@ -7,7 +7,7 @@
 
 use core::mem::size_of;
 
-use nolx_exec_core::{ProcessContext, ProcessId};
+use nolx_exec_core::{JobId, ProcessContext, ProcessEnvironmentBlock, ProcessId, ProcessInfoError};
 use nolx_obj_core::handle::{Handle, HandleError};
 use nolx_obj_core::security::Token;
 
@@ -89,6 +89,34 @@ impl<'space> Process<'space> {
         self.context.token()
     }
 
+    /// The job object this process belongs to, if any.
+    #[must_use]
+    pub const fn job(&self) -> Option<JobId> {
+        self.context.job()
+    }
+
+    /// Set or clear process job membership.
+    pub fn set_job(&mut self, job: Option<JobId>) {
+        self.context.set_job(job);
+    }
+
+    /// Borrow this process's kernel-owned PEB-equivalent metadata.
+    #[must_use]
+    pub const fn peb(&self) -> &ProcessEnvironmentBlock {
+        self.context.peb()
+    }
+
+    /// Mutably borrow process parameters before M6 maps the user-visible PEB page.
+    #[must_use]
+    pub fn peb_mut(&mut self) -> &mut ProcessEnvironmentBlock {
+        self.context.peb_mut()
+    }
+
+    /// Set the command-line string without truncating it.
+    pub fn set_command_line(&mut self, command_line: &str) -> Result<(), ProcessInfoError> {
+        self.context.peb_mut().command_line.set(command_line)
+    }
+
     /// The root page-table frame of this process's address space.
     #[must_use]
     pub fn address_space_root(&self) -> u64 {
@@ -113,6 +141,24 @@ impl<'space> Process<'space> {
     pub fn open_handle(&mut self, path: &str, desired: u32) -> Result<Handle, ObjError> {
         let token = self.context.token();
         boot::open(path, &token, self.context.handles_mut(), desired)
+    }
+
+    /// Open an inheritable handle for a child process created with handle inheritance enabled.
+    pub fn open_inheritable_handle(
+        &mut self,
+        path: &str,
+        desired: u32,
+    ) -> Result<Handle, ObjError> {
+        let token = self.context.token();
+        boot::open_inheritable(path, &token, self.context.handles_mut(), desired)
+    }
+
+    /// Copy the parent's inheritable handles into this process, retaining each object reference.
+    pub fn inherit_handles_from(
+        parent: &Process<'_>,
+        child: &mut Process<'_>,
+    ) -> Result<usize, ObjError> {
+        boot::inherit_handles(parent.context.handles(), child.context.handles_mut())
     }
 
     /// Close `handle` in this process, dropping its object references.

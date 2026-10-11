@@ -12,6 +12,7 @@
 pub mod acpi;
 pub mod apic;
 pub mod console;
+pub mod context;
 pub mod cpu;
 pub mod hpet;
 pub mod interrupts;
@@ -112,11 +113,11 @@ pub fn init(console: &mut dyn HalConsole) {
         let hpet_frequency = match platform.hpet {
             Some(info) => match hpet::init(&info) {
                 Ok(frequency) => {
-                    let _ = writeln!(console, "hpet: counter enabled at {} Hz", frequency);
+                    let _ = writeln!(console, "hpet: counter enabled at {frequency} Hz");
                     Some(frequency)
                 }
                 Err(error) => {
-                    let _ = writeln!(console, "hpet: unavailable ({:?})", error);
+                    let _ = writeln!(console, "hpet: unavailable ({error:?})");
                     None
                 }
             },
@@ -146,8 +147,7 @@ pub fn init(console: &mut dyn HalConsole) {
                         Err(error) => {
                             let _ = writeln!(
                                 console,
-                                "apic: timer calibration unavailable ({:?})",
-                                error
+                                "apic: timer calibration unavailable ({error:?})"
                             );
                         }
                     }
@@ -156,8 +156,7 @@ pub fn init(console: &mut dyn HalConsole) {
             Err(error) => {
                 let _ = writeln!(
                     console,
-                    "apic: unavailable ({:?}); retaining PIC fallback",
-                    error
+                    "apic: unavailable ({error:?}); retaining PIC fallback"
                 );
             }
         }

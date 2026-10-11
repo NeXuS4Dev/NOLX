@@ -75,16 +75,15 @@ nolx_interrupt_common:
     pushq   %r15
 
     /*
-     * The saved registers remain in place while we align the call stack. R12 is already
-     * saved in the frame, and the C ABI guarantees the Rust dispatcher preserves its live
-     * value. Before CALL, RSP is 16-byte aligned; the callee therefore sees the required
-     * 8-byte return-address skew.
+     * The saved registers remain in place while we align the call stack. The Rust dispatcher
+     * returns the frame to resume in RAX: normally the frame passed here, or another thread's
+     * saved frame after a timer preemption. Before CALL, RSP is 16-byte aligned; the callee
+     * therefore sees the required 8-byte return-address skew.
      */
-    movq    %rsp, %r12
     movq    %rsp, %rdi
     andq    $-16, %rsp
     call    nolx_interrupt_dispatch
-    movq    %r12, %rsp
+    movq    %rax, %rsp
 
     popq    %r15
     popq    %r14

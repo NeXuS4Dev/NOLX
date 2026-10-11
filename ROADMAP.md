@@ -325,7 +325,31 @@ future work rather than an implemented header field.
   exit status for the later parent/reaper implementation.
 * The boot selftest builds two real process contexts and address spaces, proves isolated
   handles and token-checked opens, then requires object and address-space resources to return.
-  This is the first M5 slice only; threads, dispatcher objects, and scheduling remain open.
+
+### M5 implementation checkpoint 2 — host Executive and kernel thread-switch path
+
+`crates/nolx-exec-core` now contains the bounded host-testable Executive core: process and
+thread metadata; 32-level per-processor priority queues; FIFO, round-robin, dynamic aging,
+affinity, load balancing, mutex donation, and virtual-runtime job-group shares; events, recursive
+mutexes, semaphores, timers, thread-join objects, and common WaitAny/WaitAll semantics; an
+integrated scheduler/dispatcher coordinator that blocks and wakes threads while retaining wait
+results; DPC and passive system-work queues; and queued ticket/push locks. The host tests cover
+the T1 priority-inversion, FIFO, starvation, dispatcher, group-share, and resource-lifecycle
+contracts.
+
+The kernel binds the shared priority scheduler to timer-interrupt frames and stable synthetic
+kernel stacks. Its process self-test now exercises process/job/PEB-equivalent state, a kernel
+thread context and exit, isolated/inherited handles, token-checked object opens, and resource
+teardown. The configured QEMU T2 test starts three preemptible BSP kernel threads and requires
+the serial trace `ABCABCABCABC` plus the exact completion marker. AP startup and actual SMP
+interrupt/context switching remain outside this BSP proof; SMP queue, affinity, and group-share
+rules are host-tested.
+
+The current T1 host suites, strict Clippy checks, and release kernel build pass locally. The two
+M5 boot assertions are configured as `pending-T2` in `docs/testing/assertions/exec.md`; this
+checkout has no QEMU executable, so the boot result still must be obtained from a passing CI
+workflow on this revision. **M5 is not marked done until that T2 run passes and both assertions
+are recorded as `tested-T2`.**
 
 ## M6 — User mode, ELF, and the syscall ABI
 
