@@ -9,6 +9,7 @@ use nolx_mm_core::vad::{USER_SPACE_HIGH, USER_SPACE_LOW};
 
 const ELF_HEADER_SIZE: usize = 64;
 const ELF_HEADER_SIZE_U16: u16 = 64;
+#[cfg(test)]
 const ELF_HEADER_SIZE_U64: u64 = 64;
 const PROGRAM_HEADER_SIZE: usize = 56;
 const PROGRAM_HEADER_SIZE_U16: u16 = 56;
@@ -311,14 +312,10 @@ impl<'a> Elf64LoadPlan<'a> {
                         alignment,
                         flags: SegmentFlags(flags),
                     };
-                    if segments
-                        .iter()
-                        .flatten()
-                        .any(|existing: &LoadSegment| {
-                            segment.virtual_address < existing.end_address()
-                                && existing.virtual_address < end
-                        })
-                    {
+                    if segments.iter().flatten().any(|existing: &LoadSegment| {
+                        segment.virtual_address < existing.end_address()
+                            && existing.virtual_address < end
+                    }) {
                         return Err(ElfError::OverlappingLoadSegments);
                     }
                     if segment_count == MAX_LOAD_SEGMENTS {
@@ -334,7 +331,9 @@ impl<'a> Elf64LoadPlan<'a> {
                         return Err(ElfError::DuplicateInterpreter);
                     }
                     let path = file_range(image, file_offset, file_size)?;
-                    if path.len() < 2 || path.last() != Some(&0) || path[..path.len() - 1].contains(&0)
+                    if path.len() < 2
+                        || path.last() != Some(&0)
+                        || path[..path.len() - 1].contains(&0)
                     {
                         return Err(ElfError::InvalidInterpreter);
                     }
@@ -474,15 +473,16 @@ fn file_range(image: &[u8], offset: u64, size: u64) -> Result<&[u8], ElfError> {
     let end = start
         .checked_add(length)
         .ok_or(ElfError::FileRangeOutOfBounds)?;
-    image
-        .get(start..end)
-        .ok_or(ElfError::FileRangeOutOfBounds)
+    image.get(start..end).ok_or(ElfError::FileRangeOutOfBounds)
 }
 
-fn validate_alignment(file_offset: u64, virtual_address: u64, alignment: u64) -> Result<(), ElfError> {
+fn validate_alignment(
+    file_offset: u64,
+    virtual_address: u64,
+    alignment: u64,
+) -> Result<(), ElfError> {
     if alignment > 1
-        && (!alignment.is_power_of_two()
-            || file_offset % alignment != virtual_address % alignment)
+        && (!alignment.is_power_of_two() || file_offset % alignment != virtual_address % alignment)
     {
         return Err(ElfError::InvalidSegmentAlignment);
     }
@@ -817,10 +817,7 @@ mod tests {
         let first_header = ELF_HEADER_SIZE;
         put_u64(&mut image, first_header + 16, u64::MAX - 0x7f);
         put_u64(&mut image, first_header + 48, 1);
-        assert_eq!(
-            Elf64LoadPlan::parse(&image),
-            Err(ElfError::AddressOverflow)
-        );
+        assert_eq!(Elf64LoadPlan::parse(&image), Err(ElfError::AddressOverflow));
     }
 
     #[test]
