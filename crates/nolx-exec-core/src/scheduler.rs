@@ -1243,7 +1243,9 @@ impl<const THREADS: usize, const CPUS: usize> Scheduler<THREADS, CPUS> {
     }
 
     fn age_waiting_threads(&mut self) {
-        let aging_tick = self.ticks % u64::from(STARVATION_BOOST_INTERVAL) == 0;
+        let aging_tick = self
+            .ticks
+            .is_multiple_of(u64::from(STARVATION_BOOST_INTERVAL));
         let mut promotions = [None; THREADS];
         let mut promotion_count = 0;
         for (index, slot) in self.threads.iter_mut().enumerate() {

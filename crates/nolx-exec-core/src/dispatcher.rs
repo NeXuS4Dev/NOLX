@@ -812,11 +812,7 @@ impl<const OBJECTS: usize, const WAITERS: usize> Dispatcher<OBJECTS, WAITERS> {
                     .ok_or(DispatchError::RecursionOverflow)?,
                 abandoned,
             },
-            ObjectKind::Mutex {
-                owner: None,
-                abandoned: _,
-                ..
-            } => ObjectKind::Mutex {
+            ObjectKind::Mutex { owner: None, .. } => ObjectKind::Mutex {
                 owner: Some(thread),
                 recursion: 1,
                 abandoned: false,
@@ -900,7 +896,12 @@ impl<const OBJECTS: usize, const WAITERS: usize> Dispatcher<OBJECTS, WAITERS> {
             let next_due = if period == 0 {
                 None
             } else {
-                let elapsed_periods = (self.now.saturating_sub(due) / period).saturating_add(1);
+                let elapsed_periods = self
+                    .now
+                    .saturating_sub(due)
+                    .checked_div(period)
+                    .expect("a periodic timer has a nonzero period")
+                    .saturating_add(1);
                 due.checked_add(period.saturating_mul(elapsed_periods))
                     .filter(|next| *next > self.now)
             };
