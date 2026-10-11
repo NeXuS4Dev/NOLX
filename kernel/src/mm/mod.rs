@@ -10,8 +10,11 @@
 //! * the **self test** -- the stress run that proves the allocator still agrees with the
 //!   frame map after tens of thousands of allocations taken while interrupts are live.
 //!
-//! The page tables, the higher-half switch, the kernel heap, and the VAD tree are the rest
-//! of M3; see `docs/architecture/03-memory-manager.md`. The algorithms behind the allocator
+//! The **kernel heap** sits on top of the frame allocator: `nolx_mm_core::heap` is a
+//! boundary-tagged allocator over one region, and [`heap`] gives it regions, the nonpaged-pool
+//! charges for them, and the `GlobalAlloc` implementation the Rust runtime uses. The page
+//! tables, the higher-half switch, and the VAD tree are the rest of M3; see
+//! `docs/architecture/03-memory-manager.md`. The algorithms behind the allocator
 //! -- splitting, coalescing, the magazines, the commit accounting -- live in
 //! `crates/nolx-mm-core`, where they are tested on the host without a machine to boot.
 //!
@@ -22,6 +25,7 @@
 //! which is the same bootstrap problem the object map has, and it is solved the same way:
 //! the thing that hands out memory cannot itself be handed out.
 
+pub mod heap;
 pub mod phys;
 pub mod pool;
 pub mod selftest;
@@ -241,6 +245,11 @@ fn finish_boot(console: &mut dyn HalConsole) {
         stats.largest_free_order().unwrap_or(0),
     );
     let _ = writeln!(console, "NOLX: frame allocator online");
+
+    // The heap is the allocator's first client: a region is a run of frames, and the frames
+    // have to exist before anything can allocate a byte. Its failure is not fatal -- nothing in
+    // the boot path allocates from it yet -- so it reports and carries on.
+    heap::init(console);
 }
 
 /// Mark the frames the kernel itself occupies, and everything the loader used, unusable.
