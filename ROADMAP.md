@@ -267,9 +267,14 @@ next step to stop guessing.
   that runs 20,000 random open, close, and lookup steps against a shadow model. It checks that
   every closed handle stays dead after its slot is reused. OBJ-007 to OBJ-009 cover ACL
   evaluation, integrity labels and privileges, and audit totals, all `tested-T1`.
-* **Still open in M4:** the refcount lifecycle lives in the kernel (`boot.rs`), which host tests
-  cannot reach. A host-testable refcount model with a fuzz test is the remaining T1 item. Per-process
-  handle tables are owned by M5.
+* **Refcount model, T1** -- `crates/nolx-obj-core/src/refcount.rs` states the pointer and handle
+  count rules without atomics. A seeded fuzz test runs 30,000 random open, close, unbind, and
+  create steps and checks the counts against an oracle after each step. It checks that no object
+  is deleted twice, that none is deleted while a handle or binding still names it, and that
+  `handles <= pointers` holds throughout. The kernel's atomic counts in `kernel/src/obj/mod.rs`
+  follow the same rules, which the boot self test checks.
+* **Still open in M4:** per-process handle tables are owned by M5, and the kernel does not yet
+  use the host model directly.
 
 ## M5 — Executive core: processes, threads, dispatcher
 
