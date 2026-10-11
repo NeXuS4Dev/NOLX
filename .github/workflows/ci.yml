@@ -245,6 +245,9 @@ jobs:
             "NOLX: objmgr online" \
             "obj: namespace: \\Device" \
             "NOLX: obj selftest: 1 object, 2 handles" \
+            "NOLX: obj session selftest: sessions 0 and 1 are isolated" \
+            "NOLX: obj private namespace selftest: boundaries enforced, isolated roots" \
+            "NOLX: obj type callback selftest: create/open/parse/close/delete invoked" \
             "NOLX: srm selftest: 10 access checks (6 granted, 4 denied)" \
             "NOLX: process selftest: 2 processes, 2 address spaces" \
             "NOLX: init sequence complete, halting the boot processor" \

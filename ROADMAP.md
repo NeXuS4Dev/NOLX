@@ -210,12 +210,14 @@ promoted.
 The centre of the design. Everything is an object; everything reachable is reachable
 through a handle.
 
-- Object headers (body, type, refcount, security descriptor, name, quota charge).
+- Object headers: type, flags, pointer/handle counts, and body size. Boot-stage security descriptors
+  are stored in a parallel table, names are namespace bindings, and per-body process quota ownership
+  remains deferred until object-body allocation is wired.
 - Object types with create/open/parse/close/delete callbacks.
 - Handle tables: fixed-capacity, generation-checked table primitive with access rights,
   inheritance flags, and `DuplicateHandle` semantics; M5 attaches one table to each process.
 - Object namespace: root directory, `\Device`, `\FileSystem`, `\BaseNamedObjects`,
-  `\NOLX`, symlinks, per-session directories, private namespaces.
+  `\NOLX`, symlinks, per-session directories, and boundary-protected private namespaces.
 - Security Reference Monitor: SID/ACE/ACL evaluation, tokens (user, group, privilege,
   integrity), `SeAccessCheck`, mandatory-label support, auditing.
 - Tests: T1 refcount lifecycle (no leak/no double free under fuzzed open/close),
@@ -223,9 +225,10 @@ through a handle.
 
 ### M4 implementation checkpoints 1–2 — handle tables and namespace (verified in CI)
 
-M4 delivered the object header/type plumbing, fixed-capacity handle-table primitive, namespace,
-Security Reference Monitor, T1 host tests, and T2 boot selftests. Process ownership of a handle
-table belongs to M5. Delivered by PR #6 (merged 2026-10-11).
+M4's first five checkpoints delivered the object header/type plumbing, fixed-capacity handle-table
+primitive, base namespace, Security Reference Monitor, T1 host tests, and T2 boot selftests. The
+callback and session/private-namespace completion is tracked in checkpoint 6 below. Delivered by
+PR #6 (merged 2026-10-11).
 
 * **Checkpoint 1, `crates/nolx-obj-core/src/handle.rs`** -- the fixed-capacity handle-table
   primitive used by processes. Handle values carry a 14-bit slot and a 16-bit generation, so a
@@ -274,12 +277,28 @@ next step to stop guessing.
   is deleted twice, that none is deleted while a handle or binding still names it, and that
   `handles <= pointers` holds throughout. The kernel's atomic counts in `kernel/src/obj/mod.rs`
   follow the same rules, which the boot self test checks.
-* **M5 follow-up:** each process will own its handle table; M4 supplies the tested table
-  primitive.
+* **M5 checkpoint 1 (CI-verified):** the first process context now owns its handle table,
+  token, and address-space association; threads and dispatch remain out of scope here.
 * **Refcount implementation note:** `crates/nolx-obj-core/src/refcount.rs` is a non-atomic
   lifecycle model used by the host fuzz test. The kernel keeps atomic counters in
   `kernel/src/obj/mod.rs` and checks the same transitions in its boot selftest. Factoring the
   shared rules into the kernel implementation remains a possible follow-up.
+
+### M4 implementation checkpoint 6 — lifecycle callbacks and namespace isolation (pending CI)
+
+`kernel/src/obj/mod.rs` now gives object types create/open/parse/close/delete callbacks, and
+`kernel/src/obj/boot.rs` dispatches each hook at the appropriate object lifecycle transition.
+The Device selftest covers successful callback dispatch and create/open rollback. Session paths
+are initialized below `\Sessions\<id>`; private namespaces have independent fixed-capacity
+roots, boundary-descriptor checks on read/write/delete, audited decisions, stale-generation
+rejection, and nonempty-destroy refusal. The boot test uses equal names in two sessions and two
+private roots to prove the state stays isolated. CI asserts the new boot markers before this
+checkpoint is promoted.
+
+The current header ABI and its out-of-line fields are documented in
+`docs/architecture/01-kernel-model.md`: security descriptors are held in the boot manager's
+parallel table and names are namespace bindings. The quota-owner pointer/body allocation remains
+future work rather than an implemented header field.
 
 ## M5 — Executive core: processes, threads, dispatcher
 
