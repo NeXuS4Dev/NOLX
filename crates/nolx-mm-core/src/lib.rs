@@ -20,6 +20,8 @@
 //!   `getrusage` are read from, so they cannot disagree with each other.
 //! * [`heap`] -- a boundary-tagged heap with size-class free lists, which is what the
 //!   kernel heap is built from.
+//! * [`numa`] -- the node list and the zonelists that order it: which memory an allocation
+//!   may come from, and in what order.
 //!
 //! Every module is `no_std` and free of hardware access. The kernel supplies the physical
 //! memory, the page tables, and the locks; these modules supply the algorithms, and the
@@ -35,6 +37,7 @@ pub mod buddy;
 pub mod commit;
 pub mod heap;
 pub mod magazine;
+pub mod numa;
 pub mod paging;
 pub mod vad;
 

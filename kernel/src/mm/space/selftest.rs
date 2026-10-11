@@ -80,6 +80,18 @@ pub struct SpaceReport {
     pub tables: u64,
 }
 
+impl SpaceReport {
+    /// The system PTE pool's peak, in KiB, from the memory manager's own accounting.
+    #[must_use]
+    pub fn system_pte_peak(&self) -> u64 {
+        let snapshot = crate::mm::pool::snapshot();
+        let entry = snapshot
+            .iter()
+            .find(|pool| pool.kind == nolx_mm_core::commit::PoolKind::SystemPte);
+        entry.map_or(0, |pool| pool.peak / 1024)
+    }
+}
+
 /// Run the self test, reporting what it did.
 ///
 /// # Errors
@@ -513,11 +525,15 @@ pub fn run(console: &mut dyn HalConsole) -> Result<SpaceReport, Failure> {
     }
     let _ = released_before;
 
+    // The system PTE pool's peak is the evidence that page-table allocation charged it: the
+    // tables are all freed again by teardown, so the current charge is back to zero and only
+    // the peak remembers that the pool was used at all.
+    let peak = report.system_pte_peak();
     let _ = writeln!(
         console,
         "NOLX: address space selftest: {} space(s), {} page(s), {} fault(s), {} refusal(s), \
-         {} page table(s), integrity ok",
-        report.spaces, report.pages, report.faults, report.refusals, report.tables
+         {} page table(s), {} KiB peak in the system PTE pool, integrity ok",
+        report.spaces, report.pages, report.faults, report.refusals, report.tables, peak
     );
     Ok(report)
 }

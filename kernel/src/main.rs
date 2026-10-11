@@ -141,6 +141,9 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
 
         obj::init(&mut console);
         let _ = writeln!(console, "NOLX: objmgr online");
+        // The executive's view of the pools the memory manager charges. Printing it is what
+        // proves the charging sites -- page tables, heap regions -- reached the accounting.
+        obj::pool::report(&mut console);
 
         exec::init(&mut console);
         psx::init(&mut console);

@@ -233,6 +233,8 @@ jobs:
             "mm: higher-half switch: image window at 0xffffffff80000000" \
             "NOLX: mm online" \
             "NOLX: frame allocator online" \
+            "mm: numa:" \
+            "obj: pool usage:" \
             "NOLX: kernel heap online" \
             "NOLX: kernel heap selftest:" \
             "NOLX: mm selftest: starting" \
@@ -274,11 +276,26 @@ jobs:
             echo "the kernel heap did not pass its self test"
             exit 1
           fi
+          # The node list is the machine's memory described as nodes, and the zonelist is the
+          # order allocations are served in: local first.
+          if ! grep -Eq 'mm: numa: [1-9][0-9]* node\(s\), .*, zonelist \[0\]' build/serial.log; then
+            echo "the NUMA node list was not built"
+            exit 1
+          fi
+          # The pools are charged by the code that consumes memory -- the heap takes the
+          # nonpaged pool, page tables take the system PTE pool -- and the report is the
+          # executive's view of the same numbers.
+          if ! grep -Eq \
+            'obj: pool usage: nonpaged pool [1-9][0-9]* KiB of [0-9]+ MiB \(peak [1-9][0-9]* KiB\);.*accounting ok' \
+            build/serial.log; then
+            echo "the pools were not charged and reported through the object manager"
+            exit 1
+          fi
           # Demand paging, copy on write, stack growth, and the refusals: the address-space
           # self test maps pages, resolves faults, and leaves the frame and table counts
           # exactly where it found them, or it panics.
           if ! grep -Eq \
-            'NOLX: address space selftest: [2-9][0-9]* space\(s\), [0-9]+ page\(s\), [0-9]+ fault\(s\), [0-9]+ refusal\(s\), [1-9][0-9]* page table\(s\), integrity ok' \
+            'NOLX: address space selftest: [2-9][0-9]* space\(s\), [0-9]+ page\(s\), [0-9]+ fault\(s\), [0-9]+ refusal\(s\), [1-9][0-9]* page table\(s\), [1-9][0-9]* KiB peak in the system PTE pool, integrity ok' \
             build/serial.log; then
             echo "the address-space self test did not complete cleanly"
             exit 1

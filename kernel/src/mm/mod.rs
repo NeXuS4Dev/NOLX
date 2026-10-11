@@ -27,6 +27,7 @@
 //! the thing that hands out memory cannot itself be handed out.
 
 pub mod heap;
+pub mod numa;
 pub mod phys;
 pub mod pool;
 pub mod selftest;
@@ -165,6 +166,9 @@ pub fn init(console: &mut dyn HalConsole, info: &BootInfo) {
         *FRAME_MAP_LEN.get() = len;
     }
 
+    // The nodes exist before the allocator can hand out a frame: an allocation that ran with
+    // an empty node list would have no node to come from.
+    numa::init();
     finish_boot(console);
 
     let _ = writeln!(
@@ -212,6 +216,7 @@ pub fn init_without_firmware(console: &mut dyn HalConsole) {
         }
         *FRAME_MAP_LEN.get() = len;
     }
+    numa::init();
     finish_boot(console);
     let _ = writeln!(console, "NOLX: mm online");
 }
@@ -247,6 +252,7 @@ fn finish_boot(console: &mut dyn HalConsole) {
         stats.largest_free_order().unwrap_or(0),
     );
     let _ = writeln!(console, "NOLX: frame allocator online");
+    numa::report(console);
 
     // The heap is the allocator's first client: a region is a run of frames, and the frames
     // have to exist before anything can allocate a byte. Its failure is not fatal -- nothing in
@@ -351,7 +357,29 @@ pub fn allocate_frame() -> Option<usize> {
 }
 
 /// Allocate `2^order` contiguous frames, the first of which is aligned to the block.
+///
+/// Which node the block comes from is the zonelist's decision, made here rather than inside the
+/// allocator: the local node first, then the rest in the order [`numa`] computed. This machine
+/// has one node, so the walk is one iteration -- and it is a walk, so a machine with more nodes
+/// needs a per-node allocator behind [`numa::allocate_from`], not a different allocation path.
 pub fn allocate_frames(order: usize) -> Option<usize> {
+    for (node, usable) in numa::zones().iter() {
+        if !usable {
+            continue;
+        }
+        if let Some(frame) = numa::allocate_from(node, order) {
+            return Some(frame);
+        }
+    }
+    None
+}
+
+/// Allocate `2^order` contiguous frames from the machine's only allocator.
+///
+/// The node layer's leaf: one buddy allocator and one magazine in front of it. When a second
+/// node gets its own allocator, this becomes the per-node body and the zonelist walk above
+/// keeps its shape.
+pub fn allocate_frames_from_local(order: usize) -> Option<usize> {
     let mut store = DirectMapStore::new();
     // SAFETY: the frame allocator runs on the boot processor. The timer interrupt is the
     // only other code that can run, and its handler allocates nothing and touches no part of

@@ -99,8 +99,9 @@ pull request, so the evidence can be read rather than trusted.
 - Tests: T1 buddy allocator + VAD tree property tests (split/coalesce invariants,
   fragmentation bounds, overlap rejection); T2 stress allocation under interrupt load.
 
-M3 is **in progress**. The algorithms are done and host-tested; the parts that need a
-machine to run on are partly wired up.
+M3 is **implemented**. Every M3 assertion has code behind it and a boot-time self test that
+exercises it on the machine; what is left before the milestone can be called done is the
+workflow run that promotes the six `pending-T2` rows to `tested-T2`.
 
 ### M3 progress checkpoint — 2026-10-10
 
@@ -156,13 +157,46 @@ been loading an LDT selector and so had been relying on the identity map still b
 * `kernel/src/mm/phys.rs` (the two windows and the physical-to-pointer conversion) and
   `kernel/src/mm/pool.rs` (the charged pools, not yet wired to the object manager).
 
-Still to do in M3:
+### M3 implementation checkpoint — 2026-10-11
 
-* per-process address spaces over the frame allocator (MM-028, MM-029): a VAD tree per
-  process, page tables built with `KernelTableStore`, and address-space switching;
-* the kernel heap registered as a `GlobalAlloc`, over regions taken from the frame allocator;
-* demand paging, copy-on-write, and the four fault causes from the memory-manager design;
-* NUMA node lists, and the pool accounting wired to the object manager.
+Landed since the checkpoint above, in two steps:
+
+* **the kernel heap** (MM-031). `kernel/src/mm/heap.rs` registers `#[global_allocator]
+  KernelHeap`: up to sixteen regions of 256 KiB to 4 MiB, each a run of frames from the buddy
+  allocator reached through the direct map and managed by the boundary-tagged allocator in
+  `nolx-mm-core::heap`. A request no region can serve adds a region; every region is charged
+  to the nonpaged pool when it is taken, and a request whose alignment is above the heap's own
+  16 bytes is served by over-allocating and recording the region and offset in the words in
+  front of the payload. Critical sections run under `sync::IrqLock`, a spin lock that masks
+  interrupts while it is held, because a timer tick that allocated while the heap lock was
+  held would deadlock a single processor. The self test drives the heap through the language
+  allocator -- a vector that reallocates, a `BTreeMap` across the size-class bins, and a
+  512 KiB request that forces a second region -- and then checks in-use bytes are back to
+  zero and the metadata is intact.
+* **address spaces and the fault path** (MM-028, MM-029, MM-032). `kernel/src/mm/space` holds
+  an `AddressSpace`: a PML4 taken from the frame allocator, the kernel half of the address
+  space shared with the running root (the direct map, the image window, and the recursive slot
+  name the same tables in every space), a VAD tree for the user half, and a commit charge.
+  `resolve` implements the four fault causes from `docs/architecture/03-memory-manager.md` --
+  demand zero of a committed private page, copy on write of a page two spaces share, a
+  refusal for mapped-file ranges until the Cache Manager exists, and stack growth below a
+  grow-down region that coalesces back into the stack's own descriptor -- and refuses an
+  access in no VAD, a write to a page `mprotect` made read-only, and anything in the kernel
+  half. `hal::interrupts` routes vector 14 to it before the fatal report, so a resolvable
+  fault returns to the faulting instruction. Teardown is what makes the accounting provable:
+  the boot self test creates two address spaces, drives all four causes, and then requires the
+  free-frame count and the live page-table count to return to exactly where they started.
+* **pool accounting and the node list** (MM-033, MM-034). `kernel/src/obj/pool.rs` is the
+  executive's view of the three pools -- it reports what the heap and the page tables charged
+  and runs the pool accounting's own check while printing. `crates/nolx-mm-core/src/numa.rs`
+  is the node list and the zonelist rule (local node first, then by ascending distance, ties
+  by identifier), and `kernel/src/mm/numa.rs` builds the machine's one node over the frames
+  the frame map describes; `mm::allocate_frames` now walks that zonelist before it allocates,
+  so the per-node allocators that SRAT parsing will add have one place to plug into.
+
+The six `pending-T2` rows (MM-028, MM-029, MM-031, MM-032, MM-033, MM-034) are asserted by
+`.github/workflows/ci.yml` boot-smoke markers and regexes. They are promoted to `tested-T2`
+when a workflow run on this revision passes, exactly as the four allocator assertions were.
 
 ## M4 — Object Manager and handles
 
