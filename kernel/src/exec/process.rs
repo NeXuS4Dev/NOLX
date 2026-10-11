@@ -56,8 +56,8 @@ impl<'space> Process<'space> {
         address_space: &'space mut Space,
         token: Token,
     ) -> Result<Self, ProcessCreateError> {
-        let (type_index, _) = type_by_name("Process")
-            .ok_or(ProcessCreateError::TypeNotRegistered)?;
+        let (type_index, _) =
+            type_by_name("Process").ok_or(ProcessCreateError::TypeNotRegistered)?;
         let body_size = u32::try_from(size_of::<Self>() - size_of::<ObjectHeader>())
             .map_err(|_| ProcessCreateError::BodyTooLarge)?;
 
@@ -106,10 +106,7 @@ impl<'space> Process<'space> {
     /// This is an inspection operation for the kernel and tests; callers do not receive an
     /// object pointer or bypass the handle's granted access mask.
     pub fn object_for_handle(&self, handle: Handle) -> Result<ObjectId, HandleError> {
-        self.context
-            .handles()
-            .get(handle)
-            .map(|entry| entry.object)
+        self.context.handles().get(handle).map(|entry| entry.object)
     }
 
     /// Open `path` using this process's token and handle table.

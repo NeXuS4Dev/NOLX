@@ -52,8 +52,7 @@ fn create_space(
     // SAFETY: the Executive self test runs once on the boot processor with interrupts
     // disabled. Each static slot is private to this function and is initialized exactly once.
     let place = unsafe { &mut *storage.get() };
-    space::AddressSpace::create_in_place(place)
-        .ok_or(SelftestError::AddressSpaceAllocation)
+    space::AddressSpace::create_in_place(place).ok_or(SelftestError::AddressSpaceAllocation)
 }
 
 /// Exercise the first M5 process-owned resource slice.
@@ -66,8 +65,8 @@ pub(super) fn run(console: &mut dyn HalConsole) -> Result<(), SelftestError> {
     let id_a = ProcessId::new(100);
     let id_b = ProcessId::new(101);
 
-    let mut process_a = Process::new(id_a, None, address_space_a, user_a)
-        .map_err(SelftestError::ProcessCreate)?;
+    let mut process_a =
+        Process::new(id_a, None, address_space_a, user_a).map_err(SelftestError::ProcessCreate)?;
     let mut process_b = Process::new(id_b, Some(id_a), address_space_b, user_b)
         .map_err(SelftestError::ProcessCreate)?;
 
@@ -81,8 +80,7 @@ pub(super) fn run(console: &mut dyn HalConsole) -> Result<(), SelftestError> {
         "two processes were given the same address space",
     )?;
     check(
-        process_a.token().user() == Sid::user(1000)
-            && process_b.token().user() == Sid::user(1001),
+        process_a.token().user() == Sid::user(1000) && process_b.token().user() == Sid::user(1001),
         "a process did not retain its own security token",
     )?;
     check(
@@ -127,13 +125,9 @@ pub(super) fn run(console: &mut dyn HalConsole) -> Result<(), SelftestError> {
         "process B resolved a handle that only exists in process A",
     )?;
 
-    let handle_b = Process::duplicate_handle_into(
-        &process_a,
-        handle_a,
-        &mut process_b,
-        rights::READ,
-    )
-    .map_err(SelftestError::ObjectManager)?;
+    let handle_b =
+        Process::duplicate_handle_into(&process_a, handle_a, &mut process_b, rights::READ)
+            .map_err(SelftestError::ObjectManager)?;
     check(
         handle_a == handle_b,
         "process-local handle values were not independently reusable",
@@ -158,12 +152,8 @@ pub(super) fn run(console: &mut dyn HalConsole) -> Result<(), SelftestError> {
         "a denied open changed a process handle table",
     )?;
 
-    process_a
-        .terminate(0)
-        .map_err(SelftestError::ProcessExit)?;
-    process_b
-        .terminate(1)
-        .map_err(SelftestError::ProcessExit)?;
+    process_a.terminate(0).map_err(SelftestError::ProcessExit)?;
+    process_b.terminate(1).map_err(SelftestError::ProcessExit)?;
     check(
         boot::reference_counts(object) == Ok((1, 0)),
         "process termination did not release every handle reference",
@@ -188,8 +178,7 @@ pub(super) fn run(console: &mut dyn HalConsole) -> Result<(), SelftestError> {
         "a process object header was not released after its final reference",
     )?;
 
-    boot::unbind("\\Device\\ProcessSelftest")
-        .map_err(SelftestError::ObjectManager)?;
+    boot::unbind("\\Device\\ProcessSelftest").map_err(SelftestError::ObjectManager)?;
     check(
         boot::live_objects() == live_before,
         "the process self test leaked an Object Manager object",

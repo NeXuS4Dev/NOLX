@@ -242,17 +242,13 @@ impl<T, const N: usize> HandleTable<T, N> {
     }
 
     /// Iterate over the live handles in slot order, paired with their entries.
-    #[must_use]
     pub fn iter(&self) -> impl Iterator<Item = (Handle, &HandleEntry<T>)> + '_ {
-        self.slots
-            .iter()
-            .enumerate()
-            .filter_map(|(slot, entry)| {
-                entry
-                    .entry
-                    .as_ref()
-                    .map(|value| (Handle::encode(slot, entry.generation), value))
-            })
+        self.slots.iter().enumerate().filter_map(|(slot, entry)| {
+            entry
+                .entry
+                .as_ref()
+                .map(|value| (Handle::encode(slot, entry.generation), value))
+        })
     }
 
     /// Duplicate `source` (a handle in this table) into `target`, following

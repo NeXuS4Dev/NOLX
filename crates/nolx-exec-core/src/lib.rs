@@ -146,12 +146,8 @@ mod tests {
 
     #[test]
     fn every_process_has_an_independent_handle_table() {
-        let mut first = ProcessContext::<u32, u16, 2>::new(
-            ProcessId::new(1),
-            None,
-            0x1000,
-            token(1000),
-        );
+        let mut first =
+            ProcessContext::<u32, u16, 2>::new(ProcessId::new(1), None, 0x1000, token(1000));
         let mut second = ProcessContext::<u32, u16, 2>::new(
             ProcessId::new(2),
             Some(ProcessId::new(1)),
@@ -169,12 +165,8 @@ mod tests {
         assert_eq!(first.handles().len(), 1);
         assert_eq!(second.handles().len(), 1);
 
-        let unrelated = ProcessContext::<u32, u16, 2>::new(
-            ProcessId::new(3),
-            None,
-            0x3000,
-            token(1002),
-        );
+        let unrelated =
+            ProcessContext::<u32, u16, 2>::new(ProcessId::new(3), None, 0x3000, token(1002));
         assert_eq!(
             unrelated.handles().get(first_handle),
             Err(HandleError::Invalid)

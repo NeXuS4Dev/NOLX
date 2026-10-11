@@ -4,8 +4,8 @@
 //! handle table, and the security token that governs object opens. The scheduler and thread
 //! dispatcher build on that process resource boundary.
 
-mod selftest;
 pub mod process;
+mod selftest;
 
 pub use nolx_exec_core::ProcessId;
 pub use process::{Process, ProcessCreateError, ProcessExitError, PROCESS_HANDLE_TABLE_ENTRIES};
