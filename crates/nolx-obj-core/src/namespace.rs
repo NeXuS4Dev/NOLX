@@ -361,10 +361,7 @@ mod tests {
             );
         }
         let long = "x".repeat(NAME_MAX + 1);
-        assert_eq!(
-            ns.create_directory("\\", &long),
-            Err(NsError::InvalidName)
-        );
+        assert_eq!(ns.create_directory("\\", &long), Err(NsError::InvalidName));
         let max = "x".repeat(NAME_MAX);
         assert!(ns.create_directory("\\", &max).is_ok());
     }

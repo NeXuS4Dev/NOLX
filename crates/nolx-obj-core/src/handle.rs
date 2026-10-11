@@ -136,7 +136,10 @@ impl<T, const N: usize> HandleTable<T, N> {
     /// first call to any constructor reports it.
     #[must_use]
     pub fn new() -> Self {
-        assert!(N <= MAX_ENTRIES, "handle table larger than the handle format allows");
+        assert!(
+            N <= MAX_ENTRIES,
+            "handle table larger than the handle format allows"
+        );
         Self {
             slots: core::array::from_fn(|_| Slot {
                 generation: 1,
@@ -363,9 +366,15 @@ mod tests {
         // Low bits set.
         assert_eq!(table.get(Handle::from_raw(0x5)), Err(HandleError::Invalid));
         // Slot field zero with a generation set.
-        assert_eq!(table.get(Handle::from_raw(0x0001_0000)), Err(HandleError::Invalid));
+        assert_eq!(
+            table.get(Handle::from_raw(0x0001_0000)),
+            Err(HandleError::Invalid)
+        );
         // Slot past capacity.
-        assert_eq!(table.get(Handle::from_raw(0x0001_0040)), Err(HandleError::Invalid));
+        assert_eq!(
+            table.get(Handle::from_raw(0x0001_0040)),
+            Err(HandleError::Invalid)
+        );
     }
 
     #[test]
@@ -518,7 +527,10 @@ mod tests {
         let mut child: HandleTable<u32, 1> = HandleTable::new();
         parent.insert(1, FULL, true).unwrap();
         parent.insert(2, FULL, true).unwrap();
-        assert_eq!(parent.inherit_into(&mut child, |&o| o), Err(HandleError::TableFull));
+        assert_eq!(
+            parent.inherit_into(&mut child, |&o| o),
+            Err(HandleError::TableFull)
+        );
     }
 
     #[test]
