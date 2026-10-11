@@ -3,7 +3,7 @@
 //! The memory manager owns the three pools and the code that consumes memory charges them:
 //! page tables in [`crate::mm::tables`], heap regions in [`crate::mm::heap`]. This module is the
 //! executive's view of the same numbers -- the surface a system-information query or a quota
-//! object will read, and the place M4 charges an object body when it allocates one.
+//! object will read. Object-body charging is deferred until the Object Manager allocates bodies.
 //!
 //! Reporting it is not decoration. The numbers in the boot log are the evidence that the
 //! charging sites reached the accounting at all: a pool that nothing charges is a limit that

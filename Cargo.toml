@@ -5,6 +5,7 @@ members = [
     "crates/nolx-hal-core",
     "crates/nolx-mm-core",
     "crates/nolx-obj-core",
+    "crates/nolx-exec-core",
     "crates/nolx-syscall",
     "crates/nolxfs",
     "crates/nolx-vfs",
@@ -12,13 +13,14 @@ members = [
     "tools/mkfs-nolxfs",
 ]
 # `cargo test` with no `-p` and no `--workspace` uses these. The kernel is deliberately
-# excluded: it is a `no_std` binary with no host test harness, and its testable HAL and
-# memory-management layouts live in `nolx-hal-core` and `nolx-mm-core`.
+# excluded: it is a `no_std` binary with no host test harness, and its testable HAL,
+# memory-management, Object Manager, and process-context rules live in separate core crates.
 default-members = [
     "crates/nolx-types",
     "crates/nolx-hal-core",
     "crates/nolx-mm-core",
     "crates/nolx-obj-core",
+    "crates/nolx-exec-core",
     "crates/nolx-syscall",
     "crates/nolxfs",
     "crates/nolx-vfs",

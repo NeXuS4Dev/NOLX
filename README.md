@@ -37,6 +37,7 @@ resolved in one place only: `kernel/src/psx/` (see
 | `kernel/` | The kernel: HAL, executive, POSIX subsystem (`no_std` binary) |
 | `crates/nolx-types/` | POSIX scalar types, `errno`, syscall numbers — kernel/user shared |
 | `crates/nolx-hal-core/` | Host-testable HAL console contract, ACPI/APIC parsing and arithmetic, x86-64 descriptors, PIC vectors, RTC decoding, and clock primitives |
+| `crates/nolx-exec-core/` | Host-testable process context: identity, address-space association, token, and per-process handle table |
 | `crates/nolx-syscall/` | The user↔kernel ABI: register mapping, marshalling, dispatch table |
 | `crates/nolxfs/` | NOLXFS on-disk format, Fletcher-64, B-tree, mkfs/fsck logic |
 | `crates/nolx-vfs/` | Pathname resolution, mount table, descriptor table |
@@ -71,8 +72,9 @@ Milestone tracking lives in [ROADMAP.md](ROADMAP.md). Current state:
 | M1 — Boot layer: Multiboot → long mode → kernel entry | **done** — boot layer machine-verified, kernel entry reached under QEMU |
 | M2 — HAL: console, GDT, IDT, PIC/APIC, timer | **done** — ACPI/HPET discovery, xAPIC/x2APIC, I/O APIC routing, TPR/EOI, calibrated LAPIC/TSC-deadline paths with PIC/PIT fallback; every HAL T2 assertion now has a passing QEMU run |
 | M3 — Physical/virtual memory, kernel heap | **implemented** — frame map with kernel reservations, buddy allocator with per-CPU magazines, boot-time stress test under live interrupts, the higher-half switch (image in the top 2 GiB, identity map dropped and verified at boot), a kernel heap registered as `GlobalAlloc` over frame-backed regions, per-process address spaces (VAD tree + page tables over `KernelTableStore` + commit charge), demand paging and copy-on-write resolved by the page-fault path, pool accounting reported through the object manager, and a one-node NUMA list whose zonelist every allocation walks; the remaining step is the CI run that promotes the `pending-T2` rows to `tested-T2` |
-| M4 — Object Manager and handles | **in progress** — generation-checked handle tables and the object namespace in `crates/nolx-obj-core`, host-tested in CI (see ROADMAP M4 checkpoints 1–2); kernel wiring, Security Reference Monitor, and the T2 self test still to come |
-| M5+ | planned |
+| M4 — Object Manager and handles | **implemented, verification pending** — type lifecycle callbacks, generation-checked handle-table primitives, session directories, boundary-protected private namespaces, Security Reference Monitor, host tests, and expanded T2 boot selftests (see ROADMAP M4). Security descriptors and names are out-of-line; per-body quota ownership remains deferred. |
+| M5 — Executive core: processes, threads, dispatcher | **in progress** — first process context owns its handle table, token, and stable address-space association; host and boot selftests pass ([CI verified](https://github.com/NeXuS4Dev/NOLX/actions/runs/38153497878)); threads and dispatcher remain open |
+| M6+ | planned |
 
 ### What has actually been verified
 

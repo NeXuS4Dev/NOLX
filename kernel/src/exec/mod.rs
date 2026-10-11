@@ -1,8 +1,14 @@
 //! Process and thread objects, and the dispatcher.
 //!
-//! M3 skeleton: the object layouts and the priority model, which the POSIX subsystem needs
-//! in order to describe a process at all. The scheduler itself is M5; the model below is
-//! what it will schedule.
+//! M5 starts with process-owned context: an address-space association, an Object Manager
+//! handle table, and the security token that governs object opens. The scheduler and thread
+//! dispatcher build on that process resource boundary.
+
+pub mod process;
+mod selftest;
+
+pub use nolx_exec_core::ProcessId;
+pub use process::{Process, ProcessCreateError, ProcessExitError, PROCESS_HANDLE_TABLE_ENTRIES};
 
 use crate::obj::ObjectHeader;
 use nolx_hal_core::console::HalConsole;
@@ -137,28 +143,11 @@ pub struct Thread {
     /// Scheduling state.
     pub sched: SchedState,
     /// The process this thread belongs to.
-    pub process: u64,
+    pub process: ProcessId,
 }
 
-/// A process object.
-pub struct Process {
-    /// The object header.
-    pub header: ObjectHeader,
-    /// Parent process id.
-    pub parent: u64,
-    /// POSIX process group id, set by `setpgid`.
-    pub pgid: i32,
-    /// POSIX session id, set by `setsid`.
-    pub sid: i32,
-    /// Exit status once terminated, as `waitid` reports it.
-    pub exit_status: i32,
-    /// `true` once the process has exited but has not been reaped. This is the zombie state
-    /// POSIX requires, and it exists because a parent must be able to learn the status
-    /// after the fact.
-    pub zombie: bool,
-}
-
-/// Register the process and thread types and report the priority model.
+/// Register the process and thread types, report the priority model, and self-test M5's
+/// process-owned resource boundary.
 pub fn init(console: &mut dyn HalConsole) {
     let (min, max) = priority_range(Policy::Fifo);
     let _ = writeln!(
@@ -166,4 +155,8 @@ pub fn init(console: &mut dyn HalConsole) {
         "exec: {PRIORITY_LEVELS} priority levels, real-time band from {REALTIME_BASE}, \
          SCHED_FIFO priority range {min}..{max}"
     );
+    if let Err(error) = selftest::run(console) {
+        let _ = writeln!(console, "NOLX: process selftest: FAILED: {error}");
+        panic!("process selftest: {error}");
+    }
 }

@@ -17,6 +17,8 @@
 //! Storage is a fixed array of `N` slots, so the namespace is built before any allocator
 //! exists, the same as the handle table.
 
+use crate::security::{access_check, rights, Decision, SecurityDescriptor, Token};
+
 /// The longest name a node may carry, in bytes.
 pub const NAME_MAX: usize = 32;
 /// The longest path, or symbolic-link target, in bytes.
@@ -51,6 +53,11 @@ pub enum NsError {
     Full,
     /// The operation would remove the root.
     IsRoot,
+    /// The token did not satisfy a private namespace's boundary descriptor.
+    AccessDenied {
+        /// The boundary rights that were not granted.
+        missing: u32,
+    },
 }
 
 /// A fixed-capacity string, so names and targets live inside the namespace's array.
@@ -303,6 +310,22 @@ impl<T, const N: usize> Namespace<T, N> {
         }
     }
 
+    /// Whether `path` resolves to a directory, following symbolic links.
+    ///
+    /// # Errors
+    ///
+    /// Returns the path-resolution error if `path` is malformed or a component is missing.
+    pub fn is_directory(&self, path: &str) -> Result<bool, NsError> {
+        let index = self.resolve(path, 0)?;
+        Ok(matches!(self.node(index)?.kind, Kind::Directory))
+    }
+
+    /// Whether the namespace contains only its root directory.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.nodes.iter().skip(1).all(Option::is_none)
+    }
+
     /// Remove the entry at `path`.
     ///
     /// The final component is *not* followed, so a symbolic link is removed rather than what
@@ -336,11 +359,125 @@ impl<T, const N: usize> Namespace<T, N> {
     }
 }
 
+/// A separately rooted namespace protected by a boundary security descriptor.
+///
+/// Every lookup requires `READ`; creation requires `WRITE`; removal requires `DELETE`. The
+/// namespace has its own fixed-capacity node array, so names in one private namespace never
+/// collide with or resolve into another namespace.
+#[derive(Debug)]
+pub struct PrivateNamespace<T, const N: usize> {
+    boundary: SecurityDescriptor,
+    namespace: Namespace<T, N>,
+}
+
+impl<T, const N: usize> PrivateNamespace<T, N> {
+    /// Create an empty private namespace guarded by `boundary`.
+    #[must_use]
+    pub fn new(boundary: SecurityDescriptor) -> Self {
+        Self {
+            boundary,
+            namespace: Namespace::new(),
+        }
+    }
+
+    fn authorize(&self, token: &Token, desired: u32) -> Result<(), NsError> {
+        match access_check(token, &self.boundary, desired) {
+            Decision::Granted(_) => Ok(()),
+            Decision::Denied { missing } => Err(NsError::AccessDenied { missing }),
+        }
+    }
+
+    /// Create a directory if `token` has write access to the namespace boundary.
+    pub fn create_directory(
+        &mut self,
+        token: &Token,
+        parent: &str,
+        name: &str,
+    ) -> Result<(), NsError> {
+        self.authorize(token, rights::WRITE)?;
+        self.namespace.create_directory(parent, name)
+    }
+
+    /// Bind `object` under `parent` if `token` has write access to the boundary.
+    pub fn insert_object(
+        &mut self,
+        token: &Token,
+        parent: &str,
+        name: &str,
+        object: T,
+    ) -> Result<(), NsError> {
+        self.authorize(token, rights::WRITE)?;
+        self.namespace.insert_object(parent, name, object)
+    }
+
+    /// Create a symbolic link if `token` has write access to the namespace boundary.
+    pub fn create_symlink(
+        &mut self,
+        token: &Token,
+        parent: &str,
+        name: &str,
+        target: &str,
+    ) -> Result<(), NsError> {
+        self.authorize(token, rights::WRITE)?;
+        self.namespace.create_symlink(parent, name, target)
+    }
+
+    /// Look up an object if `token` has read access to the namespace boundary.
+    pub fn lookup(&self, token: &Token, path: &str) -> Result<&T, NsError> {
+        self.authorize(token, rights::READ)?;
+        self.namespace.lookup(path)
+    }
+
+    /// Remove an entry if `token` has delete access to the namespace boundary.
+    pub fn remove(&mut self, token: &Token, path: &str) -> Result<Option<T>, NsError> {
+        self.authorize(token, rights::DELETE)?;
+        self.namespace.remove(path)
+    }
+
+    /// Whether the namespace has no entries beyond its root directory.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.namespace.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     type Ns = Namespace<u32, 16>;
+
+    const ALICE: u32 = 1000;
+    const BOB: u32 = 1001;
+
+    fn boundary() -> SecurityDescriptor {
+        let mut dacl = crate::security::Acl::empty();
+        dacl.push(crate::security::Ace {
+            kind: crate::security::AceKind::Allow,
+            sid: crate::security::Sid::user(ALICE),
+            mask: rights::ALL,
+        })
+        .unwrap();
+        SecurityDescriptor {
+            owner: crate::security::Sid::SYSTEM,
+            dacl: Some(dacl),
+            label: None,
+        }
+    }
+
+    fn alice() -> Token {
+        Token::new(
+            crate::security::Sid::user(ALICE),
+            crate::security::IntegrityLevel::Medium,
+        )
+    }
+
+    fn bob() -> Token {
+        Token::new(
+            crate::security::Sid::user(BOB),
+            crate::security::IntegrityLevel::Medium,
+        )
+    }
 
     fn populated() -> Ns {
         let mut ns = Ns::new();
@@ -505,5 +642,88 @@ mod tests {
         let mut ns: Namespace<u32, 2> = Namespace::new();
         ns.create_directory("\\", "A").unwrap();
         assert_eq!(ns.create_directory("\\", "B"), Err(NsError::Full));
+    }
+
+    #[test]
+    fn directory_queries_follow_links_and_distinguish_objects() {
+        let mut ns = populated();
+        ns.create_symlink("\\", "Devices", "\\Device").unwrap();
+        assert_eq!(ns.is_directory("\\Devices"), Ok(true));
+        assert_eq!(ns.is_directory("\\Device\\Null"), Ok(false));
+        assert_eq!(ns.is_directory("\\Missing"), Err(NsError::NotFound));
+    }
+
+    #[test]
+    fn private_namespaces_are_isolated_for_the_same_path() {
+        let mut first: PrivateNamespace<u32, 8> = PrivateNamespace::new(boundary());
+        let mut second: PrivateNamespace<u32, 8> = PrivateNamespace::new(boundary());
+        let owner = alice();
+        for namespace in [&mut first, &mut second] {
+            namespace.create_directory(&owner, "\\", "Private").unwrap();
+        }
+        first
+            .insert_object(&owner, "\\Private", "Item", 11)
+            .unwrap();
+        second
+            .insert_object(&owner, "\\Private", "Item", 22)
+            .unwrap();
+
+        assert_eq!(first.lookup(&owner, "\\Private\\Item"), Ok(&11));
+        assert_eq!(second.lookup(&owner, "\\Private\\Item"), Ok(&22));
+        assert!(!first.is_empty());
+        assert!(!second.is_empty());
+    }
+
+    #[test]
+    fn private_namespace_symbolic_links_stay_inside_their_root() {
+        let mut namespace: PrivateNamespace<u32, 8> = PrivateNamespace::new(boundary());
+        let owner = alice();
+        let outsider = bob();
+        namespace.create_directory(&owner, "\\", "Private").unwrap();
+        namespace
+            .insert_object(&owner, "\\Private", "Item", 11)
+            .unwrap();
+        namespace
+            .create_symlink(&owner, "\\", "Alias", "\\Private\\Item")
+            .unwrap();
+
+        assert_eq!(namespace.lookup(&owner, "\\Alias"), Ok(&11));
+        assert_eq!(
+            namespace.create_symlink(&outsider, "\\", "Denied", "\\Private\\Item",),
+            Err(NsError::AccessDenied {
+                missing: rights::WRITE
+            })
+        );
+        assert_eq!(namespace.lookup(&owner, "\\Private\\Item"), Ok(&11));
+    }
+
+    #[test]
+    fn private_namespace_boundary_gates_read_write_and_delete() {
+        let mut namespace: PrivateNamespace<u32, 8> = PrivateNamespace::new(boundary());
+        let owner = alice();
+        let outsider = bob();
+        namespace.insert_object(&owner, "\\", "Secret", 7).unwrap();
+
+        assert_eq!(
+            namespace.lookup(&outsider, "\\Secret"),
+            Err(NsError::AccessDenied {
+                missing: rights::READ
+            })
+        );
+        assert_eq!(
+            namespace.insert_object(&outsider, "\\", "Intrusion", 9),
+            Err(NsError::AccessDenied {
+                missing: rights::WRITE
+            })
+        );
+        assert_eq!(
+            namespace.remove(&outsider, "\\Secret"),
+            Err(NsError::AccessDenied {
+                missing: rights::DELETE
+            })
+        );
+        assert_eq!(namespace.lookup(&owner, "\\Secret"), Ok(&7));
+        assert_eq!(namespace.remove(&owner, "\\Secret"), Ok(Some(7)));
+        assert!(namespace.is_empty());
     }
 }

@@ -1,9 +1,10 @@
 //! The Object Manager.
 //!
-//! Every kernel resource is an object with a type, a reference count, an optional name, and
-//! a security descriptor. Files, sockets, processes, threads, timers, ports, and device
-//! nodes all get their lifetime management, security checking, and auditing from here
-//! rather than each implementing its own.
+//! The Object Manager owns object types, reference counts, security checks, auditing, and
+//! namespace bindings. In the boot-stage implementation, descriptors live in a parallel
+//! table and names live on namespace bindings rather than in [`ObjectHeader`]; per-body
+//! quota charging is not wired yet. Files, sockets, processes, threads, timers, ports, and
+//! device nodes share the same lifetime and security rules rather than implementing their own.
 //!
 //! M3 landed the object header layout, the type table, and the pool accounting the executive
 //! reports through [`pool`]. M4 adds the handle tables and the namespace rules in
@@ -17,6 +18,8 @@ use core::sync::atomic::{AtomicI32, AtomicU16, Ordering};
 
 use crate::sync::SyncCell;
 use nolx_hal_core::console::HalConsole;
+use nolx_obj_core::handle::Handle;
+use nolx_obj_core::security::{SecurityDescriptor, Token};
 
 /// The object header, prefixed to every object body.
 ///
@@ -26,7 +29,7 @@ use nolx_hal_core::console::HalConsole;
 pub struct ObjectHeader {
     /// Index into the global object type table.
     pub type_index: AtomicU16,
-    /// [`HeaderFlags`].
+    /// The bitmask described by [`header_flags`].
     pub flags: AtomicU16,
     /// Pointer references held by kernel code.
     pub pointer_count: AtomicI32,
@@ -54,12 +57,36 @@ pub mod header_flags {
     pub const SECURITY_REQUIRED: u16 = 1 << 4;
 }
 
-/// A registered object type.
+/// The object type's create callback. It runs after the header and descriptor are initialized,
+/// but before the object is published in a namespace.
+pub type ObjectCreateCallback =
+    fn(boot::ObjectId, &str, &SecurityDescriptor) -> Result<(), boot::ObjError>;
+/// The object type's open callback. It runs after the security monitor grants access and after
+/// a provisional handle/reference exists; a failure rolls that provisional state back.
+pub type ObjectOpenCallback =
+    fn(boot::ObjectId, &Token, requested: u32, granted: u32) -> Result<(), boot::ObjError>;
+/// The object type's parse callback. It validates a resolved object/path pair after generic
+/// namespace traversal and symbolic-link handling.
+pub type ObjectParseCallback = fn(boot::ObjectId, path: &str) -> Result<(), boot::ObjError>;
+/// The object type's close callback, called for each successfully closed handle.
+pub type ObjectCloseCallback = fn(boot::ObjectId, Handle);
+/// The object type's delete callback, called once when the final reference is released.
+pub type ObjectDeleteCallback = fn(boot::ObjectId);
+
+/// A registered object type and its operation callbacks.
 pub struct ObjectType {
     /// The type's name, for diagnostics and for `\ObjectTypes` in the namespace.
     pub name: &'static str,
+    /// Called before a newly created object is published in a namespace.
+    pub create: Option<ObjectCreateCallback>,
+    /// Called after SRM validation when a provisional handle is installed; errors roll it back.
+    pub open: Option<ObjectOpenCallback>,
+    /// Called after a namespace path resolves to an object of this type.
+    pub parse: Option<ObjectParseCallback>,
+    /// Called when one of the object's handles is closed.
+    pub close: Option<ObjectCloseCallback>,
     /// Called when the last reference goes away.
-    pub delete: Option<fn(*mut u8)>,
+    pub delete: Option<ObjectDeleteCallback>,
     /// Called to validate a requested access mask before a handle is granted.
     pub validate_access: Option<fn(requested: u32) -> bool>,
 }
@@ -83,76 +110,136 @@ static TYPE_COUNT: SyncCell<usize> = SyncCell::new(0);
 static BUILTIN_TYPES: &[ObjectType] = &[
     ObjectType {
         name: "Directory",
+        create: None,
+        open: None,
+        parse: None,
+        close: None,
         delete: None,
         validate_access: None,
     },
     ObjectType {
         name: "SymbolicLink",
+        create: None,
+        open: None,
+        parse: None,
+        close: None,
         delete: None,
         validate_access: None,
     },
     ObjectType {
         name: "File",
+        create: None,
+        open: None,
+        parse: None,
+        close: None,
         delete: None,
         validate_access: None,
     },
     ObjectType {
         name: "Device",
-        delete: None,
-        validate_access: None,
+        create: Some(boot::device_create),
+        open: Some(boot::device_open),
+        parse: Some(boot::device_parse),
+        close: Some(boot::device_close),
+        delete: Some(boot::device_delete),
+        validate_access: Some(boot::device_validate_access),
     },
     ObjectType {
         name: "Driver",
+        create: None,
+        open: None,
+        parse: None,
+        close: None,
         delete: None,
         validate_access: None,
     },
     ObjectType {
         name: "Process",
+        create: None,
+        open: None,
+        parse: None,
+        close: None,
         delete: None,
         validate_access: None,
     },
     ObjectType {
         name: "Thread",
+        create: None,
+        open: None,
+        parse: None,
+        close: None,
         delete: None,
         validate_access: None,
     },
     ObjectType {
         name: "Event",
+        create: None,
+        open: None,
+        parse: None,
+        close: None,
         delete: None,
         validate_access: None,
     },
     ObjectType {
         name: "Mutex",
+        create: None,
+        open: None,
+        parse: None,
+        close: None,
         delete: None,
         validate_access: None,
     },
     ObjectType {
         name: "Semaphore",
+        create: None,
+        open: None,
+        parse: None,
+        close: None,
         delete: None,
         validate_access: None,
     },
     ObjectType {
         name: "Timer",
+        create: None,
+        open: None,
+        parse: None,
+        close: None,
         delete: None,
         validate_access: None,
     },
     ObjectType {
         name: "Port",
+        create: None,
+        open: None,
+        parse: None,
+        close: None,
         delete: None,
         validate_access: None,
     },
     ObjectType {
         name: "Section",
+        create: None,
+        open: None,
+        parse: None,
+        close: None,
         delete: None,
         validate_access: None,
     },
     ObjectType {
         name: "Key",
+        create: None,
+        open: None,
+        parse: None,
+        close: None,
         delete: None,
         validate_access: None,
     },
     ObjectType {
         name: "Token",
+        create: None,
+        open: None,
+        parse: None,
+        close: None,
         delete: None,
         validate_access: None,
     },

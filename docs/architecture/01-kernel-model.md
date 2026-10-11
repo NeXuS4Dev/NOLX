@@ -78,26 +78,32 @@ Rules that are enforced by the type system where possible and by assertions alwa
 ## 3. Executive components
 
 ### Object Manager (`kernel/src/obj`)
-Object headers, object types with callbacks, handle tables, the object namespace, and
-quota charging. Detailed in `02-posix-subsystem.md` §4 and
-[`kernel/src/obj/mod.rs`](../../kernel/src/obj/mod.rs).
+Object headers, object types with lifecycle callbacks, handle tables, the object namespace,
+and the Security Reference Monitor. The boot-stage manager stores descriptors and names
+out-of-line; per-object body quota charging is not implemented yet. Detailed in
+`02-posix-subsystem.md` §4 and [`kernel/src/obj/mod.rs`](../../kernel/src/obj/mod.rs).
 
-Every object body starts with a common header:
+The boot-stage `ObjectHeader` is a 16-byte `repr(C)` prefix:
 
 ```
-+0   type_index      u16      index into the global object-type table
-+2   flags           u16      permanent / exclusive / case-insensitive / audit-on-close
-+4   refcount        i32      pointer references (kernel pointers)
-+8   handle_count    i32      handle references
-+12  body_size       u32
-+16  security_desc   *SECURITY_DESCRIPTOR
-+24  name            *OBJECT_NAME (in the namespace, if named)
-+32  quota_charge    *EPROCESS   process charged for this object
-+40  body            ...       type-specific data
++0   type_index      AtomicU16  index into the global object-type table
++2   flags           AtomicU16  permanent / exclusive / case-insensitive / audit-on-close
++4   pointer_count   AtomicI32  kernel pointer references
++8   handle_count    AtomicI32  handle references
++12  body_size       u32        type-specific body bytes following the header
 ```
+
+The current fixed-pool object manager keeps the security descriptor in the parallel
+`DESCRIPTORS[slot]` table and the optional name in a namespace node that binds the name to an
+object id. Neither is a field in `ObjectHeader`; a name belongs to a binding and can disappear
+while handles keep the object alive. The boot-stage header does not yet carry a quota-owner
+pointer or allocate a contiguous object body (`body_size` is zero for objects in the fixed
+header pool). Those fields belong with object-body allocation and process quota ownership; they
+are not part of the implemented header ABI today. `Process` embeds this header and reports its
+body size, but quota charging is not yet wired to that inline process body.
 
 Refcount rules mirror the executive's: a handle reference implies a pointer reference, so
-`handle_count <= refcount` is an invariant checked on every release.
+`handle_count <= pointer_count` is an invariant checked on every release.
 
 ### Memory Manager (`kernel/src/mm`)
 Physical frames, page tables, VAD trees, pools, commit accounting, working sets, and the
