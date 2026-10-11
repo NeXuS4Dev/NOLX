@@ -35,7 +35,11 @@ const LSR_THRE: u8 = 1 << 5;
 const LSR_TEMT: u8 = 1 << 6;
 
 /// The VGA text-mode framebuffer: 80x25 cells of (character, attribute) at `0xB8000`.
-const VGA_BUFFER: usize = 0x000B_8000;
+/// The text-mode framebuffer's physical address.
+const VGA_BUFFER_PHYS: u64 = 0x000B_8000;
+/// Where the kernel reaches it: the framebuffer is inside the direct map, not at a low
+/// address the kernel could take for a pointer.
+const VGA_BUFFER: usize = crate::mm::phys::direct(VGA_BUFFER_PHYS);
 /// Columns in text mode.
 const VGA_WIDTH: usize = 80;
 /// Rows in text mode.
@@ -175,9 +179,9 @@ impl Console {
             return;
         }
         let offset = (row * VGA_WIDTH + col) * 2;
-        // SAFETY: `VGA_BUFFER` is the text-mode framebuffer, identity mapped by the boot
-        // layer, and `offset` is bounded by the checks above to stay inside the 80x25
-        // region. Volatile writes are required because the device reads this memory.
+        // SAFETY: `VGA_BUFFER` is the text-mode framebuffer reached through the direct
+        // map, and `offset` is bounded by the checks above to stay inside the 80x25 region.
+        // Volatile writes are required because the device reads this memory.
         unsafe {
             let base = VGA_BUFFER as *mut u8;
             core::ptr::write_volatile(base.add(offset), byte);

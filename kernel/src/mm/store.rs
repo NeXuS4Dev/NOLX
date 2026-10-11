@@ -6,12 +6,12 @@
 //! metadata with. Reaching that memory is the one thing the portable crate cannot do, so it
 //! asks through [`BlockStore`]; this module is the kernel's answer.
 //!
-//! The blocks are written through the identity map the boot layer installed, so the managed
-//! range stops at [`MAX_MANAGED_BYTES`] -- the same 2 GiB the boot layer mapped. Frames
-//! above that line are not handed to the allocator at all; the frame map marks them
-//! reserved, and the boot log says how many there are. Guessing would be worse: the
-//! allocator would write a link into an unmapped address and the machine would triple-fault
-//! during a boot that had otherwise already succeeded.
+//! The blocks are written through the direct map, so the managed range stops at
+//! [`MAX_MANAGED_BYTES`] -- the same 2 GiB the direct map covers. Frames above that line are
+//! not handed to the allocator at all; the frame map marks them reserved, and the boot log
+//! says how many there are. Guessing would be worse: the allocator would write a link into
+//! an unmapped address and the machine would triple-fault during a boot that had otherwise
+//! already succeeded.
 //!
 //! One bit per frame records whether that frame heads a free block. It is what makes
 //! [`BlockStore::free_order`] answerable for *any* frame -- allocated, interior to a larger
@@ -31,17 +31,17 @@ const NEXT_WORD: u64 = 0;
 const PREVIOUS_WORD: u64 = 1;
 const ORDER_WORD: u64 = 2;
 
-/// The largest physical address the allocator can write its links to: the boot layer's
-/// identity map covers the first 2 GiB.
+/// The largest physical address the allocator can write its links to: the direct map covers
+/// the first 2 GiB (`mm::phys::DIRECT_MAP_BYTES`).
 pub const MAX_MANAGED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
-/// The first frame the allocator cannot manage, because the identity map does not cover it.
+/// The first frame the allocator cannot manage, because the direct map does not cover it.
 pub const MAX_MANAGED_FRAMES: u64 = MAX_MANAGED_BYTES >> PAGE_SHIFT;
 
 /// The frames that head a free block.
 static FREE_HEADS: SyncCell<[u64; MAX_FRAMES / 64]> = SyncCell::new([0; MAX_FRAMES / 64]);
 
-/// The buddy allocator's storage, backed by physical memory through the identity map.
+/// The buddy allocator's storage, backed by physical memory through the direct map.
 pub struct DirectMapStore;
 
 impl Default for DirectMapStore {
@@ -58,15 +58,19 @@ impl DirectMapStore {
     }
 
     /// The address through which a word of a frame's first page is reached.
+    ///
+    /// Through the direct map. A frame number is a *physical* address divided by the page
+    /// size; after the higher-half switch that is not a pointer, and the allocator is one of
+    /// the first things that writes through one -- as the boot log shows when it is wrong.
     fn address(frame: Frame, word: u64) -> *mut u64 {
-        ((frame << PAGE_SHIFT) + word * 8) as usize as *mut u64
+        crate::mm::phys::direct_ptr::<u64>((frame << PAGE_SHIFT) + word * 8)
     }
 
     /// Read a word of a free block.
     ///
     /// The caller is the buddy allocator, which only passes frames that were handed to it by
     /// [`crate::mm::init`] from the firmware's usable regions. All of them lie below
-    /// [`MAX_MANAGED_BYTES`], so they are mapped by the boot layer's identity map. The read
+    /// [`MAX_MANAGED_BYTES`], so they are mapped by the direct map. The read
     /// is volatile because this memory is otherwise opaque to the kernel: it holds free-list
     /// links, not Rust values.
     fn read_word(frame: Frame, word: u64) -> u64 {

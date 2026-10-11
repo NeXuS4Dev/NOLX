@@ -32,6 +32,7 @@ SHT_SYMTAB = 2
 SHT_NOBITS = 8
 
 PAGE_SIZE = 4096
+HIGHER_HALF_MIN = 0xFFFF800000000000
 
 
 class Fail(Exception):
@@ -101,7 +102,8 @@ class Elf:
              p_align) = struct.unpack_from("<IIQQQQQQ", self.data, off)
             if p_type == 1:  # PT_LOAD
                 out.append(dict(flags=p_flags, offset=p_offset, vaddr=p_vaddr,
-                                filesz=p_filesz, memsz=p_memsz, align=p_align))
+                                paddr=p_paddr, filesz=p_filesz, memsz=p_memsz,
+                                align=p_align))
         return out
 
 
@@ -192,6 +194,28 @@ def main(argv: list[str]) -> int:
             check(end >= edata, f"_end {end:#x} < _edata {edata:#x}")
             ok(f"kludge: load {load_addr:#x}, data ends {edata:#x}, bss ends {end:#x}")
 
+            # A loader that uses these fields copies the image as one flat block: it reads
+            # `load_end_addr - load_addr` bytes starting at
+            # `multiboot-offset - (header_addr - load_addr)` in the file and drops them at
+            # `load_addr` (QEMU's Multiboot loader does exactly this, byte for byte). Every
+            # stored byte must therefore sit at
+            # `file_offset == copy_base + (paddr - load_addr)`, and its physical address must
+            # be below `load_end_addr`; anything else is loaded from, or left as, another
+            # section's bytes. This is the check that pins the section order in linker.ld.
+            copy_base = mb["offset"] - (header_addr - load_addr)
+            stored = [l for l in loads if l["filesz"] > 0]
+            check(bool(stored), "no PT_LOAD segment carries file content")
+            for l in stored:
+                want = copy_base + (l["paddr"] - load_addr)
+                check(l["offset"] == want,
+                      f"segment at {l['paddr']:#x} is at file offset {l['offset']:#x}, "
+                      f"but a flat copy needs {want:#x}")
+                check(l["paddr"] >= load_addr and l["paddr"] + l["filesz"] <= load_end_addr,
+                      f"stored segment {l['paddr']:#x}..{l['paddr'] + l['filesz']:#x} is "
+                      f"outside the copied range {load_addr:#x}..{load_end_addr:#x}")
+            ok(f"stored segments are flat from file offset {copy_base:#x}: "
+               f"file offset = {copy_base:#x} + (load - {load_addr:#x})")
+
         check(entry_addr == elf.e_entry,
               f"entry_addr {entry_addr:#x} != ELF entry {elf.e_entry:#x}")
         ok(f"entry {elf.e_entry:#x}")
@@ -272,12 +296,66 @@ def main(argv: list[str]) -> int:
               "the TSS descriptor slot must be zero at link time; the HAL fills it in")
         ok("TSS slot reserved and zeroed at link time")
 
+        # The trampoline is linked where the loader puts it; the entry point has to be in it.
+        # The Rust kernel is on the other side of the higher-half switch, so the entry point
+        # must not be reachable only after the switch has already happened.
+        boot = elf.section(".boot")
+        check(boot is not None, "no .boot section")
+        assert boot is not None
+        check(boot["addr"] <= elf.e_entry < boot["addr"] + boot["size"],
+              "the entry point is not inside .boot")
+        ok(f".boot at {boot['addr']:#x}, {boot['size']} bytes, contains the entry point")
+
+        image_end_load = elf.symbols.get("_end")
+        check(image_end_load is not None, "_end is not defined by the linker script")
+        assert image_end_load is not None
+
+        # Every higher-half segment must live at the window's fixed offset from where it is
+        # loaded, because the trampoline maps window page i to physical page i. A segment
+        # anywhere else would be reachable only while the identity map still exists.
+        higher = [l for l in loads if l["vaddr"] >= HIGHER_HALF_MIN]
+        check(bool(higher), "no higher-half segment; the image window is not mapped")
+        delta = higher[0]["vaddr"] - higher[0]["paddr"]
+        check(delta % 0x200000 == 0,
+              f"the image window base {delta:#x} is not 2 MiB aligned")
+        for l in higher:
+            check(l["vaddr"] - l["paddr"] == delta,
+                  f"segment at {l['vaddr']:#x} is not at the image window offset")
+
         text = elf.section(".text")
         check(text is not None, "no .text section")
         assert text is not None
-        check(text["addr"] <= elf.e_entry < text["addr"] + text["size"],
-              "the entry point is not inside .text")
-        ok(f".text at {text['addr']:#x}, {text['size']} bytes, contains the entry point")
+        check(text["addr"] >= HIGHER_HALF_MIN,
+              f".text at {text['addr']:#x} is not in the higher half")
+        check(text["addr"] % PAGE_SIZE == 0, ".text is not page aligned")
+        ok(f".text at {text['addr']:#x}, {text['size']} bytes, in the image window")
+
+        # The window has to cover the kernel's whole reserved range -- the loaded image plus
+        # the static arena that follows it -- because both the linker and the trampoline
+        # derive the window from one symbol. `_image_window_pages` counts 2 MiB pages from
+        # the load address; `_kernel_region_phys_end` is the load-address-side end of that
+        # range. A window that is too small would leave part of the kernel unmapped once the
+        # identity map is gone; taking the ceiling is the only way to cover a partial page.
+        window_pages = elf.symbols.get("_image_window_pages")
+        check(window_pages is not None, "_image_window_pages is not defined")
+        assert window_pages is not None
+        region_end = elf.symbols.get("_kernel_region_phys_end")
+        check(region_end is not None, "_kernel_region_phys_end is not defined")
+        assert region_end is not None
+        expected_pages = (region_end + 0x1FFFFF) >> 21
+        check(window_pages == expected_pages,
+              f"_image_window_pages {window_pages} != {expected_pages} "
+              f"for region end {region_end:#x}")
+        check(region_end >= image_end_load,
+              f"_kernel_region_phys_end {region_end:#x} < _end {image_end_load:#x}")
+        image_highest = max(l["paddr"] + l["memsz"] for l in higher)
+        check(image_highest <= region_end,
+              f"a segment ends at {image_highest:#x}, past {region_end:#x}")
+        check(((window_pages - 1) << 21) < region_end,
+              f"_image_window_pages {window_pages} overshoots {region_end:#x} "
+              "by more than one huge page")
+        ok(f"the image window covers {region_end:#x} "
+           f"in {window_pages} huge page(s)")
 
         bss = elf.section(".bss")
         check(bss is not None, "no .bss section")

@@ -2,9 +2,12 @@
 
 use core::ptr;
 
+use crate::mm::phys;
 use nolx_hal_core::acpi::{HpetInfo, Madt, Rsdp, Sdt};
 
-const IDENTITY_MAP_LIMIT: u64 = 0x8000_0000;
+/// How much physical memory the direct map covers. Tables outside it cannot be read, and a
+/// firmware table above the line is reported as absent rather than followed into a fault.
+const DIRECT_MAP_LIMIT: u64 = phys::DIRECT_MAP_BYTES;
 const MAX_SDT_LENGTH: usize = 1024 * 1024;
 const EBDA_POINTER: usize = 0x40E;
 const EBDA_MIN: u64 = 0x400;
@@ -26,9 +29,9 @@ pub struct PlatformTables {
 
 /// Find and validate the platform RSDP, root table, MADT, and optional HPET table.
 ///
-/// Firmware tables outside the current identity-mapped physical window are ignored. The early
-/// kernel has no page allocator yet, so later memory-manager work will replace this restriction
-/// with explicit reserved-memory mappings.
+/// Firmware tables outside the direct map are ignored. The early kernel has no allocator for
+/// a dedicated mapping yet, so later memory-manager work will replace this restriction with
+/// explicit reserved-memory mappings of their own.
 #[must_use]
 pub fn discover() -> Option<PlatformTables> {
     let rsdp = find_rsdp()?;
@@ -77,9 +80,9 @@ pub fn discover() -> Option<PlatformTables> {
 }
 
 fn find_rsdp() -> Option<Rsdp> {
-    // SAFETY: the BIOS Data Area is identity-mapped by the boot page tables and the word at
-    // 0x40E is the architecturally conventional segment address of the EBDA.
-    let ebda_segment = unsafe { ptr::read_volatile(EBDA_POINTER as *const u16) };
+    // SAFETY: the BIOS Data Area is inside the direct map, and the word at 0x40E is the
+    // architecturally conventional segment address of the EBDA.
+    let ebda_segment = unsafe { ptr::read_volatile(phys::direct_ptr::<u16>(EBDA_POINTER as u64)) };
     let ebda_start = u64::from(ebda_segment) << 4;
     if (EBDA_MIN..EBDA_MAX).contains(&ebda_start) {
         let ebda_end = (ebda_start + 1024).min(EBDA_MAX);
@@ -94,9 +97,10 @@ fn find_rsdp_in(start: u64, end: u64) -> Option<Rsdp> {
     let mut address = start.checked_add(15)? & !15;
     while address.checked_add(20)? <= end {
         let available = usize::try_from(end - address).ok()?;
-        // SAFETY: the scan range is a BIOS/EBDA region below 1 MiB, identity-mapped by the
-        // boot trampoline; `available` is bounded by the containing scan range.
-        let bytes = unsafe { core::slice::from_raw_parts(address as *const u8, available) };
+        // SAFETY: the scan range is a BIOS/EBDA region below 1 MiB, which the direct map
+        // covers; `available` is bounded by the containing scan range.
+        let bytes =
+            unsafe { core::slice::from_raw_parts(phys::direct_ptr::<u8>(address), available) };
         if bytes.get(..8) == Some(&b"RSD PTR "[..]) {
             if let Ok(rsdp) = Rsdp::parse(bytes) {
                 return Some(rsdp);
@@ -109,22 +113,22 @@ fn find_rsdp_in(start: u64, end: u64) -> Option<Rsdp> {
 
 fn read_sdt_at(address: u64) -> Option<Sdt<'static>> {
     let header_end = address.checked_add(36)?;
-    if address < 0x1000 || header_end > IDENTITY_MAP_LIMIT {
+    if address < 0x1000 || header_end > DIRECT_MAP_LIMIT {
         return None;
     }
-    // SAFETY: the boot page tables identity-map physical addresses below 2 GiB, and the
-    // checked address includes the complete fixed-width SDT header.
-    let header = unsafe { core::slice::from_raw_parts(address as *const u8, 36) };
+    // SAFETY: the direct map covers physical addresses below 2 GiB, and the checked address
+    // includes the complete fixed-width SDT header.
+    let header = unsafe { core::slice::from_raw_parts(phys::direct_ptr::<u8>(address), 36) };
     let length = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
     if !(36..=MAX_SDT_LENGTH).contains(&length) {
         return None;
     }
     let table_end = address.checked_add(length as u64)?;
-    if table_end > IDENTITY_MAP_LIMIT {
+    if table_end > DIRECT_MAP_LIMIT {
         return None;
     }
-    // SAFETY: the entire declared table was bounded by the identity-mapped physical window;
-    // firmware-owned ACPI tables remain readable for the kernel's lifetime.
-    let bytes = unsafe { core::slice::from_raw_parts(address as *const u8, length) };
+    // SAFETY: the entire declared table was bounded by the direct map's window; firmware-owned
+    // ACPI tables remain readable through it for the kernel's lifetime.
+    let bytes = unsafe { core::slice::from_raw_parts(phys::direct_ptr::<u8>(address), length) };
     Sdt::parse(bytes, None).ok()
 }

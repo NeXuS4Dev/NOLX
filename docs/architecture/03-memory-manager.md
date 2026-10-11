@@ -20,9 +20,31 @@
 0x0000_0000_0000_0000  +----------------------------------+
 ```
 
-Milestone M1/M2 run identity-mapped at physical 1 MiB for simplicity; M3 introduces the
-higher-half mapping above and turns identity mapping off. The Rust kernel is built with a
-target spec that matches whichever model is active, so there is one switch, not two.
+M1/M2 ran identity-mapped at physical 1 MiB. M3 landed the switch: the image is linked at
+`KERNEL_IMAGE_BASE = 0xffff_ffff_8000_0000` -- the top 2 GiB, where the `kernel` code model
+reaches statics with 32-bit sign-extended absolute addressing -- and the boot trampoline
+maps it there in PML4 slot 511 before entering long mode. The direct map covers the first
+2 GiB of RAM at `DIRECT_MAP_BASE = 0xffff_8000_0000_0000` (PML4 slot 256), and the standard
+LAPIC and HPET MMIO windows are mapped through the same tables with caching disabled, so
+they stay reachable after the identity map is gone. Slot 510 is reserved for the debugger's
+recursive mapping.
+
+The kernel builds its own GDT, IDT, and stack in the image window during `hal::init`, and
+then drops the boot identity map (`mm::tables::drop_identity_map`, the first thing
+`nolx_kernel_main` does after the HAL is up). Dropping it is verified rather than assumed:
+the switch reports how many PML4 entries went away and probes three addresses -- one that
+must still translate (a frame through the direct map), one in the image window, and one low
+physical address that must now fault -- and the boot refuses to continue if any answer is
+wrong. A physical address and a pointer are different numbers from that point on, which is
+the property the rest of the memory manager is written against: every physical address
+becomes a pointer through `mm::phys` and nowhere else.
+
+The image layout is a flat-copy contract, not just a link-time one: a Multiboot loader that
+uses the a.out kludge fields copies the image as one block, so every section with file
+content sits at `file_offset = copy_base + (load_address - load_address_base)` and every
+section after `_edata` is a NOBITS hole the loader zeroes. `scripts/verify-multiboot.py`
+checks the property on the linked image, which is what keeps the boot layer's page tables
+loadable by a loader that has never heard of ELF segments.
 
 ## Physical frames
 

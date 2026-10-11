@@ -134,11 +134,18 @@ pub fn trigger_page_fault_test() -> ! {
 /// Trigger a #GP with an invalid data-segment selector in the T2 test build.
 #[cfg(feature = "hal-fault-test-gp")]
 pub fn trigger_general_protection_test() -> ! {
-    // SAFETY: selector 0xFFFF names an absent LDT/GDT entry; loading it into DS raises #GP.
-    // This function exists only in the dedicated T2 fault-test image.
+    // Selector 0x40 is GDT entry 8, one past the seven the table holds. The descriptor fetch
+    // lands at `GDTR.base + 0x40`, which is inside the kernel image window -- and that matters:
+    // the processor may perform the descriptor read before it checks the GDT limit, so a
+    // selector whose fetch address is *not* mapped (an LDT selector, say, with no LDT loaded,
+    // which fetches at LDTR.base 0) faults on the read and reports #PF instead. The address
+    // here is read successfully and the limit check is what fails, which is the #GP this
+    // test exists to prove the handler reports.
+    // SAFETY: this function exists only in the dedicated T2 fault-test image. The resulting
+    // #GP must be caught by the installed IDT and terminate in `report_exception`.
     unsafe {
         asm!(
-            "mov ax, 0xffff",
+            "mov ax, 0x40",
             "mov ds, ax",
             out("ax") _,
             options(nostack),

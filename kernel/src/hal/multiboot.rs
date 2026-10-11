@@ -225,7 +225,8 @@ impl MemoryMap {
     #[must_use]
     pub unsafe fn collect(addr: u32, length: u32) -> Self {
         let mut map = Self::empty();
-        let base = addr as *const u8;
+        // The loader wrote a physical address; the kernel reaches it through the direct map.
+        let base = crate::mm::phys::direct_ptr::<u8>(u64::from(addr));
         let mut offset: u32 = 0;
 
         while offset + 24 <= length {

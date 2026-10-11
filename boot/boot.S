@@ -18,10 +18,13 @@
  * The Rust entry point never returns; if it does, we halt with a message rather than
  * falling off the end of the code.
  *
- * Higher-half kernel mapping is deliberately NOT done here. M1 runs identity mapped at
- * 1 MiB; M3 introduces the higher-half mapping in the memory manager, where the page
- * tables are real objects rather than assembly constants. See
- * docs/architecture/03-memory-manager.md.
+ * Higher-half kernel mapping happens here, and only here. The boot layer is linked where it
+ * loads (see kernel/linker.ld) and stays reachable by physical address until it is done; the
+ * Rust kernel is linked in the image window at KERNEL_IMAGE_BASE, which this layer maps
+ * before entering long mode. The identity map pml4[0] exists for exactly as long as this
+ * file needs it -- the memory manager clears it as soon as the kernel's own IDT and stack
+ * make it unnecessary, which is what drops the last alias between a physical address and a
+ * pointer. See docs/architecture/03-memory-manager.md.
  */
 
     .set MULTIBOOT_MAGIC,       0x1BADB002
@@ -34,6 +37,13 @@
     .set MULTIBOOT_CHECKSUM,    -(MULTIBOOT_MAGIC + MULTIBOOT_FLAGS)
 
     .set KERNEL_LOAD_ADDR,      0x00100000  /* 1 MiB: above the BIOS data area  */
+    .set KERNEL_IMAGE_BASE,     0xffffffff80000000 /* the image window, linker.ld */
+    .set DIRECT_MAP_BASE,       0xffff800000000000 /* the direct map, linker.ld   */
+    .set PML4_DIRECT_SLOT,      256         /* pml4[256]: direct map of low RAM      */
+    .set PML4_IMAGE_SLOT,       511         /* pml4[511]: the kernel image window    */
+    /* The image window is in the top 2 GiB, which is the *last* PML4 slot, so the window's
+     * page-directory-pointer table is entered by that slot's last entry. */
+    .set PDPT_IMAGE_INDEX,      ((KERNEL_IMAGE_BASE >> 30) & 0x1ff)
 
     .set PAGE_PRESENT,          1 << 0
     .set PAGE_WRITABLE,         1 << 1
@@ -82,7 +92,7 @@ __multiboot_header:
 
 /* ================================================================== messages */
 
-    .section .rodata
+    .section .boot.data, "aw", @progbits
 msg_hello:
     .asciz  "NOLX: boot layer entered (32-bit protected mode)\r\n"
 msg_long_mode:
@@ -122,7 +132,7 @@ msg_exc_tail:
 
 /* ================================================================== 32-bit entry */
 
-    .section .text
+    .section .boot, "ax", @progbits
     .code32
     .globl __start32
     .type  __start32, @function
@@ -138,14 +148,10 @@ __start32:
     movl    %ebx, mb_info_phys
     movl    %eax, mb_magic
 
-    /* --- zero BSS: the page tables and the boot stack live there. */
-    movl    $_sbss, %edi
-    movl    $_ebss, %ecx
-    subl    %edi, %ecx
-    shrl    $2, %ecx
-    xorl    %eax, %eax
-    rep stosl
-
+    /* --- the boot layer's zero-initialised state (page tables, early IDT, boot stack)
+     * needs no clearing here: it is stored as zeros in the image rather than as a NOBITS
+     * hole, because the Multiboot a.out kludge copies the image as one flat block. The Rust
+     * kernel's own BSS *is* zeroed, later, through the image window. */
     call    serial_init
     movl    $msg_hello, %esi
     call    serial_puts
@@ -181,14 +187,27 @@ __start32:
     testl   $CPUID_FEAT_LM, %edx
     jz      fatal_no_long_mode
 
-    /* --- identity map the first 2 GiB with 2 MiB pages, then add the standard
-     * APIC/HPET MMIO windows. pml4[0] -> pdpt; pdpt[0..1] -> RAM page directories;
-     * pdpt[3] -> a sparse page directory for 0xFEC00000 (IOAPIC/HPET) and
-     * 0xFEE00000 (local APIC). The MMIO huge pages select PAT index 3 (UC). */
+    /* --- build the page tables for both halves of the address space.
+     *
+     *   pml4[0]   -> pdpt        identity: only so this file can keep running while it
+     *                            finishes; the memory manager clears it.
+     *   pml4[256] -> pdpt        the direct map: physical memory at DIRECT_MAP_BASE, the
+     *                            only way the kernel will ever touch a frame.
+     *   pml4[511] -> pdpt_image  the image window: the kernel image at KERNEL_IMAGE_BASE,
+     *                            in the top 2 GiB, the range the kernel code model reaches
+     *                            with 32-bit sign-extended addressing.
+     *
+     * The identity and direct-map slots share one page-directory-pointer table because they
+     * describe the same physical memory at two bases: pdpt[0..1] cover 0..2 GiB of RAM with
+     * 2 MiB pages and pdpt[3] covers the standard APIC/HPET MMIO windows, uncached. */
     movl    $pml4, %edi
     movl    $pdpt, %eax
     orl     $PAGE_TABLE_FLAGS, %eax
-    movl    %eax, (%edi)
+    movl    %eax, (%edi)                        /* pml4[0]   = identity (temporary)  */
+    movl    %eax, (PML4_DIRECT_SLOT * 8)(%edi)  /* pml4[256] = direct map (permanent) */
+    movl    $pdpt_image, %eax
+    orl     $PAGE_TABLE_FLAGS, %eax
+    movl    %eax, (PML4_IMAGE_SLOT * 8)(%edi)   /* pml4[511] = image window          */
 
     movl    $pdpt, %edi
     movl    $pd0, %eax
@@ -201,9 +220,28 @@ __start32:
     orl     $PAGE_TABLE_FLAGS, %eax
     movl    %eax, 24(%edi)
 
+    movl    $pdpt_image, %edi
+    movl    $pd_image, %eax
+    orl     $PAGE_TABLE_FLAGS, %eax
+    movl    %eax, (PDPT_IMAGE_INDEX * 8)(%edi)
+
     movl    $pd0, %edi
     xorl    %eax, %eax              /* physical address of the next 2 MiB page */
     movl    $1024, %ecx             /* 2 page directories x 512 entries        */
+1:  movl    %eax, (%edi)
+    orl     $PAGE_HUGE_FLAGS, (%edi)
+    movl    $0, 4(%edi)
+    addl    $0x200000, %eax
+    addl    $8, %edi
+    loop    1b
+
+    /* pd_image maps the image window onto the image's own frames: physical page i is
+     * KERNEL_IMAGE_BASE + i * 2 MiB. The count comes from the linker's `_end`, so the
+     * window is exactly as large as the image -- no more physical memory is reachable by a
+     * second name than the image occupies. */
+    movl    $pd_image, %edi
+    xorl    %eax, %eax
+    movl    $_image_window_pages, %ecx
 1:  movl    %eax, (%edi)
     orl     $PAGE_HUGE_FLAGS, (%edi)
     movl    $0, 4(%edi)
@@ -272,6 +310,20 @@ long_mode_entry:
 
     movabsq $boot_stack_top, %rsp
     andq    $-16, %rsp
+
+    /* --- zero the Rust kernel's BSS through the image window.
+     *
+     * The Multiboot a.out kludge tells the loader to zero this range, and a compliant loader
+     * does. The frame map is built in this BSS and every frame in the machine is described
+     * by it, so a loader that got it wrong would hand out frames it had not accounted for;
+     * the trampoline does not take that on trust. This runs before anything reads a static.
+     */
+    movabsq $_sbss, %rdi
+    movabsq $_ebss, %rcx
+    subq    %rdi, %rcx
+    shrq    $3, %rcx
+    xorl    %eax, %eax
+    rep stosq
 
     /* Zero the general purpose registers so nothing leaks into the first backtrace. */
     xorl    %eax, %eax
@@ -354,16 +406,21 @@ long_mode_entry:
      *    call is going into memory the loader never wrote, which no amount of
      *    reasoning about the entry point would have revealed.
      * 3. `nolx_probe` prints from Rust through the same COM1 the boot layer uses.
+     *
+     * Rust lives in the image window, above the 32-bit address range this file is linked
+     * in, so each call is built as an absolute 64-bit address loaded into a register: a
+     * relative call cannot reach from 1 MiB to the kernel half.
      */
     movl    $msg_probe0, %esi
     call    serial_puts64
-    call    nolx_probe0
+    movabsq $nolx_probe0, %rax
+    call    *%rax
     movl    $msg_probe0_back, %esi
     call    serial_puts64
 
     movl    $msg_probe_bytes, %esi
     call    serial_puts64
-    leaq    nolx_probe(%rip), %r12
+    movabsq $nolx_probe, %r12
     movl    $16, %r13d
 1:  movzbq  (%r12), %r8
     call    serial_puthex8
@@ -375,17 +432,36 @@ long_mode_entry:
 
     movl    $msg_probe_at, %esi
     call    serial_puts64
-    leaq    nolx_probe(%rip), %r8
+    movabsq $nolx_probe, %r8
     call    serial_puthex64
 
-    call    nolx_probe
+    movabsq $nolx_probe, %rax
+    call    *%rax
 
     movl    $msg_probe_back, %esi
     call    serial_puts64
 
+    /*
+     * Hand off to the kernel proper, on the kernel's own stack.
+     *
+     * This is the last thing that runs in this file: the kernel drops the identity map as
+     * soon as its GDT, IDT, and stack are its own, and every instruction after the switch
+     * executes out of the image window. Moving to the kernel stack here rather than in Rust
+     * means the trampoline's stack -- addressed at its low alias -- stops being live at a
+     * point that is visible in one file.
+     *
+     * The information pointer is handed over as the *physical* address the loader wrote down
+     * (`mb_info_phys`), not as a pointer: the kernel turns physical addresses into pointers
+     * through its own map, and the ABI should not pretend two different mappings are one.
+     * `nolx_kernel_main` reads it through the direct map.
+     */
+    movabsq $_kernel_stack_top, %rsp
+    andq    $-16, %rsp
+
     movl    mb_info_phys(%rip), %edi
     movl    mb_magic(%rip), %esi
-    call    nolx_kernel_main
+    movabsq $nolx_kernel_main, %rax
+    call    *%rax
 
     leaq    msg_returned(%rip), %rsi
     call    serial_puts64
@@ -659,7 +735,7 @@ early_exception_common:
 
 /* ================================================================== GDT */
 
-    .section .data
+    .section .boot.data, "aw", @progbits
     .align 8
     .globl gdt64
 gdt64:
@@ -673,7 +749,7 @@ tss_desc_placeholder:
     .quad 0x0000000000000000            /* 0x30 TSS high                  */
 gdt64_end:
 
-    .section .rodata
+    .section .boot.data, "aw", @progbits
     .align 8
     .globl gdt64_ptr
 /*
@@ -691,7 +767,7 @@ gdt64_ptr:
 
 /* ================================================================== boot data */
 
-    .section .data
+    .section .boot.data, "aw", @progbits
     .align 4
     .globl mb_info_phys
 mb_info_phys:
@@ -702,7 +778,7 @@ mb_magic:
 
 /* ================================================================== boot BSS */
 
-    .section .rodata
+    .section .boot.data, "aw", @progbits
     .align 8
     .globl early_idt_ptr
 /* 10-byte pseudo-descriptor: 16-bit limit (size minus one) then the 64-bit base. */
@@ -710,10 +786,10 @@ early_idt_ptr:
     .word   EARLY_IDT_ENTRIES * 16 - 1
     .quad   early_idt
 
-    .section .bss, "aw", @nobits
+    .section .boot.zero, "aw", @progbits
     .align 16
     .globl early_idt
-/* Zeroed and filled at runtime by long_mode_entry, so it needs no initialiser. */
+/* Stored as zeros and filled by long_mode_entry; the loader copies these bytes verbatim. */
 early_idt:
     .space  EARLY_IDT_ENTRIES * 16
 
@@ -732,6 +808,14 @@ pd1:
     .space 4096
     .globl pd3
 pd3:
+    .space 4096
+    /* The image window's tables. One directory-pointer table and one page directory: the
+     * kernel image is a few MiB, so two levels below the PML4 entry are enough. */
+    .globl pdpt_image
+pdpt_image:
+    .space 4096
+    .globl pd_image
+pd_image:
     .space 4096
 
     .align 16

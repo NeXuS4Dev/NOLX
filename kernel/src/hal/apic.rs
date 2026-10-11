@@ -425,9 +425,12 @@ fn read_register(offset: u16) -> u32 {
             unsafe { rdmsr(msr) as u32 }
         }
         MODE_XAPIC => {
-            let address = LOCAL_APIC_BASE.load(Ordering::Relaxed) as usize + usize::from(offset);
-            // SAFETY: initialization validated this address inside the UC xAPIC MMIO window.
-            unsafe { ptr::read_volatile(address as *const u32) }
+            let address = crate::mm::phys::direct_ptr::<u32>(
+                LOCAL_APIC_BASE.load(Ordering::Relaxed) + u64::from(offset),
+            );
+            // SAFETY: initialization validated this address inside the UC xAPIC MMIO window,
+            // which the direct map covers.
+            unsafe { ptr::read_volatile(address) }
         }
         _ => 0,
     }
@@ -444,9 +447,12 @@ fn write_register(offset: u16, value: u32) {
             unsafe { wrmsr(msr, u64::from(value)) };
         }
         MODE_XAPIC => {
-            let address = LOCAL_APIC_BASE.load(Ordering::Relaxed) as usize + usize::from(offset);
-            // SAFETY: initialization validated this address inside the UC xAPIC MMIO window.
-            unsafe { ptr::write_volatile(address as *mut u32, value) };
+            let address = crate::mm::phys::direct_ptr::<u32>(
+                LOCAL_APIC_BASE.load(Ordering::Relaxed) + u64::from(offset),
+            );
+            // SAFETY: initialization validated this address inside the UC xAPIC MMIO window,
+            // which the direct map covers.
+            unsafe { ptr::write_volatile(address, value) };
         }
         _ => {}
     }

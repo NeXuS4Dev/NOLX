@@ -29,12 +29,55 @@ pub const KERNEL_BASE: u64 = 0xffff_8000_0000_0000;
 
 /// Base of the direct map of physical memory.
 ///
-/// Until the higher-half switch lands this is *also* the physical address, because the
-/// boot layer identity-maps the low 2 GiB. The name is the one the layout will keep.
+/// The boot layer maps the first 2 GiB of RAM here before it enters long mode, and every
+/// physical address the kernel computes is turned into a pointer by adding this constant
+/// (`kernel/src/mm/phys.rs`). `DIRECT_MAP_BASE + p` is the same memory as `p` was under the
+/// boot layer's identity map, which is the point: firmware structures keep working across
+/// the switch, and nothing else does.
 pub const DIRECT_MAP_BASE: u64 = KERNEL_BASE;
 
+/// Base of the kernel's image window: the kernel's own frames at `KERNEL_IMAGE_BASE + p`.
+///
+/// The kernel is linked in the top 2 GiB of the address space, `0xffff_ffff_8000_0000` and
+/// up, because that is the range x86-64 code reaches with 32-bit *sign-extended* absolute
+/// addressing -- what the LLVM `kernel` code model assumes, and therefore what lets the
+/// kernel address its own statics without loading an address first. The kernel is built with
+/// that code model (`KERNEL_RUSTFLAGS` in the Makefile) and `kernel/linker.ld` links the image
+/// window here; the two have to agree or every static access is a relink away from an
+/// out-of-range relocation error.
+///
+/// The top 2 GiB is the last PML4 slot, so the image window owns slot 511 and the debugger's
+/// recursive mapping moves down one slot (`RECURSIVE_SLOT`).
+pub const KERNEL_IMAGE_BASE: u64 = 0xffff_ffff_8000_0000;
+
 /// The PML4 slot reserved for the recursive mapping used by the debugger.
-pub const RECURSIVE_SLOT: usize = 511;
+///
+/// The slot above it holds the kernel image window, which cannot share: the top 2 GiB is
+/// inside slot 511, and a recursive mapping needs a whole slot to point at the tables.
+pub const RECURSIVE_SLOT: usize = 510;
+
+/// The layout the boot trampoline and the linker script both assume, checked here rather
+/// than in a test: a kernel linked outside the top 2 GiB does not merely run slowly, it does
+/// not link at all under the `kernel` code model, and the failure would be an out-of-range
+/// relocation rather than a sentence explaining the address-space invariant that broke.
+const _: () = {
+    assert!(
+        KERNEL_IMAGE_BASE >= 0xffff_ffff_8000_0000,
+        "the image window must be inside the top 2 GiB"
+    );
+    assert!(
+        KERNEL_IMAGE_BASE >= KERNEL_BASE,
+        "the image window must be in the kernel half"
+    );
+    assert!(
+        pml4_index(KERNEL_IMAGE_BASE) == RECURSIVE_SLOT + 1,
+        "the image window owns the slot above the debugger's recursive mapping"
+    );
+    assert!(
+        pml4_index(u64::MAX) == RECURSIVE_SLOT + 1,
+        "the whole top 2 GiB must be one PML4 slot"
+    );
+};
 
 /// The number of entries in every table.
 pub const ENTRIES: usize = 512;
@@ -955,9 +998,17 @@ mod tests {
             "the kernel half starts at slot 256"
         );
         assert_eq!(
-            pml4_index(0xffff_ff80_0000_0000),
-            RECURSIVE_SLOT,
-            "the last slot is kept for the debugger's recursive mapping"
+            indices(KERNEL_IMAGE_BASE),
+            [RECURSIVE_SLOT + 1, RECURSIVE_SLOT, 0, 0],
+            "the top 2 GiB is the last PML4 slot, and the image window starts at the \
+             second-to-last 1 GiB entry inside it"
+        );
+        assert_eq!(
+            indices(KERNEL_IMAGE_BASE + 0x4000_0000 - 1),
+            [RECURSIVE_SLOT + 1, RECURSIVE_SLOT, 511, 511],
+            "the last 2 MiB page of the image window's first 4 GiB is still inside its \
+             own PML4 slot: the window can hold 4 GiB of image before it needs a second \
+             page-directory-pointer entry"
         );
     }
 

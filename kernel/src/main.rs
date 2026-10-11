@@ -54,13 +54,19 @@ compile_error!("enable at most one HAL fault-test feature at a time");
 
 /// The kernel entry point, called from `boot/boot.S` in 64-bit long mode.
 ///
+/// `mb_info_physical` is the *physical* address of the loader's information structure, not a
+/// pointer: the trampoline ran in a window where the two were the same number, and this side
+/// of the switch they are not. Everything the kernel reads from firmware goes through the
+/// direct map, and what it hands back is an address in the kernel's own address space.
+///
 /// # Safety
 ///
-/// Called exactly once, with interrupts disabled, on the boot stack. If `magic` is
-/// [`MULTIBOOT_BOOTLOADER_MAGIC`], `mb_info` must point to a valid Multiboot information
-/// structure that remains mapped during the kernel's initial parse.
+/// Called exactly once, with interrupts disabled, on the kernel's own stack, running in the
+/// image window. If `magic` is [`MULTIBOOT_BOOTLOADER_MAGIC`], `mb_info_physical` must point
+/// to a valid Multiboot information structure inside the direct map, and must stay there for
+/// the kernel's initial parse.
 #[no_mangle]
-extern "C" fn nolx_kernel_main(mb_info: *const u8, magic: u32) -> ! {
+extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
     // The very first thing the kernel does is prove it is running. This goes straight to
     // COM1, before any static is read and before the framebuffer is assumed to be mapped.
     hal::console::raw_put_str("NOLX: nolx_kernel_main entered\n");
@@ -76,8 +82,31 @@ extern "C" fn nolx_kernel_main(mb_info: *const u8, magic: u32) -> ! {
     hal::init(&mut console);
     let _ = writeln!(console, "NOLX: hal online");
 
+    // The kernel's own GDT, IDT, and stack are live now, so nothing needs a low address to be
+    // a valid address: drop the boot identity map and confirm what survived. A failed check
+    // is not something to boot through -- continuing would mean running with an address space
+    // whose contents nobody has verified.
+    let switch = mm::tables::drop_identity_map();
+    let _ = writeln!(
+        console,
+        "mm: higher-half switch: image window at {:#x}, dropped {} identity-map PML4 \
+         entry/entries; identity map gone={}, direct map reachable={}, image window \
+         reachable={}",
+        mm::KERNEL_IMAGE_BASE,
+        switch.dropped_entries,
+        !switch.identity_still_reachable,
+        switch.direct_map_reachable,
+        switch.image_reachable
+    );
+    if switch.dropped_entries == 0 || switch.identity_still_reachable {
+        panic!("mm: the boot identity map was not dropped");
+    }
+    if !switch.direct_map_reachable || !switch.image_reachable {
+        panic!("mm: the higher-half switch left the kernel unreachable");
+    }
+
     #[cfg(any(feature = "hal-fault-test-pf", feature = "hal-fault-test-gp"))]
-    let _ = (mb_info, magic);
+    let _ = (mb_info_physical, magic);
 
     #[cfg(feature = "hal-fault-test-pf")]
     hal::interrupts::trigger_page_fault_test();
@@ -87,9 +116,13 @@ extern "C" fn nolx_kernel_main(mb_info: *const u8, magic: u32) -> ! {
     #[cfg(not(any(feature = "hal-fault-test-pf", feature = "hal-fault-test-gp")))]
     {
         if magic == MULTIBOOT_BOOTLOADER_MAGIC {
-            // SAFETY: the boot contract guarantees `mb_info` is valid when the magic
+            // The loader's structure is a physical address inside the direct map; the same
+            // goes for every address it contains, which `BootInfo` hands over unchanged and
+            // its readers convert at the point of use.
+            let structure = mm::phys::direct_ptr::<u8>(mb_info_physical);
+            // SAFETY: the boot contract guarantees the structure is valid when the magic
             // matches. `BootInfo::parse` bounds-checks every field it reads.
-            let info = unsafe { hal::multiboot::BootInfo::parse(mb_info) };
+            let info = unsafe { hal::multiboot::BootInfo::parse(structure) };
             let _ = writeln!(console, "multiboot: {info}");
             mm::init(&mut console, &info);
         } else {

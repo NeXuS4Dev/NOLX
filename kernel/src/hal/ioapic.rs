@@ -352,15 +352,26 @@ fn redirection_register(pin: u32) -> Result<u8, IoApicError> {
 fn ioapic_read(base: u64, register: u8) -> u32 {
     // SAFETY: callers validate `base` against the statically mapped UC I/O APIC window.
     unsafe {
-        ptr::write_volatile(base as usize as *mut u32, u32::from(register));
-        ptr::read_volatile((base as usize + IOAPIC_REGISTER_WINDOW) as *const u32)
+        ptr::write_volatile(
+            crate::mm::phys::direct_ptr::<u32>(base),
+            u32::from(register),
+        );
+        ptr::read_volatile(crate::mm::phys::direct_ptr::<u32>(
+            base + IOAPIC_REGISTER_WINDOW as u64,
+        ))
     }
 }
 
 fn ioapic_write(base: u64, register: u8, value: u32) {
     // SAFETY: callers validate `base` against the statically mapped UC I/O APIC window.
     unsafe {
-        ptr::write_volatile(base as usize as *mut u32, u32::from(register));
-        ptr::write_volatile((base as usize + IOAPIC_REGISTER_WINDOW) as *mut u32, value);
+        ptr::write_volatile(
+            crate::mm::phys::direct_ptr::<u32>(base),
+            u32::from(register),
+        );
+        ptr::write_volatile(
+            crate::mm::phys::direct_ptr::<u32>(base + IOAPIC_REGISTER_WINDOW as u64),
+            value,
+        );
     }
 }
