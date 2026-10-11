@@ -659,9 +659,7 @@ mod tests {
         let mut second: PrivateNamespace<u32, 8> = PrivateNamespace::new(boundary());
         let owner = alice();
         for namespace in [&mut first, &mut second] {
-            namespace
-                .create_directory(&owner, "\\", "Private")
-                .unwrap();
+            namespace.create_directory(&owner, "\\", "Private").unwrap();
         }
         first
             .insert_object(&owner, "\\Private", "Item", 11)
@@ -681,29 +679,17 @@ mod tests {
         let mut namespace: PrivateNamespace<u32, 8> = PrivateNamespace::new(boundary());
         let owner = alice();
         let outsider = bob();
-        namespace
-            .create_directory(&owner, "\\", "Private")
-            .unwrap();
+        namespace.create_directory(&owner, "\\", "Private").unwrap();
         namespace
             .insert_object(&owner, "\\Private", "Item", 11)
             .unwrap();
         namespace
-            .create_symlink(
-                &owner,
-                "\\",
-                "Alias",
-                "\\Private\\Item",
-            )
+            .create_symlink(&owner, "\\", "Alias", "\\Private\\Item")
             .unwrap();
 
         assert_eq!(namespace.lookup(&owner, "\\Alias"), Ok(&11));
         assert_eq!(
-            namespace.create_symlink(
-                &outsider,
-                "\\",
-                "Denied",
-                "\\Private\\Item",
-            ),
+            namespace.create_symlink(&outsider, "\\", "Denied", "\\Private\\Item",),
             Err(NsError::AccessDenied {
                 missing: rights::WRITE
             })
@@ -716,9 +702,7 @@ mod tests {
         let mut namespace: PrivateNamespace<u32, 8> = PrivateNamespace::new(boundary());
         let owner = alice();
         let outsider = bob();
-        namespace
-            .insert_object(&owner, "\\", "Secret", 7)
-            .unwrap();
+        namespace.insert_object(&owner, "\\", "Secret", 7).unwrap();
 
         assert_eq!(
             namespace.lookup(&outsider, "\\Secret"),

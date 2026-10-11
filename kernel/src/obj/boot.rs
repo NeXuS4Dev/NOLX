@@ -68,13 +68,14 @@ struct PrivateNamespaceSlot {
     namespace: Option<PrivateNamespace<ObjectId, PRIVATE_NAMESPACE_NODES>>,
 }
 
-static PRIVATE_NAMESPACES: SyncCell<[PrivateNamespaceSlot; MAX_PRIVATE_NAMESPACES]> =
-    SyncCell::new([const {
+static PRIVATE_NAMESPACES: SyncCell<[PrivateNamespaceSlot; MAX_PRIVATE_NAMESPACES]> = SyncCell::new(
+    [const {
         PrivateNamespaceSlot {
             generation: 0,
             namespace: None,
         }
-    }; MAX_PRIVATE_NAMESPACES]);
+    }; MAX_PRIVATE_NAMESPACES],
+);
 
 /// The security descriptor of each live object, by slot.
 static DESCRIPTORS: SyncCell<[Option<SecurityDescriptor>; MAX_OBJECTS]> =
@@ -195,9 +196,7 @@ pub(super) fn device_validate_access(requested: u32) -> bool {
 }
 
 fn device_callback_counts() -> [usize; DEVICE_CALLBACK_COUNT] {
-    core::array::from_fn(|index| {
-        DEVICE_CALLBACKS[index].load(Ordering::Relaxed)
-    })
+    core::array::from_fn(|index| DEVICE_CALLBACKS[index].load(Ordering::Relaxed))
 }
 
 /// Run `f` with the root namespace.
@@ -264,11 +263,7 @@ fn record_namespace_access(token: &Token, desired: u32, success: bool) {
     });
 }
 
-fn record_private_namespace_access<T>(
-    token: &Token,
-    desired: u32,
-    result: &Result<T, ObjError>,
-) {
+fn record_private_namespace_access<T>(token: &Token, desired: u32, result: &Result<T, ObjError>) {
     if matches!(result, Err(ObjError::PrivateNamespaceNotFound)) {
         return;
     }
@@ -367,8 +362,9 @@ fn decimal_u32(value: u32, buffer: &mut [u8; 10]) -> Result<&str, ObjError> {
     let mut start = buffer.len();
     loop {
         start -= 1;
-        buffer[start] = b'0' + u8::try_from(value % 10)
-            .map_err(|_| ObjError::Check("session id digit was out of range"))?;
+        buffer[start] = b'0'
+            + u8::try_from(value % 10)
+                .map_err(|_| ObjError::Check("session id digit was out of range"))?;
         value /= 10;
         if value == 0 {
             break;
@@ -423,8 +419,7 @@ pub fn create_private_namespace(
             .enumerate()
             .find(|(_, slot)| slot.namespace.is_none())
             .ok_or(ObjError::NoPrivateNamespaceSlot)?;
-        let slot_index = u8::try_from(index)
-            .map_err(|_| ObjError::NoPrivateNamespaceSlot)?;
+        let slot_index = u8::try_from(index).map_err(|_| ObjError::NoPrivateNamespaceSlot)?;
         let generation = slot.generation.wrapping_add(1).max(1);
         slot.generation = generation;
         slot.namespace = Some(PrivateNamespace::new(boundary));
@@ -527,11 +522,7 @@ pub fn create_private_directory(
     let result = with_private_namespace(namespace_id, |namespace| {
         namespace.create_directory(token, parent, name)
     });
-    record_private_namespace_access(
-        token,
-        rights::WRITE,
-        &result,
-    );
+    record_private_namespace_access(token, rights::WRITE, &result);
     result
 }
 
@@ -546,11 +537,7 @@ pub fn create_private_link(
     let result = with_private_namespace(namespace_id, |namespace| {
         namespace.create_symlink(token, parent, name, target)
     });
-    record_private_namespace_access(
-        token,
-        rights::WRITE,
-        &result,
-    );
+    record_private_namespace_access(token, rights::WRITE, &result);
     result
 }
 
@@ -567,11 +554,7 @@ pub fn create_private_object(
     let result = with_private_namespace(namespace_id, |namespace| {
         namespace.insert_object(token, parent, name, id)
     });
-    record_private_namespace_access(
-        token,
-        rights::WRITE,
-        &result,
-    );
+    record_private_namespace_access(token, rights::WRITE, &result);
     match result {
         Ok(()) => Ok(id),
         Err(error) => {
@@ -598,11 +581,7 @@ pub fn lookup_private(
     let result = with_private_namespace(namespace_id, |namespace| {
         namespace.lookup(token, path).copied()
     });
-    record_private_namespace_access(
-        token,
-        rights::READ,
-        &result,
-    );
+    record_private_namespace_access(token, rights::READ, &result);
     let id = result?;
     parse_object(id, path)?;
     Ok(id)
@@ -633,14 +612,8 @@ pub fn unbind_private(
     token: &Token,
     path: &str,
 ) -> Result<bool, ObjError> {
-    let result = with_private_namespace(namespace_id, |namespace| {
-        namespace.remove(token, path)
-    });
-    record_private_namespace_access(
-        token,
-        rights::DELETE,
-        &result,
-    );
+    let result = with_private_namespace(namespace_id, |namespace| namespace.remove(token, path));
+    record_private_namespace_access(token, rights::DELETE, &result);
     match result? {
         Some(id) => {
             release_pointer(id)?;
@@ -773,8 +746,8 @@ pub fn unbind(path: &str) -> Result<bool, ObjError> {
 
 /// Look up the id bound at `path`, following links and running the type's parse callback.
 pub fn lookup(path: &str) -> Result<ObjectId, ObjError> {
-    let id = with_namespace(|namespace| namespace.lookup(path).copied())
-        .map_err(ObjError::Namespace)?;
+    let id =
+        with_namespace(|namespace| namespace.lookup(path).copied()).map_err(ObjError::Namespace)?;
     parse_object(id, path)?;
     Ok(id)
 }
@@ -913,7 +886,9 @@ pub fn selftest(console: &mut dyn HalConsole) -> Result<(), ObjError> {
 
     check(
         open("\\Device\\Null", &system, &mut first, u32::MAX)
-            == Err(ObjError::UnsupportedAccess { requested: u32::MAX })
+            == Err(ObjError::UnsupportedAccess {
+                requested: u32::MAX,
+            })
             && first.is_empty()
             && reference_counts(id)? == (1, 0),
         "the Device type accepted rights outside its access mask",
@@ -921,7 +896,7 @@ pub fn selftest(console: &mut dyn HalConsole) -> Result<(), ObjError> {
     check(
         open("\\Device\\Null", &system, &mut first, rights::EXECUTE)
             == Err(ObjError::UnsupportedAccess {
-                requested: rights::EXECUTE
+                requested: rights::EXECUTE,
             })
             && first.is_empty()
             && reference_counts(id)? == (1, 0),
@@ -1051,18 +1026,8 @@ pub fn selftest(console: &mut dyn HalConsole) -> Result<(), ObjError> {
     )?;
 
     // Two sessions may bind the same name without sharing an object namespace.
-    let session_zero = create_object(
-        "\\Sessions\\0",
-        "SharedName",
-        "Device",
-        device,
-    )?;
-    let session_one = create_object(
-        "\\Sessions\\1",
-        "SharedName",
-        "Device",
-        device,
-    )?;
+    let session_zero = create_object("\\Sessions\\0", "SharedName", "Device", device)?;
+    let session_one = create_object("\\Sessions\\1", "SharedName", "Device", device)?;
     check(
         session_zero != session_one
             && lookup("\\Sessions\\0\\SharedName")? == session_zero
@@ -1091,18 +1056,8 @@ pub fn selftest(console: &mut dyn HalConsole) -> Result<(), ObjError> {
     let private_one = create_private_namespace(boundary)?;
     let private_two = create_private_namespace(boundary)?;
     let private_audit_before = audit_totals();
-    create_private_directory(
-        private_one,
-        &reader,
-        "\\",
-        "Private",
-    )?;
-    create_private_directory(
-        private_two,
-        &reader,
-        "\\",
-        "Private",
-    )?;
+    create_private_directory(private_one, &reader, "\\", "Private")?;
+    create_private_directory(private_two, &reader, "\\", "Private")?;
     let private_object_one = create_private_object(
         private_one,
         &reader,
@@ -1119,23 +1074,9 @@ pub fn selftest(console: &mut dyn HalConsole) -> Result<(), ObjError> {
         "Device",
         device,
     )?;
-    create_private_link(
-        private_one,
-        &reader,
-        "\\",
-        "Alias",
-        "\\Private\\Shared",
-    )?;
-    let private_lookup_one = lookup_private(
-        private_one,
-        &reader,
-        "\\Private\\Shared",
-    )?;
-    let private_lookup_two = lookup_private(
-        private_two,
-        &reader,
-        "\\Private\\Shared",
-    )?;
+    create_private_link(private_one, &reader, "\\", "Alias", "\\Private\\Shared")?;
+    let private_lookup_one = lookup_private(private_one, &reader, "\\Private\\Shared")?;
+    let private_lookup_two = lookup_private(private_two, &reader, "\\Private\\Shared")?;
     check(
         private_object_one != private_object_two
             && private_lookup_one == private_object_one
@@ -1158,14 +1099,9 @@ pub fn selftest(console: &mut dyn HalConsole) -> Result<(), ObjError> {
             && reference_counts(private_object_one)? == (2, 1),
         "a private namespace open did not own the expected object handle",
     )?;
-    let private_object_one_unbound = unbind_private(
-        private_one,
-        &reader,
-        "\\Private\\Shared",
-    )?;
+    let private_object_one_unbound = unbind_private(private_one, &reader, "\\Private\\Shared")?;
     check(
-        private_object_one_unbound
-            && reference_counts(private_object_one)? == (1, 1),
+        private_object_one_unbound && reference_counts(private_object_one)? == (1, 1),
         "removing a private binding did not leave its open handle alive",
     )?;
     close(&mut private_handles, private_handle)?;
@@ -1173,15 +1109,11 @@ pub fn selftest(console: &mut dyn HalConsole) -> Result<(), ObjError> {
         header_of(private_object_one).is_err(),
         "closing the last private handle did not free its unbound object",
     )?;
-    let boundary_denial = lookup_private(
-        private_one,
-        &refused_user,
-        "\\Private\\Shared",
-    );
+    let boundary_denial = lookup_private(private_one, &refused_user, "\\Private\\Shared");
     check(
         boundary_denial
             == Err(ObjError::Namespace(NsError::AccessDenied {
-                missing: rights::READ
+                missing: rights::READ,
             })),
         "a token outside the private namespace boundary was allowed to look up an object",
     )?;
@@ -1190,11 +1122,7 @@ pub fn selftest(console: &mut dyn HalConsole) -> Result<(), ObjError> {
             == Err(ObjError::Namespace(NsError::DirectoryNotEmpty)),
         "a nonempty private namespace was destroyed",
     )?;
-    let object_two_unbound = unbind_private(
-        private_two,
-        &reader,
-        "\\Private\\Shared",
-    )?;
+    let object_two_unbound = unbind_private(private_two, &reader, "\\Private\\Shared")?;
     check(
         object_two_unbound,
         "a private object binding was not removed",
@@ -1209,14 +1137,9 @@ pub fn selftest(console: &mut dyn HalConsole) -> Result<(), ObjError> {
     destroy_private_namespace(private_one)?;
     destroy_private_namespace(private_two)?;
     let reused_private = create_private_namespace(boundary)?;
-    let stale_lookup = lookup_private(
-        private_one,
-        &reader,
-        "\\Private\\Shared",
-    );
+    let stale_lookup = lookup_private(private_one, &reader, "\\Private\\Shared");
     check(
-        reused_private != private_one
-            && stale_lookup == Err(ObjError::PrivateNamespaceNotFound),
+        reused_private != private_one && stale_lookup == Err(ObjError::PrivateNamespaceNotFound),
         "a stale private namespace id referred to a reused slot",
     )?;
     destroy_private_namespace(reused_private)?;
