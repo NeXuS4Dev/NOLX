@@ -145,6 +145,16 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         // proves the charging sites -- page tables, heap regions -- reached the accounting.
         obj::pool::report(&mut console);
 
+        if let Err(error) = obj::boot::init(&mut console) {
+            panic!("obj: namespace init failed: {error:?}");
+        }
+        // The object manager checks its own reference rules before anything depends on them.
+        // A failure is fatal for the same reason the memory self test's is.
+        if let Err(error) = obj::boot::selftest(&mut console) {
+            let _ = writeln!(console, "NOLX: obj selftest: FAILED: {error:?}");
+            panic!("obj selftest: {error:?}");
+        }
+
         exec::init(&mut console);
         psx::init(&mut console);
         io::init(&mut console);

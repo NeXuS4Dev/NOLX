@@ -41,7 +41,7 @@ ENTRY(__start32)
 
 KERNEL_LOAD_ADDR  = 0x00100000;
 KERNEL_IMAGE_BASE = 0xffffffff80000000;   /* top 2 GiB: PML4 slot 511, see paging.rs */
-KERNEL_STACK_SIZE = 0x10000;
+KERNEL_STACK_SIZE = 0x20000;
 HEAP_ARENA_SIZE   = 16M;                  /* the static kernel heap arena, MM-031 */
 
 SECTIONS

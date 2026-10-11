@@ -20,11 +20,16 @@ version = "0.1.0"
 dependencies = [
  "nolx-hal-core",
  "nolx-mm-core",
+ "nolx-obj-core",
  "nolx-types",
 ]
 
 [[package]]
 name = "nolx-mm-core"
+version = "0.1.0"
+
+[[package]]
+name = "nolx-obj-core"
 version = "0.1.0"
 
 [[package]]

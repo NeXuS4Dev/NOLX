@@ -221,6 +221,61 @@ through a handle.
 - Tests: T1 refcount lifecycle (no leak/no double free under fuzzed open/close),
   handle-table allocation, ACL evaluation vectors.
 
+### M4 implementation checkpoints 1–2 — handle tables and namespace (verified in CI)
+
+Scope agreed for M4: the full outline above (core object plumbing, namespace, Security Reference
+Monitor in M4, T1 + T2 verification, delivered in sub-steps with a checkpoint after each). Draft
+PR: #6.
+
+* **Checkpoint 1, `crates/nolx-obj-core/src/handle.rs`** -- the per-process handle table. Handle
+  values carry a 14-bit slot and a 16-bit generation, so a handle that outlived its entry is
+  rejected instead of naming whatever now occupies the slot. `DuplicateHandle` may narrow access
+  but never widen it; inheritance copies only inheritable entries and keeps the parent's handle
+  values where the child's slot is free; the table is fixed-capacity so handle quotas are a number.
+* **Checkpoint 2, `crates/nolx-obj-core/src/namespace.rs`** -- the object namespace rooted at `\`:
+  directories, object bindings, and symbolic links, with case-sensitive names, strict path
+  validation, link following capped at `MAX_SYMLINK_DEPTH` (cycles fail with `SymlinkLoop`), and
+  removal that refuses non-empty directories and removes a link rather than its target.
+* T1 host tests for every rule above run in CI's `Host tests (cargo test)` job, which passed on
+  the checkpoint 2 head commit. The fmt and clippy job also passes.
+
+### M4 implementation checkpoint 3 — the object manager boots (CI run 38133425376)
+
+`kernel/src/obj/boot.rs` gives the executive real objects: a fixed pool of object headers, the
+root namespace (`\Device`, `\FileSystem`, `\BaseNamedObjects`, `\NOLX`), and handle tables that
+hold object ids. The boot self test drives one object through every reference transition, checks
+each count, and requires the object to be freed exactly when its last reference goes. Its marker,
+`NOLX: obj selftest: 1 object, 2 handles ...`, is asserted by the boot smoke test (OBJ-006).
+
+To make this boot, the kernel stack went from 64 KiB to 128 KiB (`kernel/linker.ld`). The first
+attempt faulted in the address-space self test with the stack pointer deep in `.bss`: the stack sits
+directly below `.bss`, and the self test's frames grew with the extra code. Doubling the stack
+restored the boot. The headroom is not measured yet; a stack high-water mark or guard page is the
+next step to stop guessing.
+
+### M4 implementation checkpoints 4–5 — Security Reference Monitor and T1 (verified in CI)
+
+* **Checkpoint 4, `crates/nolx-obj-core/src/security.rs`** -- SIDs, ACEs, ACLs, tokens (user,
+  groups, privileges, integrity level), and `access_check` (the `SeAccessCheck` equivalent).
+  Mandatory labels refuse write-class rights to a lower-integrity token. Deny entries are checked
+  in order, and a privilege never overrides a deny entry (stricter than NT, by design). Every
+  decision is recorded in a bounded audit log that keeps exact totals past capacity. At boot,
+  `kernel/src/obj/boot.rs` runs ten access cases against a device and a labelled log; the boot
+  marker `NOLX: srm selftest: 10 access checks (6 granted, 4 denied)` is asserted by the boot
+  smoke test (OBJ-010, `tested-T2`).
+* **Checkpoint 5, T1** -- the handle table has a seeded fuzz test (`random_open_close_matches_a_shadow_model`)
+  that runs 20,000 random open, close, and lookup steps against a shadow model. It checks that
+  every closed handle stays dead after its slot is reused. OBJ-007 to OBJ-009 cover ACL
+  evaluation, integrity labels and privileges, and audit totals, all `tested-T1`.
+* **Refcount model, T1** -- `crates/nolx-obj-core/src/refcount.rs` states the pointer and handle
+  count rules without atomics. A seeded fuzz test runs 30,000 random open, close, unbind, and
+  create steps and checks the counts against an oracle after each step. It checks that no object
+  is deleted twice, that none is deleted while a handle or binding still names it, and that
+  `handles <= pointers` holds throughout. The kernel's atomic counts in `kernel/src/obj/mod.rs`
+  follow the same rules, which the boot self test checks.
+* **Still open in M4:** per-process handle tables are owned by M5, and the kernel does not yet
+  use the host model directly.
+
 ## M5 — Executive core: processes, threads, dispatcher
 
 - Process object: address space, handle table, token, job membership, PEB-equivalent.
