@@ -265,8 +265,8 @@ next step to stop guessing.
   smoke test (OBJ-010, `tested-T2`).
 * **Checkpoint 5, T1** -- the handle table has a seeded fuzz test (`random_open_close_matches_a_shadow_model`)
   that runs 20,000 random open, close, and lookup steps against a shadow model. It checks that
-  every closed handle stays dead after its slot is reused. OBJ-007 to OBJ-009 cover the
-  refcount, ACL, and namespace rules as `tested-T1`.
+  every closed handle stays dead after its slot is reused. OBJ-007 to OBJ-009 cover ACL
+  evaluation, integrity labels and privileges, and audit totals, all `tested-T1`.
 * **Still open in M4:** the refcount lifecycle lives in the kernel (`boot.rs`), which host tests
   cannot reach. A host-testable refcount model with a fuzz test is the remaining T1 item. Per-process
   handle tables are owned by M5.
