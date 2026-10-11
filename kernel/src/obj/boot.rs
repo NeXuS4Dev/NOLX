@@ -365,7 +365,8 @@ pub fn selftest(console: &mut dyn HalConsole) -> Result<(), ObjError> {
     let reader = Token::new(Sid::user(1000), IntegrityLevel::Medium);
     let refused_user = Token::new(Sid::user(1001), IntegrityLevel::Medium);
     let backup_operator =
-        Token::new(Sid::user(1002), IntegrityLevel::Medium).with_privileges(privilege::BACKUP);
+        Token::new(Sid::user(1002), IntegrityLevel::Medium)
+            .with_privileges(privilege::BACKUP);
     let low_reader = Token::new(Sid::user(1000), IntegrityLevel::Low);
 
     // The device: the owner is SYSTEM; user 1001 is refused everything before anything else
@@ -494,7 +495,10 @@ pub fn selftest(console: &mut dyn HalConsole) -> Result<(), ObjError> {
     // created again, because part one freed it.
     create_object("\\Device", "Null", "Device", device)?;
     let log_id = create_object("\\Device", "Log", "Device", log)?;
-    check(lookup("\\Device\\Log")? == log_id, "the log object did not bind")?;
+    check(
+        lookup("\\Device\\Log")? == log_id,
+        "the log object did not bind",
+    )?;
 
     let cases: [(&str, Token, u32, bool); 10] = [
         ("\\Device\\Null", reader, READ, true),
