@@ -70,7 +70,7 @@ Milestone tracking lives in [ROADMAP.md](ROADMAP.md). Current state:
 | M0 — Architecture, ABI and on-disk formats frozen | **done** |
 | M1 — Boot layer: Multiboot → long mode → kernel entry | **done** — boot layer machine-verified, kernel entry reached under QEMU |
 | M2 — HAL: console, GDT, IDT, PIC/APIC, timer | **done** — ACPI/HPET discovery, xAPIC/x2APIC, I/O APIC routing, TPR/EOI, calibrated LAPIC/TSC-deadline paths with PIC/PIT fallback; every HAL T2 assertion now has a passing QEMU run |
-| M3 — Physical/virtual memory, kernel heap | **in progress** — frame map with kernel reservations, buddy allocator with per-CPU magazines, boot-time stress test under live interrupts, and the higher-half switch (image in the top 2 GiB, identity map dropped and verified at boot); per-process address spaces, the kernel heap, and demand paging remain |
+| M3 — Physical/virtual memory, kernel heap | **implemented** — frame map with kernel reservations, buddy allocator with per-CPU magazines, boot-time stress test under live interrupts, the higher-half switch (image in the top 2 GiB, identity map dropped and verified at boot), a kernel heap registered as `GlobalAlloc` over frame-backed regions, per-process address spaces (VAD tree + page tables over `KernelTableStore` + commit charge), demand paging and copy-on-write resolved by the page-fault path, pool accounting reported through the object manager, and a one-node NUMA list whose zonelist every allocation walks; the remaining step is the CI run that promotes the `pending-T2` rows to `tested-T2` |
 | M4+ | planned |
 
 ### What has actually been verified
@@ -87,20 +87,44 @@ This repository is honest about which artifacts were executed and which were not
   assembly/linking of the boot layer and all 256 interrupt stubs, Multiboot validation,
   NOLXFS layout tests, and the conformance-database check.
 * **Machine-verified in the development sandbox (2026-10-10):** the memory-management core
-  (`crates/nolx-mm-core`) passes 78 host tests -- buddy split/coalesce and randomized traffic,
+  (`crates/nolx-mm-core`) passes 86 host tests -- buddy split/coalesce and randomized traffic,
   magazine conservation, paging arithmetic and the page-table walker, VAD split/coalesce and
-  randomized model comparison, commit and pool accounting, and heap integrity checks. The
-  kernel's own boot path was rehearsed against the same crate on the host: a simulated
-  512 MiB machine, the same store layout, the same reservations, and 200,000 mixed-order
-  allocations and frees with an audit every 4,096 operations, ending with the free-frame
-  count exactly where it started.
-* **Machine-verified in the development sandbox (2026-10-10):** a Rust 1.88 stable toolchain
-  (rustc, cargo, clippy, rustfmt, and the `x86_64-unknown-none` standard library, assembled
-  from the Rust distribution packages published to this sandbox's package registries) runs
-  `make check` — host tests for every crate — plus `make bootcheck fscheck`, `make kernel`
-  for the freestanding `x86_64-unknown-none` image, `scripts/verify-multiboot.py`,
+  randomized model comparison, commit and pool accounting, heap integrity checks, and the
+  NUMA node list with its zonelist ordering. The kernel's own boot path was rehearsed against
+  the same crate on the host: a simulated 512 MiB machine, the same store layout, the same
+  reservations, and 200,000 mixed-order allocations and frees with an audit every 4,096
+  operations, ending with the free-frame count exactly where it started.
+* **Machine-verified in the development sandbox (2026-10-10, updated 2026-10-11):** a Rust
+  1.88 stable toolchain (rustc, cargo, clippy, rustfmt, and the `x86_64-unknown-none` standard
+  library, assembled from the Rust distribution packages published to this sandbox's package
+  registries) runs `make check` — host tests for every crate — plus `make bootcheck fscheck`,
+  `make kernel` for the freestanding `x86_64-unknown-none` image, `scripts/verify-multiboot.py`,
   `cargo fmt --check`, `cargo clippy -D warnings`, and `scripts/check-unsafe.sh` clean.
-  QEMU is still unavailable here, so boot tests remain CI-only.
+* **Machine-verified in the development sandbox (2026-10-11):** QEMU does run here. The
+  emulator is the npm-distributed `qemu-portable-linux-x64` build (QEMU 11.0.2), launched
+  through a small glibc-2.38 compatibility shim because the sandbox's libc is older than the
+  build's; the kernel boots under it and the boot smoke test's marker list and regexes pass
+  locally, including the new heap, address-space, pool, and NUMA assertions. That is what
+  makes the claims below local rather than CI-only -- and it is why a failure in this area can
+  be reproduced in the sandbox before it is ever pushed.
+* **Machine-verified in the development sandbox (2026-10-11):** the kernel heap (183
+  allocations through the language allocator, a second and third region taken from the frame
+  allocator, every region's metadata intact and the in-use bytes back to zero), and the
+  address-space self test (two address spaces created and torn down; demand-zero faults;
+  copy-on-write proven byte-for-byte across two spaces; a write to an `mprotect(PROT_READ)`
+  page refused rather than copied; guard-page, file-backed, and out-of-address-space refusals;
+  stack growth that coalesces into the stack's own descriptor; and the free-frame and
+  page-table counts returning to exactly where they started -- reported as
+  `NOLX: address space selftest: 2 space(s), 4 VAD(s), 6 fault cause(s) resolved (3
+  demand-zero, 2 copy-on-write, 1 stack growth), 5 refusal(s); 6 page(s) mapped; free frames
+  121253 -> 121253; page tables allocated 0 -> 7, released 0 -> 7; system PTE peak 36 KiB;
+  audit ok`). The pools are reported through
+  the object manager, and the machine's one NUMA node and its zonelist are printed at boot.
+  Running the address-space self test under a stack-pointer probe found the space itself
+  costing more stack than the kernel has: `AddressSpace<256>` is 26 KB, and moving one
+  through a local, an `Option`, and a `teardown(self)` reserved 108,640 bytes of a 64 KiB
+  kernel stack, writing past it into `.bss` silently. The space is now built in place and
+  torn down through a borrow, which puts the same self test at 14,768 bytes of stack.
 * **CI-verified (2026-10-10):** workflow run
   [38086516018](https://github.com/NeXuS4Dev/NOLX/actions/runs/38086516018) on revision
   `dc2d8d1` passed every job: boot layer, NOLXFS layout, host tests, fmt + clippy + unsafe
@@ -108,6 +132,15 @@ This repository is honest about which artifacts were executed and which were not
   asserts every boot marker, checks the wall clock advanced from its RTC anchor, boots the
   `#PF`/`#GP` fault images, and exercises the PIC/PIT fallback with the local APIC hidden.
   The eight HAL assertions that were `pending-T2` are now `tested-T2`.
+* **CI-verified (2026-10-11):** workflow run
+  [38125065287](https://github.com/NeXuS4Dev/NOLX/actions/runs/38125065287) on revision
+  `2e7279b` passed every job. Its boot smoke test asserts the address-space self test's
+  report -- two spaces, four described ranges, six faults resolved across the four causes,
+  five refusals, six pages mapped, the free-frame and page-table counters back where they
+  started, and the system PTE pool charged for every table -- and that run promotes
+  MM-028/029/031/032/033/034 from `pending-T2` to `tested-T2`. Getting there is what the
+  stack fix above is: the first CI run of that revision died on a `#GP` with the stack
+  pointer 54 KiB deep, and QEMU's own exception log is what named the phase.
 * **CI-verified (2026-10-10):** workflow run
   [38088471560](https://github.com/NeXuS4Dev/NOLX/actions/runs/38088471560) on revision
   `a025a42`, all six jobs green. Its boot smoke test asserts the frame allocator's markers

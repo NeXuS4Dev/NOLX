@@ -5,7 +5,7 @@
 //! The layout follows the kernel model in `docs/architecture/01-kernel-model.md`:
 //!
 //! * [`hal`] -- hardware abstraction: console, CPU, firmware hand-off.
-//! * [`mm`] -- physical frames and the kernel address space.
+//! * [`mm`] -- physical frames, the kernel heap, and the kernel address space.
 //! * [`obj`] -- the Object Manager: object headers, types, and the namespace.
 //! * [`exec`] -- process and thread objects and the dispatcher.
 //! * [`psx`] -- the POSIX subsystem, where the standard's semantics live.
@@ -21,6 +21,11 @@
 #![no_main]
 #![deny(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
+
+// The kernel has a heap of its own ([`mm::heap`]) and no `std` above it: `alloc` gives the
+// collections the executive's tables are made of, without pulling in a filesystem, a thread
+// runtime, or a global `stdout` that would have to be dealt with before the console exists.
+extern crate alloc;
 
 pub mod exec;
 pub mod hal;
@@ -136,6 +141,9 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
 
         obj::init(&mut console);
         let _ = writeln!(console, "NOLX: objmgr online");
+        // The executive's view of the pools the memory manager charges. Printing it is what
+        // proves the charging sites -- page tables, heap regions -- reached the accounting.
+        obj::pool::report(&mut console);
 
         exec::init(&mut console);
         psx::init(&mut console);
@@ -186,6 +194,19 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
                 if let Err(message) = mm::selftest::run(&mut console) {
                     let _ = writeln!(console, "NOLX: mm selftest: FAILED: {message}");
                     panic!("mm selftest: {message}");
+                }
+                // The heap is exercised next, through the same allocator the executive uses:
+                // vectors, tree maps, and one request large enough to force a new region.
+                if let Err(message) = mm::heap::selftest(&mut console) {
+                    let _ = writeln!(console, "NOLX: kernel heap selftest: FAILED: {message}");
+                    panic!("kernel heap selftest: {message}");
+                }
+                // And finally the address spaces: page tables built out of frames, the four
+                // fault causes, and the proof that two spaces that share pages give every
+                // frame and every table back.
+                if let Err(message) = mm::space::selftest::run(&mut console) {
+                    let _ = writeln!(console, "NOLX: address space selftest: FAILED: {message}");
+                    panic!("address space selftest: {message}");
                 }
             }
 

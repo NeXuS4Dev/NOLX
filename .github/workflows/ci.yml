@@ -233,10 +233,15 @@ jobs:
             "mm: higher-half switch: image window at 0xffffffff80000000" \
             "NOLX: mm online" \
             "NOLX: frame allocator online" \
+            "mm: numa:" \
+            "obj: pool usage:" \
+            "NOLX: kernel heap online" \
+            "NOLX: kernel heap selftest:" \
             "NOLX: mm selftest: starting" \
             "NOLX: mm selftest: single-frame phase" \
             "NOLX: mm selftest: mixed-order phase" \
             "NOLX: mm selftest: complete" \
+            "NOLX: address space selftest:" \
             "NOLX: objmgr online" \
             "NOLX: init sequence complete, halting the boot processor" \
             "NOLX: timer reached 100 ticks; nominal 100 Hz"
@@ -261,6 +266,38 @@ jobs:
           # and the audit is the evidence that the free lists survived them.
           if ! grep -Eq 'NOLX: mm selftest: complete: [0-9]+ operations, audit ok, ticks=[1-9][0-9]*' build/serial.log; then
             echo "the memory-manager stress test did not complete cleanly under interrupt load"
+            exit 1
+          fi
+          # The heap has to have grown at least one region -- a single 256 KiB region cannot
+          # satisfy the self test's largest request -- and has to have given every byte back.
+          if ! grep -Eq \
+            'NOLX: kernel heap selftest: [0-9]+ allocations, \+[1-9][0-9]* region\(s\) to [0-9]+ KiB, largest free [0-9]+ bytes, in use 0 -> 0 bytes, integrity ok' \
+            build/serial.log; then
+            echo "the kernel heap did not pass its self test"
+            exit 1
+          fi
+          # The node list is the machine's memory described as nodes, and the zonelist is the
+          # order allocations are served in: local first.
+          if ! grep -Eq 'mm: numa: [1-9][0-9]* node\(s\), .*, zonelist \[0\]' build/serial.log; then
+            echo "the NUMA node list was not built"
+            exit 1
+          fi
+          # The pools are charged by the code that consumes memory -- the heap takes the
+          # nonpaged pool, page tables take the system PTE pool -- and the report is the
+          # executive's view of the same numbers.
+          if ! grep -Eq \
+            'obj: pool usage: nonpaged pool [1-9][0-9]* KiB of [0-9]+ MiB \(peak [1-9][0-9]* KiB\);.*accounting ok' \
+            build/serial.log; then
+            echo "the pools were not charged and reported through the object manager"
+            exit 1
+          fi
+          # Demand paging, copy on write, stack growth, and the refusals: the address-space
+          # self test maps pages, resolves faults, and leaves the frame and table counts
+          # exactly where it found them, or it panics.
+          if ! grep -Eq \
+            'NOLX: address space selftest: [2-9][0-9]* space\(s\), [0-9]+ VAD\(s\), [1-9][0-9]* fault cause\(s\) resolved \([1-9][0-9]* demand-zero, [1-9][0-9]* copy-on-write, [1-9][0-9]* stack growth\), [1-9][0-9]* refusal\(s\); [1-9][0-9]* page\(s\) mapped; free frames ([0-9]+) -> \1; page tables allocated ([0-9]+) -> ([0-9]+), released \2 -> \3; system PTE peak [1-9][0-9]* KiB; audit ok' \
+            build/serial.log; then
+            echo "the address-space self test did not complete cleanly"
             exit 1
           fi
           python3 - <<'PY'

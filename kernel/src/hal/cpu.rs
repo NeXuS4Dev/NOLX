@@ -158,3 +158,48 @@ fn write_current_ipl(level: Ipl) {
         );
     }
 }
+
+/// Whether maskable interrupts are enabled on this processor.
+#[must_use]
+pub fn interrupts_enabled() -> bool {
+    let flags: u64;
+    // SAFETY: reading RFLAGS through the stack has no side effects, and `pushfq`/`pop` are
+    // available at every privilege level.
+    unsafe {
+        asm!("pushfq", "pop {}", out(reg) flags, options(nomem));
+    }
+    flags & (1 << 9) != 0
+}
+
+/// Maskable interrupts, disabled for as long as the guard lives.
+///
+/// This is the primitive behind [`crate::sync::IrqLock`]: a critical section that must not be
+/// entered by an interrupt handler runs with IF clear, and the guard restores the flag to
+/// whatever it was -- so a lock taken inside an interrupt handler does not accidentally enable
+/// interrupts on the way out.
+pub struct InterruptGuard {
+    /// Whether IF was set when the guard was taken.
+    enabled: bool,
+}
+
+impl InterruptGuard {
+    /// Disable maskable interrupts, remembering whether they were on.
+    #[must_use]
+    pub fn disable() -> Self {
+        let enabled = interrupts_enabled();
+        // SAFETY: `cli` clears IF. It changes nothing else, and the guard restores the
+        // previous flag when it is dropped.
+        unsafe { asm!("cli", options(nomem, nostack)) }
+        Self { enabled }
+    }
+}
+
+impl Drop for InterruptGuard {
+    fn drop(&mut self) {
+        if self.enabled {
+            // SAFETY: interrupts were enabled when the guard was taken, so restoring IF is
+            // what makes the guard's scope transparent to its caller.
+            unsafe { asm!("sti", options(nomem, nostack)) }
+        }
+    }
+}

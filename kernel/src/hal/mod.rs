@@ -24,12 +24,46 @@ pub mod timer;
 
 use nolx_hal_core::console::HalConsole;
 
+/// `EFER`, the extended feature enable register.
+const MSR_EFER: u32 = 0xC000_0080;
+/// Bit 11 of `EFER`: no-execute page protection is enabled, which is what makes bit 63 of a
+/// page-table entry an NX bit instead of a reserved bit.
+const EFER_NXE: u64 = 1 << 11;
+
+/// Turn on no-execute page protection.
+///
+/// The kernel's page tables mark data pages no-execute, and an x86-64 processor only honours
+/// that bit when `EFER.NXE` is set: without it, bit 63 of a page-table entry is *reserved*, and
+/// the first access to an NX-marked page is a page fault with the reserved-bit error bit set --
+/// a fault that looks like a corrupt page table rather than a missing feature. The boot layer
+/// sets `LME` to enter long mode; NXE is the kernel's own business, and this is the only place
+/// it is enabled.
+///
+/// A processor that does not report NX support is reported rather than silently worked around:
+/// there is no way to map a page that is writable but not executable, and the address-space code
+/// assumes there is.
+fn enable_no_execute(features: &CpuFeatures) {
+    if !features.has_nx() {
+        return;
+    }
+    // SAFETY: EFER is a kernel-mode MSR, this runs on the boot processor before any other
+    // processor exists and before any page table entry sets bit 63, and the write only changes
+    // how that bit is interpreted.
+    unsafe {
+        let efer = rdmsr(MSR_EFER);
+        if efer & EFER_NXE == 0 {
+            wrmsr(MSR_EFER, efer | EFER_NXE);
+        }
+    }
+}
+
 /// Initialize processor state, descriptor tables, firmware discovery, and timer controllers.
 ///
 /// Maskable interrupts remain disabled throughout initialization. The selected timer source is
 /// armed separately after the rest of the kernel's one-time initialization is complete.
 pub fn init(console: &mut dyn HalConsole) {
     let features = cpu::init();
+    enable_no_execute(&features);
     tables::init();
     pic::init();
     timer::init();
@@ -49,6 +83,17 @@ pub fn init(console: &mut dyn HalConsole) {
         features.has_tsc_deadline(),
         cpu::current_cpu_id(),
     );
+    if features.has_nx() {
+        let _ = writeln!(
+            console,
+            "cpu: EFER.NXE enabled; no-execute page mappings are in force"
+        );
+    } else {
+        let _ = writeln!(
+            console,
+            "cpu: WARNING NX is not supported; the kernel cannot mark data pages no-execute"
+        );
+    }
     let _ = writeln!(console, "hal: GDT/TSS loaded; 256-entry IDT installed");
     let _ = writeln!(
         console,

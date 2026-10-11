@@ -45,3 +45,71 @@ impl<T> SyncCell<T> {
         self.inner.get()
     }
 }
+
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use crate::hal::cpu::InterruptGuard;
+
+/// A spin lock that masks interrupts while it is held.
+///
+/// The second of the two boot-time synchronisation primitives, and the one that allocator and
+/// page-table code needs: a lock that is released by a different code path than the one that
+/// took it -- or worse, by an interrupt handler that ran while the lock was held -- is a
+/// deadlock on a single processor. Disabling interrupts for the duration removes that class of
+/// bug entirely.
+///
+/// It does not, by itself, make anything safe on more than one processor: the spin is a real
+/// spin, and a second processor spinning with interrupts off is still spinning. M5 replaces this
+/// with a queued spinlock at `DISPATCH` level; until then the kernel is single-processor by
+/// construction, and the places that use this are the ones that will be rewritten.
+pub struct IrqLock {
+    locked: AtomicBool,
+}
+
+impl Default for IrqLock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IrqLock {
+    /// An unlocked lock, usable in a `static` initialiser.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            locked: AtomicBool::new(false),
+        }
+    }
+
+    /// Acquire the lock with interrupts disabled, returning a guard that releases both.
+    pub fn lock(&self) -> IrqGuard<'_> {
+        let interrupts = InterruptGuard::disable();
+        while self
+            .locked
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            // The holder is another processor (or, in a bug, this one, which would spin here
+            // forever with interrupts off). Let the cache line settle between attempts.
+            core::hint::spin_loop();
+        }
+        IrqGuard {
+            lock: self,
+            _interrupts: interrupts,
+        }
+    }
+}
+
+/// The guard from [`IrqLock::lock`]: releases the lock, then restores interrupts.
+pub struct IrqGuard<'a> {
+    lock: &'a IrqLock,
+    /// Dropped after `lock`: the guard restores IF only once the lock is free. The underscore
+    /// says the field is not read -- its whole purpose is the `Drop` that runs when it goes.
+    _interrupts: InterruptGuard,
+}
+
+impl Drop for IrqGuard<'_> {
+    fn drop(&mut self) {
+        self.lock.locked.store(false, Ordering::Release);
+    }
+}

@@ -5,8 +5,11 @@
 //! nodes all get their lifetime management, security checking, and auditing from here
 //! rather than each implementing its own.
 //!
-//! This module is a skeleton in M3: the object header layout and the type table, which are
-//! the parts everything else depends on. Handle tables and the namespace land in M4.
+//! This module is a skeleton in M3: the object header layout, the type table, which are the
+//! parts everything else depends on, and the pool accounting the executive reports through
+//! [`pool`]. Handle tables and the namespace land in M4.
+
+pub mod pool;
 
 use core::sync::atomic::{AtomicI32, AtomicU16, Ordering};
 
