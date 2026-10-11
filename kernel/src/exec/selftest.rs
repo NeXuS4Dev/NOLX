@@ -4,6 +4,7 @@
 //! access token, and handle table belong to the process rather than global state. Teardown
 //! must close each process's handles and give both address spaces back.
 
+use core::fmt;
 use core::mem::MaybeUninit;
 
 use nolx_hal_core::console::HalConsole;
@@ -38,6 +39,21 @@ pub(super) enum SelftestError {
     Check(&'static str),
 }
 
+impl fmt::Display for SelftestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AddressSpaceAllocation => formatter.write_str("address-space allocation failed"),
+            Self::ProcessCreate(error) => write!(formatter, "process creation failed: {error:?}"),
+            Self::ProcessExit(error) => write!(formatter, "process exit failed: {error:?}"),
+            Self::ObjectManager(error) => {
+                write!(formatter, "Object Manager operation failed: {error:?}")
+            }
+            Self::SecurityAclFull => formatter.write_str("the self-test ACL is full"),
+            Self::Check(message) => write!(formatter, "invariant check failed: {message}"),
+        }
+    }
+}
+
 fn check(condition: bool, message: &'static str) -> Result<(), SelftestError> {
     if condition {
         Ok(())
@@ -46,20 +62,20 @@ fn check(condition: bool, message: &'static str) -> Result<(), SelftestError> {
     }
 }
 
-fn create_space(
-    storage: &'static SyncCell<MaybeUninit<Space>>,
-) -> Result<&'static mut Space, SelftestError> {
-    // SAFETY: the Executive self test runs once on the boot processor with interrupts
-    // disabled. Each static slot is private to this function and is initialized exactly once.
-    let place = unsafe { &mut *storage.get() };
-    space::AddressSpace::create_in_place(place).ok_or(SelftestError::AddressSpaceAllocation)
+fn create_space(storage: &mut MaybeUninit<Space>) -> Result<&mut Space, SelftestError> {
+    space::AddressSpace::create_in_place(storage).ok_or(SelftestError::AddressSpaceAllocation)
 }
 
 /// Exercise the first M5 process-owned resource slice.
 pub(super) fn run(console: &mut dyn HalConsole) -> Result<(), SelftestError> {
     let live_before = boot::live_objects();
-    let address_space_a = create_space(&PROCESS_SPACE_A)?;
-    let address_space_b = create_space(&PROCESS_SPACE_B)?;
+    // SAFETY: the Executive self test runs once on the boot processor with interrupts
+    // disabled. Slot A is private to this function and is initialized exactly once.
+    let place_a = unsafe { &mut *PROCESS_SPACE_A.get() };
+    let address_space_a = create_space(place_a)?;
+    // SAFETY: as for slot A; slot B is distinct static storage, initialized once here.
+    let place_b = unsafe { &mut *PROCESS_SPACE_B.get() };
+    let address_space_b = create_space(place_b)?;
     let user_a = Token::new(Sid::user(1000), IntegrityLevel::Medium);
     let user_b = Token::new(Sid::user(1001), IntegrityLevel::Medium);
     let id_a = ProcessId::new(100);

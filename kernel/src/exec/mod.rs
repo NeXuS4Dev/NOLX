@@ -156,7 +156,7 @@ pub fn init(console: &mut dyn HalConsole) {
          SCHED_FIFO priority range {min}..{max}"
     );
     if let Err(error) = selftest::run(console) {
-        let _ = writeln!(console, "NOLX: process selftest: FAILED: {error:?}");
-        panic!("process selftest: {error:?}");
+        let _ = writeln!(console, "NOLX: process selftest: FAILED: {error}");
+        panic!("process selftest: {error}");
     }
 }

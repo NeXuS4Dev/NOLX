@@ -171,7 +171,7 @@ impl<'space> Process<'space> {
     }
 
     fn with_address_space<R>(&mut self, f: impl FnOnce(&mut Space) -> R) -> R {
-        f(&mut **self.context.address_space_mut())
+        f(self.context.address_space_mut())
     }
 }
 
