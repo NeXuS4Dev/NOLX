@@ -12,18 +12,18 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 |---|---|---|
 | `unimplemented` | 5 | 100.0% |
 | `implemented` | 6 | 95.8% |
-| `tested-T1` | 81 | 84.7% |
-| `pending-T2` | 7 | — |
-| `tested-T2` | 19 | 16.1% |
+| `tested-T1` | 81 | 86.4% |
+| `pending-T2` | 5 | — |
+| `tested-T2` | 21 | 17.8% |
 | `tested-T3` | 0 | 0.0% |
 
-**100 of 118 assertions have a passing automated test; 7 are awaiting T2 results.**
+**102 of 118 assertions have a passing automated test; 5 are awaiting T2 results.**
 
 ## By area
 
 | Area | Assertions | Implemented | Tested (T1) | Pending (T2) | Tested (T2) | Tested (T3) |
 |---|---|---|---|---|---|---|
-| exec | 10 | 10 | 8 | 2 | 0 | 0 |
+| exec | 10 | 10 | 8 | 0 | 2 | 0 |
 | hal | 23 | 23 | 11 | 0 | 8 | 0 |
 | mm | 34 | 34 | 23 | 0 | 11 | 0 |
 | obj | 14 | 14 | 8 | 5 | 0 | 0 |
@@ -50,12 +50,10 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | OBJ-014 | The generic private namespace primitive gates reads, writes, deletes, and symlink creation with its boundary descriptor while preserving symlink resolution within its independent root |
 | FD-005 | XSH dup2: if old and new are equal, nothing is closed and new is returned |
 
-## Pending T2 verification (7)
+## Pending T2 verification (5)
 
 | ID | Specification reference | Configured test |
 |---|---|---|
-| EXE-009 | The boot Executive self-test creates distinct process address spaces, verifies process/thread context and metadata, handle isolation/inheritance, token-checked opens, and complete resource teardown | `.github/workflows/ci.yml` boot-smoke asserts `NOLX: process selftest: 2 processes, 2 address spaces, PEB/job metadata, thread context, isolated/inherited handles, token-checked open/deny, teardown returned resources`. |
-| EXE-010 | Three independent kernel stacks are preempted by timer interrupts and produce the exact interleaved round-robin trace `ABCABCABCABC` | `kernel/src/exec/context_switch.rs` runs three timer-driven workers through the common interrupt-frame epilogue; `.github/workflows/ci.yml` boot-smoke asserts `NOLX: round-robin T2: ABCABCABCABC complete: 3 kernel threads, 12 timer quanta, order verified=true`. |
 | OBJ-006 | An object's references follow the rules: a handle implies a pointer reference, and the object is freed exactly when the last reference goes | `kernel/src/obj/boot.rs` `selftest` drives one object through (1,0) -> (2,1) -> (3,2) -> (2,1) -> (1,1) -> freed, checks each step, and requires the live count to return to its start. Boot marker `NOLX: obj selftest: 1 object, 2 handles` (CI run 38133425376, revision 35728d3, boot smoke green). |
 | OBJ-010 | At boot, `open` enforces the monitor's decisions for a SYSTEM, reader, refused, backup, and low-integrity token against a device and a labelled log, and the audit log agrees with what was asked | `kernel/src/obj/boot.rs` `selftest`, part two. Boot marker `NOLX: srm selftest: 10 access checks (6 granted, 4 denied)`. |
 | OBJ-011 | Object type create/open/parse/close/delete callbacks run at their lifecycle transitions; a type-rejected create or open leaves no header, handle, or reference leak | `kernel/src/obj/mod.rs` registers the Device callbacks and `kernel/src/obj/boot.rs` dispatches them; the selftest forces create/open rejection, checks rollback, and requires every callback count to advance. Boot marker `NOLX: obj type callback selftest: create/open/parse/close/delete invoked`. |
@@ -74,8 +72,8 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | EXE-006 | exec | Per-processor affinity and load balancing respect job CPU masks, and equal-priority job groups receive configurable CPU shares independent of their thread counts | `tested-T1` | `crates/nolx-exec-core/src/scheduler.rs` tests `affinity_and_idle_load_balance_respect_processor_and_numa_constraints`, `job_affinity_is_intersected_with_thread_affinity`, and `equal_priority_jobs_receive_group_shares_independent_of_thread_count`. |
 | EXE-007 | exec | DPC and passive-level system-work queues are fixed-capacity FIFO queues with distinct consumers and bounded draining | `tested-T1` | `crates/nolx-exec-core/src/deferred.rs` tests `dpcs_are_fifo_bounded_and_drained_in_dispatch_sized_batches` and `worker_queue_has_independent_capacity_and_execution_context`. |
 | EXE-008 | exec | Queued locks serialize contenders in ticket order, and push locks permit shared readers while excluding them during exclusive ownership | `tested-T1` | `crates/nolx-exec-core/src/lock.rs` tests `ticket_lock_serializes_contended_updates` and `push_lock_allows_shared_readers_then_excludes_them_for_writer`. |
-| EXE-009 | exec | The boot Executive self-test creates distinct process address spaces, verifies process/thread context and metadata, handle isolation/inheritance, token-checked opens, and complete resource teardown | `pending-T2` | `.github/workflows/ci.yml` boot-smoke asserts `NOLX: process selftest: 2 processes, 2 address spaces, PEB/job metadata, thread context, isolated/inherited handles, token-checked open/deny, teardown returned resources`. |
-| EXE-010 | exec | Three independent kernel stacks are preempted by timer interrupts and produce the exact interleaved round-robin trace `ABCABCABCABC` | `pending-T2` | `kernel/src/exec/context_switch.rs` runs three timer-driven workers through the common interrupt-frame epilogue; `.github/workflows/ci.yml` boot-smoke asserts `NOLX: round-robin T2: ABCABCABCABC complete: 3 kernel threads, 12 timer quanta, order verified=true`. |
+| EXE-009 | exec | The boot Executive self-test creates distinct process address spaces, verifies process/thread context and metadata, handle isolation/inheritance, token-checked opens, and complete resource teardown | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserted `NOLX: process selftest: 2 processes, 2 address spaces, PEB/job metadata, thread context, isolated/inherited handles, token-checked open/deny, teardown returned resources`; workflow [38162270144](https://github.com/NeXuS4Dev/NOLX/actions/runs/38162270144) on revision `650b71c` passed. |
+| EXE-010 | exec | Three independent kernel stacks are preempted by timer interrupts and produce the exact interleaved round-robin trace `ABCABCABCABC` | `tested-T2` | `kernel/src/exec/context_switch.rs` runs three timer-driven workers through the common interrupt-frame epilogue; boot-smoke asserted `NOLX: round-robin T2: ABCABCABCABC complete: 3 kernel threads, 12 timer quanta, order verified=true`; workflow [38162270144](https://github.com/NeXuS4Dev/NOLX/actions/runs/38162270144) on revision `650b71c` passed. |
 | FD-001 | vfs | XSH 2.5.1 Descriptor Tables and Files: the lowest unused descriptor is allocated | `tested-T1` | crates/nolx-vfs fd::tests::lowest_free_descriptor_is_allocated |
 | FD-002 | vfs | XSH 2.5.1 Descriptor Tables and Files: allocating past OPEN_MAX fails with EMFILE | `tested-T1` | crates/nolx-vfs fd::tests::descriptor_limit_is_emfile |
 | FD-003 | vfs | XSH close: closing an invalid descriptor fails with EBADF | `tested-T1` | crates/nolx-vfs fd::tests::closing_an_invalid_descriptor_is_ebadf |

@@ -345,11 +345,15 @@ the serial trace `ABCABCABCABC` plus the exact completion marker. AP startup and
 interrupt/context switching remain outside this BSP proof; SMP queue, affinity, and group-share
 rules are host-tested.
 
-The current T1 host suites, strict Clippy checks, and release kernel build pass locally. The two
-M5 boot assertions are configured as `pending-T2` in `docs/testing/assertions/exec.md`; this
-checkout has no QEMU executable, so the boot result still must be obtained from a passing CI
-workflow on this revision. **M5 is not marked done until that T2 run passes and both assertions
-are recorded as `tested-T2`.**
+The two M5 boot assertions, EXE-009 and EXE-010, are recorded as `tested-T2` in
+`docs/testing/assertions/exec.md`. Workflow [38162270144](https://github.com/NeXuS4Dev/NOLX/actions/runs/38162270144)
+on revision `650b71c` passed all six CI jobs, including host tests, strict Clippy, the kernel
+build, and QEMU boot smoke. The QEMU serial log contains the process self-test marker and the exact trace
+`NOLX: round-robin T2: ABCABCABCABC complete: 3 kernel threads, 12 timer quanta, order verified=true`.
+The conformance dashboard is regenerated from those assertion records.
+
+**M5 is done:** its T1 scheduler/dispatcher contracts pass in CI; the T2 process/thread and
+interleaved-output markers pass in QEMU; and every M5 assertion has a recorded test result.
 
 ## M6 — User mode, ELF, and the syscall ABI
 
