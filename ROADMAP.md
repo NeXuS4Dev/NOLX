@@ -221,28 +221,27 @@ through a handle.
 - Tests: T1 refcount lifecycle (no leak/no double free under fuzzed open/close),
   handle-table allocation, ACL evaluation vectors.
 
-### M4 implementation checkpoint 1 — handle tables (not yet verified)
+### M4 implementation checkpoints 1–2 — handle tables and namespace (verified in CI)
 
 Scope agreed for M4: the full outline above (core object plumbing, namespace, Security Reference
-Monitor in M4, T1 + T2 verification, delivered in sub-steps with a checkpoint after each).
+Monitor in M4, T1 + T2 verification, delivered in sub-steps with a checkpoint after each). Draft
+PR: #6.
 
-Landed in this step:
+* **Checkpoint 1, `crates/nolx-obj-core/src/handle.rs`** -- the per-process handle table. Handle
+  values carry a 14-bit slot and a 16-bit generation, so a handle that outlived its entry is
+  rejected instead of naming whatever now occupies the slot. `DuplicateHandle` may narrow access
+  but never widen it; inheritance copies only inheritable entries and keeps the parent's handle
+  values where the child's slot is free; the table is fixed-capacity so handle quotas are a number.
+* **Checkpoint 2, `crates/nolx-obj-core/src/namespace.rs`** -- the object namespace rooted at `\`:
+  directories, object bindings, and symbolic links, with case-sensitive names, strict path
+  validation, link following capped at `MAX_SYMLINK_DEPTH` (cycles fail with `SymlinkLoop`), and
+  removal that refuses non-empty directories and removes a link rather than its target.
+* T1 host tests for every rule above run in CI's `Host tests (cargo test)` job, which passed on
+  the checkpoint 2 head commit. The fmt and clippy job also passes.
 
-* `crates/nolx-obj-core/src/handle.rs` -- the per-process handle table. Handle values carry a
-  14-bit slot and a 16-bit generation, so a handle that outlived its entry is rejected instead
-  of naming whatever now occupies the slot. `DuplicateHandle` may narrow access but never widen
-  it; inheritance copies only inheritable entries and keeps the parent's handle values where the
-  child's slot is free; the table is fixed-capacity so handle quotas are a number, not a growing
-  allocation.
-* T1 host tests for every rule above (`cargo test -p nolx-obj-core`).
-
-**Status: not compiled or run.** The development sandbox for this checkpoint had no Rust
-toolchain and no route to crates.io or static.rust-lang.org, so the crate is unbuilt and its
-tests have not executed. Its `Cargo.lock` entry was written by hand. The first CI run is the
-verification; treat any failure there as the first thing to fix.
-
-Still to come in M4: object headers wired to the handle table, the namespace, the Security
-Reference Monitor, the `NOLX: objmgr online` self test, and the T2 boot marker.
+Not yet done in M4: wiring object headers and the namespace into the kernel (`kernel/src/obj`), the
+Security Reference Monitor, the `NOLX: objmgr online` self test with its T2 assertions, and the
+per-process handle tables that M5 processes will own.
 
 ## M5 — Executive core: processes, threads, dispatcher
 
