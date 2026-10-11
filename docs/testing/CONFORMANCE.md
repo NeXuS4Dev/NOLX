@@ -12,12 +12,12 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 |---|---|---|
 | `unimplemented` | 5 | 100.0% |
 | `implemented` | 5 | 95.0% |
-| `tested-T1` | 70 | 89.0% |
-| `pending-T2` | 1 | — |
-| `tested-T2` | 19 | 19.0% |
+| `tested-T1` | 70 | 90.0% |
+| `pending-T2` | 0 | — |
+| `tested-T2` | 20 | 20.0% |
 | `tested-T3` | 0 | 0.0% |
 
-**89 of 100 assertions have a passing automated test; 1 are awaiting T2 results.**
+**90 of 100 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
@@ -25,7 +25,7 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 |---|---|---|---|---|---|---|
 | hal | 23 | 23 | 11 | 0 | 8 | 0 |
 | mm | 34 | 34 | 23 | 0 | 11 | 0 |
-| obj | 6 | 6 | 5 | 1 | 0 | 0 |
+| obj | 6 | 6 | 5 | 0 | 1 | 0 |
 | vfs | 37 | 32 | 31 | 0 | 0 | 0 |
 
 ## Unimplemented assertions (5)
@@ -48,11 +48,9 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | HAL-021 | I/O APIC routes: GSI windows and ISA overrides are validated, redirections start masked, and NMI sources use MADT polarity/trigger flags |
 | FD-005 | XSH dup2: if old and new are equal, nothing is closed and new is returned |
 
-## Pending T2 verification (1)
+## Pending T2 verification (0)
 
-| ID | Specification reference | Configured test |
-|---|---|---|
-| OBJ-006 | An object's references follow the rules: a handle implies a pointer reference, and the object is freed exactly when the last reference goes | `kernel/src/obj/boot.rs` `selftest` drives one object through (1,0) -> (2,1) -> (3,2) -> (2,1) -> (1,1) -> freed, checks each step, and requires the live count to return to its start. Boot marker `NOLX: obj selftest: 1 object, 2 handles`. |
+None.
 
 ## All assertions
 
@@ -132,7 +130,7 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | OBJ-003 | obj | Inheritance copies only inheritable entries and keeps the parent's handle values where the child's slot is free | `tested-T1` | `handle.rs` tests `inheritance_copies_only_inheritable_entries` and `inheritance_falls_back_when_the_slot_is_taken`. |
 | OBJ-004 | obj | Namespace lookup is case-sensitive, rejects malformed paths, and follows symbolic links with a loop limit | `tested-T1` | `crates/nolx-obj-core/src/namespace.rs` tests, including `symlink_cycle_is_a_loop_not_a_hang`. |
 | OBJ-005 | obj | Removing a directory with children is refused; removing a link removes the link, not its target | `tested-T1` | `namespace.rs` tests `remove_refuses_nonempty_directory_then_allows_empty` and `remove_takes_the_link_not_its_target`. |
-| OBJ-006 | obj | An object's references follow the rules: a handle implies a pointer reference, and the object is freed exactly when the last reference goes | `pending-T2` | `kernel/src/obj/boot.rs` `selftest` drives one object through (1,0) -> (2,1) -> (3,2) -> (2,1) -> (1,1) -> freed, checks each step, and requires the live count to return to its start. Boot marker `NOLX: obj selftest: 1 object, 2 handles`. |
+| OBJ-006 | obj | An object's references follow the rules: a handle implies a pointer reference, and the object is freed exactly when the last reference goes | `tested-T2` | `kernel/src/obj/boot.rs` `selftest` drives one object through (1,0) -> (2,1) -> (3,2) -> (2,1) -> (1,1) -> freed, checks each step, and requires the live count to return to its start. Boot marker `NOLX: obj selftest: 1 object, 2 handles` (CI run 38133425376, revision 35728d3, boot smoke green). |
 | PN-001 | vfs | XBD 4.12 Pathname Resolution: a pathname beginning with a slash resolves against the root | `tested-T1` | crates/nolx-vfs path::tests::leading_slash_ignores_the_start_node |
 | PN-002 | vfs | XBD 4.12 Pathname Resolution: the empty pathname is invalid | `tested-T1` | crates/nolx-vfs path::tests::empty_path_is_enoent |
 | PN-003 | vfs | XBD 4.12 Pathname Resolution: the last component may be empty, and then refers to the directory itself | `tested-T1` | crates/nolx-vfs path::tests::trailing_slash_requires_a_directory |

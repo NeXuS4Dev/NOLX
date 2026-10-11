@@ -239,6 +239,20 @@ PR: #6.
 * T1 host tests for every rule above run in CI's `Host tests (cargo test)` job, which passed on
   the checkpoint 2 head commit. The fmt and clippy job also passes.
 
+### M4 implementation checkpoint 3 — the object manager boots (CI run 38133425376)
+
+`kernel/src/obj/boot.rs` gives the executive real objects: a fixed pool of object headers, the
+root namespace (`\Device`, `\FileSystem`, `\BaseNamedObjects`, `\NOLX`), and handle tables that
+hold object ids. The boot self test drives one object through every reference transition, checks
+each count, and requires the object to be freed exactly when its last reference goes. Its marker,
+`NOLX: obj selftest: 1 object, 2 handles ...`, is asserted by the boot smoke test (OBJ-006).
+
+To make this boot, the kernel stack went from 64 KiB to 128 KiB (`kernel/linker.ld`). The first
+attempt faulted in the address-space self test with the stack pointer deep in `.bss`: the stack sits
+directly below `.bss`, and the self test's frames grew with the extra code. Doubling the stack
+restored the boot. The headroom is not measured yet; a stack high-water mark or guard page is the
+next step to stop guessing.
+
 Not yet done in M4: wiring object headers and the namespace into the kernel (`kernel/src/obj`), the
 Security Reference Monitor, the `NOLX: objmgr online` self test with its T2 assertions, and the
 per-process handle tables that M5 processes will own.
