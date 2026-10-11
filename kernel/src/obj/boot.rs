@@ -231,10 +231,10 @@ fn check_access(id: ObjectId, token: &Token, desired: u32) -> Result<u32, ObjErr
 ///
 /// The handle carries the rights the monitor granted. A request that is refused in part is
 /// refused in whole, and then no handle is created and no reference is taken.
-pub fn open(
+pub fn open<const N: usize>(
     path: &str,
     token: &Token,
-    table: &mut HandleTable<ObjectId, HANDLE_TABLE_ENTRIES>,
+    table: &mut HandleTable<ObjectId, N>,
     desired: u32,
 ) -> Result<Handle, ObjError> {
     let id = lookup(path)?;
@@ -255,10 +255,10 @@ pub fn open(
 ///
 /// Duplication does not consult the monitor again: a duplicate can only narrow rights the
 /// caller already holds, and the handle table enforces that.
-pub fn duplicate(
-    source: &HandleTable<ObjectId, HANDLE_TABLE_ENTRIES>,
+pub fn duplicate<const N: usize, const M: usize>(
+    source: &HandleTable<ObjectId, N>,
     source_handle: Handle,
-    target: &mut HandleTable<ObjectId, HANDLE_TABLE_ENTRIES>,
+    target: &mut HandleTable<ObjectId, M>,
     access: u32,
 ) -> Result<Handle, ObjError> {
     let id = source.get(source_handle).map_err(ObjError::Handle)?.object;
@@ -275,8 +275,8 @@ pub fn duplicate(
 }
 
 /// Close `handle` in `table`, dropping the handle reference and its pointer reference.
-pub fn close(
-    table: &mut HandleTable<ObjectId, HANDLE_TABLE_ENTRIES>,
+pub fn close<const N: usize>(
+    table: &mut HandleTable<ObjectId, N>,
     handle: Handle,
 ) -> Result<(), ObjError> {
     let entry = table.close(handle).map_err(ObjError::Handle)?;

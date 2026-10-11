@@ -32,4 +32,7 @@ nolx-hal-core = { path = "../crates/nolx-hal-core" }
 nolx-mm-core = { path = "../crates/nolx-mm-core" }
 # The handle-table and namespace rules the object manager applies at boot. `no_std`, safe.
 nolx-obj-core = { path = "../crates/nolx-obj-core" }
+# The host-tested process context that owns the address-space association, token, and handle
+# table. Kernel-specific object headers and address-space storage wrap this core model.
+nolx-exec-core = { path = "../crates/nolx-exec-core" }
 nolx-types = { path = "../crates/nolx-types" }

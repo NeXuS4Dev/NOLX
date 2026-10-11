@@ -1,0 +1,15 @@
+[package]
+name = "nolx-exec-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-testable Executive process context and per-process resource ownership"
+readme = "../../README.md"
+publish = false
+
+[dependencies]
+nolx-obj-core = { path = "../nolx-obj-core" }
+
+[lib]
+path = "src/lib.rs"
