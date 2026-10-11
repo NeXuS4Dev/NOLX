@@ -134,11 +134,17 @@ fn entropy() -> u64 {
 }
 
 /// The physical frame behind one page of `space`, demand-zeroed if it was not resident.
+///
+/// `resolve_here` resolves *faults*: an already-present page is a `Protection` refusal to
+/// it (a fault on a present page can only be a permission fault). So the resident case is
+/// answered from `translate` first, and only a missing page goes through the fault path --
+/// which is exactly what the zero-fill-then-copy order of the page plan needs.
 fn resident_frame(space: &mut Space, address: u64) -> Result<usize, LoadError> {
     let page = address & !(PAGE_SIZE as u64 - 1);
-    if space.resolve_here(page, 0).is_err() {
-        return Err(LoadError::Page);
+    if let Some(mapping) = space.translate(page) {
+        return Ok(mapping.physical as usize);
     }
+    space.resolve_here(page, 0).map_err(|_| LoadError::Page)?;
     space
         .translate(page)
         .map(|mapping| mapping.physical as usize)

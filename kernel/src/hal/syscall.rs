@@ -65,7 +65,7 @@ pub fn init() {
     // one-time bring-up on the boot processor with interrupts disabled.
     unsafe {
         wrmsr(MSR_STAR, star);
-        wrmsr(MSR_LSTAR, nolx_syscall_entry as usize as u64);
+        wrmsr(MSR_LSTAR, nolx_syscall_entry as *const () as usize as u64);
         wrmsr(MSR_SFMASK, SFMASK);
         let efer = rdmsr(MSR_EFER);
         if efer & EFER_SCE == 0 {

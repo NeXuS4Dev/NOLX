@@ -258,8 +258,8 @@ pub fn relocations(
     let mut rela_address = 0u64;
     let mut rela_size = 0u64;
     let mut rela_ent = RELA_ENTRY_SIZE;
-    let mut entries = table_bytes.chunks_exact(16);
-    for entry in &mut entries {
+    let (entries, _) = table_bytes.as_chunks::<16>();
+    for entry in entries {
         let tag = u64::from_le_bytes(entry[0..8].try_into().unwrap());
         let value = u64::from_le_bytes(entry[8..16].try_into().unwrap());
         match tag {
@@ -270,7 +270,7 @@ pub fn relocations(
             _ => {}
         }
     }
-    if rela_ent != RELA_ENTRY_SIZE || rela_size % rela_ent != 0 {
+    if rela_ent != RELA_ENTRY_SIZE || !rela_size.is_multiple_of(rela_ent) {
         return Err(ImageError::MalformedDynamic);
     }
     if rela_size == 0 {
@@ -297,10 +297,8 @@ pub fn relocations(
         .ok_or(ImageError::RelocationOutOfBounds)?;
 
     let mut items = [None; MAX_RELOCATIONS];
-    for (index, chunk) in rela_bytes
-        .chunks_exact(RELA_ENTRY_SIZE as usize)
-        .enumerate()
-    {
+    let (rela_entries, _) = rela_bytes.as_chunks::<{ RELA_ENTRY_SIZE as usize }>();
+    for (index, chunk) in rela_entries.iter().enumerate() {
         let offset = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
         let info = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
         let addend = i64::from_le_bytes(chunk[16..24].try_into().unwrap());
@@ -323,7 +321,7 @@ pub fn relocations(
     }
     Ok(RelocationList {
         items,
-        count: rela_bytes.len() / RELA_ENTRY_SIZE as usize,
+        count: rela_entries.len(),
     })
 }
 
