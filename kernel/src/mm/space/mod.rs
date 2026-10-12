@@ -141,17 +141,27 @@ impl<const NODES: usize> AddressSpace<NODES> {
         // slot. They are shared by reference (the entries point at the kernel's own PDPTs),
         // not copied, so a kernel mapping costs one table no matter how many address spaces
         // see it.
+        //
+        // The source is the *kernel's* root, not whatever root is currently loaded: a spawn
+        // runs under the parent's user CR3, and the parent's PML4 is a copy that could in
+        // principle be stale.
         let mut store = KernelTableStore::new();
-        let kernel_root = tables::current_root();
+        let kernel_root_frame = kernel_root();
+        let mut copied = 0usize;
         for slot in pml4_index(KERNEL_BASE)..512 {
-            let entry = store.entry(kernel_root, slot);
+            let entry = store.entry(kernel_root_frame, slot);
             if entry != 0 {
                 // SAFETY: the entry names a PDPT the kernel owns and is already walking, and
                 // the new PML4 is not the processor's root yet, so nothing else observes this
                 // write.
                 store.set_entry(root, slot, entry);
+                copied += 1;
             }
         }
+        crate::exec::user::dbg_line(format_args!(
+            "NOLX: t2-dbg create_in_place src_root={kernel_root_frame:?} dst_root={root:?} copied={copied} cr3_root={:?}",
+            tables::current_root()
+        ));
 
         // SAFETY: `place` is uninitialised storage for exactly this type. Each field is
         // written exactly once below, through a raw pointer to the field -- never through a
@@ -893,6 +903,12 @@ fn set_current(space: *mut ()) {
     unsafe {
         *CURRENT.get() = space;
     }
+}
+
+/// The kernel's page-table root, for diagnostics.
+#[must_use]
+pub fn kernel_root_frame() -> Frame {
+    kernel_root()
 }
 
 fn kernel_root() -> Frame {

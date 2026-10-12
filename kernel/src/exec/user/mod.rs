@@ -300,6 +300,36 @@ fn resume_thread(table: &mut UserTable, next: Option<ThreadId>) -> *mut Interrup
                 top,
                 table.frame_pointer(slot)
             ));
+            {
+                let root = unsafe { space_of(slot) }.root();
+                let read_entry = |table_frame: u64, index: usize| -> u64 {
+                    let byte = table_frame * 4096 + (index as u64) * 8;
+                    unsafe { core::ptr::read_volatile(crate::mm::phys::direct_ptr::<u64>(byte)) }
+                };
+                let kroot = crate::mm::space::kernel_root_frame();
+                let frame_ptr = table.frame_pointer(slot);
+                let frame = unsafe { &*frame_ptr };
+                crate::exec::user::dbg_line(format_args!(
+                    "NOLX: t2-dbg space root={root:?} pml4[256]={:#x} pml4[510]={:#x} pml4[511]={:#x}",
+                    read_entry(root, 256),
+                    read_entry(root, 510),
+                    read_entry(root, 511),
+                ));
+                crate::exec::user::dbg_line(format_args!(
+                    "NOLX: t2-dbg kern root={kroot:?} pml4[256]={:#x} pml4[510]={:#x} pml4[511]={:#x}",
+                    read_entry(kroot, 256),
+                    read_entry(kroot, 510),
+                    read_entry(kroot, 511),
+                ));
+                crate::exec::user::dbg_line(format_args!(
+                    "NOLX: t2-dbg frame rip={:#x} cs={:#x} rflags={:#x} rsp={:#x} ss={:#x}",
+                    frame.instruction_pointer,
+                    frame.code_segment,
+                    frame.flags,
+                    frame.stack_pointer,
+                    frame.stack_segment
+                ));
+            }
         }
     }
     table.current = next_slot;
