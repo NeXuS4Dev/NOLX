@@ -12,20 +12,20 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 |---|---|---|
 | `unimplemented` | 5 | 100.0% |
 | `implemented` | 6 | 96.0% |
-| `tested-T1` | 85 | 84.8% |
-| `pending-T2` | 8 | — |
-| `tested-T2` | 21 | 16.8% |
+| `tested-T1` | 85 | 87.2% |
+| `pending-T2` | 5 | — |
+| `tested-T2` | 24 | 19.2% |
 | `tested-T3` | 0 | 0.0% |
 
-**106 of 125 assertions have a passing automated test; 8 are awaiting T2 results.**
+**109 of 125 assertions have a passing automated test; 5 are awaiting T2 results.**
 
 ## By area
 
 | Area | Assertions | Implemented | Tested (T1) | Pending (T2) | Tested (T2) | Tested (T3) |
 |---|---|---|---|---|---|---|
 | elf | 3 | 3 | 3 | 0 | 0 | 0 |
-| exec | 12 | 12 | 9 | 1 | 2 | 0 |
-| hal | 25 | 25 | 11 | 2 | 8 | 0 |
+| exec | 12 | 12 | 9 | 0 | 3 | 0 |
+| hal | 25 | 25 | 11 | 0 | 10 | 0 |
 | mm | 34 | 34 | 23 | 0 | 11 | 0 |
 | obj | 14 | 14 | 8 | 5 | 0 | 0 |
 | vfs | 37 | 32 | 31 | 0 | 0 | 0 |
@@ -51,13 +51,10 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | OBJ-014 | The generic private namespace primitive gates reads, writes, deletes, and symlink creation with its boundary descriptor while preserving symlink resolution within its independent root |
 | FD-005 | XSH dup2: if old and new are equal, nothing is closed and new is returned |
 
-## Pending T2 verification (8)
+## Pending T2 verification (5)
 
 | ID | Specification reference | Configured test |
 |---|---|---|
-| EXE-011 | A ring-3 `hello` ELF runs on the `syscall`/`sysret` path, prints through `write`, and exits 42; its `init` parent spawns it, observes exactly 42 through `waitid`, reports it, and exits 42 -- the status chain is kernel-observed end to end | `.github/workflows/ci.yml` boot-smoke asserted `hello: hello from ring 3`, `init: child exited with status 42`, and `NOLX: user mode T2: hello ran in ring 3, hello exited with status 42, init observed 42 and exited with status 42`; driver `kernel/src/exec/user/selftest.rs`. |
-| HAL-024 | x86-64 syscall/sysret: STAR names the kernel 0x08/0x10 and user 0x1b/0x23 selector pairs, LSTAR arms the entry stub, SFMASK clears IF/TF/DF, and the stub synthesises the same 22-field trap frame an interrupt builds | `.github/workflows/ci.yml` boot-smoke marker `hal: syscall/sysret fast path armed (STAR kernel 0x08/0x10, user 0x1b/0x23)` and the ring-3 user-mode test; `kernel/src/hal/syscall.S` `nolx_syscall_entry` verified by disassembly in the M6 change. |
-| HAL-025 | x86-64 GS discipline: a ring-3 entry swaps to the kernel per-CPU block exactly when the interrupted CS has RPL 3, and the shared restore path swaps back exactly when the resumed CS has RPL 3 -- independently of each other | `.github/workflows/ci.yml` boot-smoke ring-3 markers (timer preemption and `syscall` entries both run through the paths); `kernel/src/hal/interrupts.S` `nolx_interrupt_common`/`nolx_frame_restore`. |
 | OBJ-006 | An object's references follow the rules: a handle implies a pointer reference, and the object is freed exactly when the last reference goes | `kernel/src/obj/boot.rs` `selftest` drives one object through (1,0) -> (2,1) -> (3,2) -> (2,1) -> (1,1) -> freed, checks each step, and requires the live count to return to its start. Boot marker `NOLX: obj selftest: 1 object, 2 handles` (CI run 38133425376, revision 35728d3, boot smoke green). |
 | OBJ-010 | At boot, `open` enforces the monitor's decisions for a SYSTEM, reader, refused, backup, and low-integrity token against a device and a labelled log, and the audit log agrees with what was asked | `kernel/src/obj/boot.rs` `selftest`, part two. Boot marker `NOLX: srm selftest: 10 access checks (6 granted, 4 denied)`. |
 | OBJ-011 | Object type create/open/parse/close/delete callbacks run at their lifecycle transitions; a type-rejected create or open leaves no header, handle, or reference leak | `kernel/src/obj/mod.rs` registers the Device callbacks and `kernel/src/obj/boot.rs` dispatches them; the selftest forces create/open rejection, checks rollback, and requires every callback count to advance. Boot marker `NOLX: obj type callback selftest: create/open/parse/close/delete invoked`. |
@@ -81,7 +78,7 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | EXE-008 | exec | Queued locks serialize contenders in ticket order, and push locks permit shared readers while excluding them during exclusive ownership | `tested-T1` | `crates/nolx-exec-core/src/lock.rs` tests `ticket_lock_serializes_contended_updates` and `push_lock_allows_shared_readers_then_excludes_them_for_writer`. |
 | EXE-009 | exec | The boot Executive self-test creates distinct process address spaces, verifies process/thread context and metadata, handle isolation/inheritance, token-checked opens, and complete resource teardown | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserted `NOLX: process selftest: 2 processes, 2 address spaces, PEB/job metadata, thread context, isolated/inherited handles, token-checked open/deny, teardown returned resources`; workflow [38162270144](https://github.com/NeXuS4Dev/NOLX/actions/runs/38162270144) on revision `650b71c` passed. |
 | EXE-010 | exec | Three independent kernel stacks are preempted by timer interrupts and produce the exact interleaved round-robin trace `ABCABCABCABC` | `tested-T2` | `kernel/src/exec/context_switch.rs` runs three timer-driven workers through the common interrupt-frame epilogue; boot-smoke asserted `NOLX: round-robin T2: ABCABCABCABC complete: 3 kernel threads, 12 timer quanta, order verified=true`; workflow [38162270144](https://github.com/NeXuS4Dev/NOLX/actions/runs/38162270144) on revision `650b71c` passed. |
-| EXE-011 | exec | A ring-3 `hello` ELF runs on the `syscall`/`sysret` path, prints through `write`, and exits 42; its `init` parent spawns it, observes exactly 42 through `waitid`, reports it, and exits 42 -- the status chain is kernel-observed end to end | `pending-T2` | `.github/workflows/ci.yml` boot-smoke asserted `hello: hello from ring 3`, `init: child exited with status 42`, and `NOLX: user mode T2: hello ran in ring 3, hello exited with status 42, init observed 42 and exited with status 42`; driver `kernel/src/exec/user/selftest.rs`. |
+| EXE-011 | exec | A ring-3 `hello` ELF runs on the `syscall`/`sysret` path, prints through `write`, and exits 42; its `init` parent spawns it, observes exactly 42 through `waitid`, reports it, and exits 42 -- the status chain is kernel-observed end to end | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserted `hello: hello from ring 3`, `init: child exited with status 42`, and `NOLX: user mode T2: hello ran in ring 3, hello exited with status 42, init observed 42 and exited with status 42`; driver `kernel/src/exec/user/selftest.rs`; workflow [38219123890](https://github.com/NeXuS4Dev/NOLX/actions/runs/38219123890) on revision `3698dad` passed. |
 | EXE-012 | exec | Syscall numbers are unique, every assigned number round-trips number-to-name-to-number, the six-argument register convention and the `-errno` return convention round-trip through a full trap frame, and the M6 dispatch surface (`exit`, `waitid`, `getpid`, `posix_spawn`, `write`) keeps its pinned numbers | `tested-T1` | `crates/nolx-syscall/src/lib.rs` tests `syscall_numbers_are_unique_and_never_renumbered`, `syscall_names_round_trip_through_the_table`, `the_m6_dispatch_surface_numbers_are_pinned`, `arguments_round_trip_through_the_register_convention`, `return_values_round_trip_through_the_error_convention`, and `the_syscall_boundary_carries_six_args_and_no_clobbered_registers`. |
 | FD-001 | vfs | XSH 2.5.1 Descriptor Tables and Files: the lowest unused descriptor is allocated | `tested-T1` | crates/nolx-vfs fd::tests::lowest_free_descriptor_is_allocated |
 | FD-002 | vfs | XSH 2.5.1 Descriptor Tables and Files: allocating past OPEN_MAX fails with EMFILE | `tested-T1` | crates/nolx-vfs fd::tests::descriptor_limit_is_emfile |
@@ -118,8 +115,8 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | HAL-021 | hal | I/O APIC routes: GSI windows and ISA overrides are validated, redirections start masked, and NMI sources use MADT polarity/trigger flags | `implemented` | kernel/src/hal/ioapic.rs init and unmask_legacy_irq |
 | HAL-022 | hal | ACPI physical discovery: a valid firmware root, MADT, HPET counter, and usable local APIC are found during QEMU boot | `tested-T2` | .github/workflows/ci.yml boot-smoke ACPI/HPET/APIC markers (CI run 38086516018, revision dc2d8d1) |
 | HAL-023 | hal | Legacy timer fallback: with local APIC support hidden, PIC EOI and PIT IRQ0 continue to deliver 100 timer ticks | `tested-T2` | scripts/check-hal-pit-fallback.sh (CI run 38086516018, revision dc2d8d1) |
-| HAL-024 | hal | x86-64 syscall/sysret: STAR names the kernel 0x08/0x10 and user 0x1b/0x23 selector pairs, LSTAR arms the entry stub, SFMASK clears IF/TF/DF, and the stub synthesises the same 22-field trap frame an interrupt builds | `pending-T2` | `.github/workflows/ci.yml` boot-smoke marker `hal: syscall/sysret fast path armed (STAR kernel 0x08/0x10, user 0x1b/0x23)` and the ring-3 user-mode test; `kernel/src/hal/syscall.S` `nolx_syscall_entry` verified by disassembly in the M6 change. |
-| HAL-025 | hal | x86-64 GS discipline: a ring-3 entry swaps to the kernel per-CPU block exactly when the interrupted CS has RPL 3, and the shared restore path swaps back exactly when the resumed CS has RPL 3 -- independently of each other | `pending-T2` | `.github/workflows/ci.yml` boot-smoke ring-3 markers (timer preemption and `syscall` entries both run through the paths); `kernel/src/hal/interrupts.S` `nolx_interrupt_common`/`nolx_frame_restore`. |
+| HAL-024 | hal | x86-64 syscall/sysret: STAR names the kernel 0x08/0x10 and user 0x1b/0x23 selector pairs, LSTAR arms the entry stub, SFMASK clears IF/TF/DF, and the stub synthesises the same 22-field trap frame an interrupt builds | `tested-T2` | `.github/workflows/ci.yml` boot-smoke marker `hal: syscall/sysret fast path armed (STAR kernel 0x08/0x10, user 0x1b/0x23)` and the ring-3 user-mode test; `kernel/src/hal/syscall.S` `nolx_syscall_entry` verified by disassembly in the M6 change; workflow [38219123890](https://github.com/NeXuS4Dev/NOLX/actions/runs/38219123890) on revision `3698dad` passed. |
+| HAL-025 | hal | x86-64 GS discipline: a ring-3 entry swaps to the kernel per-CPU block exactly when the interrupted CS has RPL 3, and the shared restore path swaps back exactly when the resumed CS has RPL 3 -- independently of each other | `tested-T2` | `.github/workflows/ci.yml` boot-smoke ring-3 markers (timer preemption and `syscall` entries both run through the paths); `kernel/src/hal/interrupts.S` `nolx_interrupt_common`/`nolx_frame_restore`; workflow [38219123890](https://github.com/NeXuS4Dev/NOLX/actions/runs/38219123890) on revision `3698dad` passed. |
 | MM-001 | mm | Buddy allocator: a region is carved into aligned power-of-two blocks, allocation splits the smallest block that fits, and alignment is preserved | `tested-T1` | nolx-mm-core buddy::tests::a_region_is_carved_into_aligned_blocks; buddy::tests::allocation_splits_down_to_the_requested_order; buddy::tests::every_allocation_is_aligned_to_its_order |
 | MM-002 | mm | Buddy allocator: freeing a block coalesces with its buddy, up to the largest aligned block the region can hold | `tested-T1` | nolx-mm-core buddy::tests::free_coalesces_with_a_free_buddy; buddy::tests::freeing_a_whole_region_restores_one_block_per_order |
 | MM-003 | mm | Buddy allocator: a misaligned block, an order above the ceiling, and a frame outside the managed range are refused and change nothing | `tested-T1` | nolx-mm-core buddy::tests::misaligned_and_out_of_range_frees_are_refused |
