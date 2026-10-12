@@ -178,6 +178,9 @@ HELLO_PATH = b"hello"
 
 def build_hello() -> bytes:
     asm = Asm(HELLO_TEXT)
+    # TEMPORARY T2 forensics: a guaranteed #UD as the very first instruction proves
+    # (or disproves) that the ring-3 iretq ever completes. Remove once the resume works.
+    asm.raw(b"\x0f\x0b")
     asm.lea("rsi", "msg")
     asm.mov_rdx(len(HELLO_MESSAGE))
     asm.mov_rax(SYS_WRITE)

@@ -256,6 +256,9 @@ pub(crate) unsafe fn on_syscall(frame: *mut InterruptFrame) -> *mut InterruptFra
 pub(crate) unsafe fn on_timer(frame: *mut InterruptFrame) -> *mut InterruptFrame {
     let mut table = TABLE.lock();
     let interrupted = table.current;
+    if interrupted.is_some() {
+        dbg_line(format_args!("NOLX: t2-dbg tick cur={interrupted:?}"));
+    }
     match interrupted {
         Some(slot) => table.frames[slot] = frame as usize,
         None => table.idle_frame = frame as usize,
