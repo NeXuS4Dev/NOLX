@@ -206,6 +206,76 @@ impl DescriptorTable {
         self.allocations
     }
 
+    /// POSIX `dup(old_fd)`: duplicate `old_fd` into the lowest unused slot with
+    /// `close_on_exec` cleared (`FD_CLOEXEC` is per-descriptor and never inherited across `dup`).
+    ///
+    /// # Errors
+    ///
+    /// `EBADF` if `old_fd` is not open, `EMFILE` if no slot below `limit` is free.
+    pub fn dup(&mut self, old_fd: usize) -> Result<usize, i32> {
+        let src = self.get(old_fd)?;
+        self.alloc(Descriptor {
+            file: src.file,
+            close_on_exec: false,
+        })
+    }
+
+    /// POSIX `dup2(old_fd, new_fd)`: validate `old_fd` and `new_fd`, return `Ok((new_fd, None))`
+    /// without closing anything when `old_fd == new_fd` (`FD-005`), and otherwise install a
+    /// duplicate of `old_fd` (with `close_on_exec = false`) at `new_fd`, returning any displaced
+    /// descriptor so the caller can release its underlying open file.
+    ///
+    /// # Errors
+    ///
+    /// `EBADF` if `old_fd` is not open or `new_fd >= limit`.
+    pub fn dup2(
+        &mut self,
+        old_fd: usize,
+        new_fd: usize,
+    ) -> Result<(usize, Option<Descriptor>), i32> {
+        let src = self.get(old_fd)?;
+        if new_fd >= self.limit {
+            return Err(errno::EBADF);
+        }
+        if old_fd == new_fd {
+            return Ok((new_fd, None));
+        }
+        let displaced = self.place_at(
+            new_fd,
+            Descriptor {
+                file: src.file,
+                close_on_exec: false,
+            },
+        )?;
+        Ok((new_fd, displaced))
+    }
+
+    /// POSIX `fcntl(old_fd, F_DUPFD / F_DUPFD_CLOEXEC, min_fd)`: duplicate `old_fd` into the
+    /// lowest unused slot `>= min_fd`, setting `close_on_exec` to `cloexec`.
+    ///
+    /// # Errors
+    ///
+    /// `EBADF` if `old_fd` is not open, `EINVAL` if `min_fd >= limit`, `EMFILE` if all slots
+    /// in `min_fd..limit` are occupied.
+    pub fn fcntl_dupfd(
+        &mut self,
+        old_fd: usize,
+        min_fd: usize,
+        cloexec: bool,
+    ) -> Result<usize, i32> {
+        let src = self.get(old_fd)?;
+        if min_fd >= self.limit {
+            return Err(errno::EINVAL);
+        }
+        self.alloc_at_or_above(
+            min_fd,
+            Descriptor {
+                file: src.file,
+                close_on_exec: cloexec,
+            },
+        )
+    }
+
     /// Build a table with the three standard descriptors already open on `files`, as a new
     /// process gets from its parent or from `posix_spawn` file actions.
     #[must_use]
@@ -370,5 +440,123 @@ mod tests {
         }
         assert_eq!(t.allocations(), 5);
         assert_eq!(t.open_count(), 5);
+    }
+
+    #[test]
+    fn lowest_free_descriptor_is_allocated() {
+        let mut t = DescriptorTable::default();
+        let d0 = t.alloc(Descriptor::new(10)).unwrap();
+        let d1 = t.alloc(Descriptor::new(20)).unwrap();
+        assert_eq!((d0, d1), (0, 1));
+        t.close(d0).unwrap();
+        assert_eq!(t.alloc(Descriptor::new(30)).unwrap(), 0);
+    }
+
+    #[test]
+    fn descriptor_limit_is_emfile() {
+        let mut t = DescriptorTable::with_limit(2);
+        t.alloc(Descriptor::new(1)).unwrap();
+        t.alloc(Descriptor::new(2)).unwrap();
+        assert_eq!(t.alloc(Descriptor::new(3)), Err(errno::EMFILE));
+    }
+
+    #[test]
+    fn dup2_closes_the_target_first() {
+        let mut t = DescriptorTable::default();
+        let a = t.alloc(Descriptor::new(10)).unwrap();
+        let b = t.alloc(Descriptor::new(20)).unwrap();
+        let (fd, displaced) = t.dup2(a, b).unwrap();
+        assert_eq!(fd, b);
+        assert_eq!(displaced, Some(Descriptor::new(20)));
+        assert_eq!(t.get(b).unwrap().file, 10);
+    }
+
+    #[test]
+    fn dup2_same_descriptor_is_a_noop() {
+        let mut t = DescriptorTable::default();
+        let a = t
+            .alloc(Descriptor {
+                file: 55,
+                close_on_exec: true,
+            })
+            .unwrap();
+        // When old_fd == new_fd and valid, dup2 returns new_fd without closing or clearing FD_CLOEXEC.
+        let (fd, displaced) = t.dup2(a, a).unwrap();
+        assert_eq!(fd, a);
+        assert_eq!(displaced, None);
+        assert_eq!(t.get(a).unwrap().file, 55);
+        assert!(t.get(a).unwrap().close_on_exec);
+
+        // When old_fd == new_fd is NOT open, dup2 must still fail with EBADF.
+        assert_eq!(t.dup2(99, 99), Err(errno::EBADF));
+    }
+
+    #[test]
+    fn dup2_out_of_range_is_ebadf() {
+        let mut t = DescriptorTable::with_limit(4);
+        let a = t.alloc(Descriptor::new(10)).unwrap();
+        assert_eq!(t.dup2(a, 4), Err(errno::EBADF));
+        assert_eq!(t.dup2(99, 1), Err(errno::EBADF));
+    }
+
+    #[test]
+    fn f_dupfd_skips_lower_descriptors() {
+        let mut t = DescriptorTable::default();
+        let a = t.alloc(Descriptor::new(77)).unwrap();
+        let b = t.fcntl_dupfd(a, 5, false).unwrap();
+        let c = t.fcntl_dupfd(a, 5, true).unwrap();
+        assert_eq!(b, 5);
+        assert_eq!(c, 6);
+        assert!(!t.get(b).unwrap().close_on_exec);
+        assert!(t.get(c).unwrap().close_on_exec);
+    }
+
+    #[test]
+    fn dup_shares_the_file_and_offset() {
+        let mut t = DescriptorTable::default();
+        let a = t
+            .alloc(Descriptor {
+                file: 42,
+                close_on_exec: true,
+            })
+            .unwrap();
+        let b = t.dup(a).unwrap();
+        assert_eq!(t.get(b).unwrap().file, 42);
+        assert!(!t.get(b).unwrap().close_on_exec);
+    }
+
+    #[test]
+    fn stdio_descriptors_are_created() {
+        let t = DescriptorTable::with_stdio(100, 101, 102);
+        assert_eq!(t.get(0).unwrap().file, 100);
+        assert_eq!(t.get(1).unwrap().file, 101);
+        assert_eq!(t.get(2).unwrap().file, 102);
+    }
+
+    #[test]
+    fn close_on_exec_round_trips() {
+        let mut t = DescriptorTable::default();
+        let a = t.alloc(Descriptor::new(1)).unwrap();
+        t.set_close_on_exec(a, true).unwrap();
+        assert!(t.get(a).unwrap().close_on_exec);
+        t.set_close_on_exec(a, false).unwrap();
+        assert!(!t.get(a).unwrap().close_on_exec);
+    }
+
+    #[test]
+    fn flags_of_a_missing_descriptor() {
+        let mut t = DescriptorTable::default();
+        assert_eq!(t.get(3), Err(errno::EBADF));
+        assert_eq!(t.set_close_on_exec(3, true), Err(errno::EBADF));
+    }
+
+    #[test]
+    fn descriptor_flags_are_per_descriptor() {
+        let mut t = DescriptorTable::default();
+        let a = t.alloc(Descriptor::new(88)).unwrap();
+        let b = t.dup(a).unwrap();
+        t.set_close_on_exec(a, true).unwrap();
+        assert!(t.get(a).unwrap().close_on_exec);
+        assert!(!t.get(b).unwrap().close_on_exec);
     }
 }

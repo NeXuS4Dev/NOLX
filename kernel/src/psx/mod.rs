@@ -94,8 +94,28 @@ static HANDLERS: &[Entry] = &[
         handler: handle_posix_spawn,
     },
     Entry {
+        number: syscall::SYS_OPEN,
+        handler: handle_open,
+    },
+    Entry {
+        number: syscall::SYS_CLOSE,
+        handler: handle_close,
+    },
+    Entry {
+        number: syscall::SYS_READ,
+        handler: handle_read,
+    },
+    Entry {
         number: syscall::SYS_WRITE,
         handler: handle_write,
+    },
+    Entry {
+        number: syscall::SYS_LSEEK,
+        handler: handle_lseek,
+    },
+    Entry {
+        number: syscall::SYS_UNLINK,
+        handler: handle_unlink,
     },
 ];
 
@@ -148,17 +168,84 @@ fn handle_posix_spawn(args: SyscallArgs) -> SysResult {
     }
 }
 
-/// POSIX `write` to the standard output descriptors: bytes reach the console, byte-exact.
-///
-/// Only descriptors 1 and 2 exist in M6; anything else is `EBADF`, because returning a
-/// success for a descriptor the kernel does not have is how log files end up empty.
+/// POSIX `write`: descriptors 1 and 2 reach the console; descriptors `>= 3` write through
+/// the VFS to the underlying open file object.
 fn handle_write(args: SyscallArgs) -> SysResult {
     let (fd, buffer, length) = (args.a0, args.a1, args.a2);
-    if fd != 1 && fd != 2 {
+    let outcome = if fd == 1 || fd == 2 {
+        crate::exec::user::write_console(buffer, length)
+    } else if fd >= 3 {
+        match usize::try_from(fd) {
+            Ok(fd_idx) => crate::exec::user::write_file(fd_idx, buffer, length),
+            Err(_) => Err(errno::EBADF),
+        }
+    } else {
+        Err(errno::EBADF)
+    };
+    match outcome {
+        Ok(written) => written as i64,
+        Err(code) => -i64::from(code),
+    }
+}
+
+/// POSIX `open`: resolve `path`, optionally create or truncate in `tmpfs`, and allocate
+/// the lowest free descriptor in the process descriptor table.
+fn handle_open(args: SyscallArgs) -> SysResult {
+    let (path_user, flags, mode) = (args.a0, args.a1 as u32, args.a2 as u32);
+    match crate::exec::user::open_file(path_user, flags, mode) {
+        Ok(fd) => fd as i64,
+        Err(code) => -i64::from(code),
+    }
+}
+
+/// POSIX `close`: release a descriptor slot and decrement its `FileObject` reference count.
+fn handle_close(args: SyscallArgs) -> SysResult {
+    let Ok(fd) = usize::try_from(args.a0) else {
+        return -i64::from(errno::EBADF);
+    };
+    if fd < 3 {
         return -i64::from(errno::EBADF);
     }
-    match crate::exec::user::write_console(buffer, length) {
-        Ok(written) => written as i64,
+    match crate::exec::user::close_file(fd) {
+        Ok(_) => 0,
+        Err(code) => -i64::from(code),
+    }
+}
+
+/// POSIX `read`: read from an open VFS file descriptor into user space.
+fn handle_read(args: SyscallArgs) -> SysResult {
+    let Ok(fd) = usize::try_from(args.a0) else {
+        return -i64::from(errno::EBADF);
+    };
+    if fd < 3 {
+        return -i64::from(errno::EBADF);
+    }
+    let (buffer, length) = (args.a1, args.a2);
+    match crate::exec::user::read_file(fd, buffer, length) {
+        Ok(read) => read as i64,
+        Err(code) => -i64::from(code),
+    }
+}
+
+/// POSIX `lseek`: reposition an open VFS file object's byte offset.
+fn handle_lseek(args: SyscallArgs) -> SysResult {
+    let Ok(fd) = usize::try_from(args.a0) else {
+        return -i64::from(errno::EBADF);
+    };
+    if fd < 3 {
+        return -i64::from(errno::ESPIPE);
+    }
+    let (offset, whence) = (args.a1 as i64, args.a2 as i32);
+    match crate::exec::user::lseek_file(fd, offset, whence) {
+        Ok(pos) => pos as i64,
+        Err(code) => -i64::from(code),
+    }
+}
+
+/// POSIX `unlink`: remove a directory entry from `tmpfs`.
+fn handle_unlink(args: SyscallArgs) -> SysResult {
+    match crate::exec::user::unlink_file(args.a0) {
+        Ok(_) => 0,
         Err(code) => -i64::from(code),
     }
 }

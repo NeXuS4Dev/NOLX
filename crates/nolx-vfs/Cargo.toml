@@ -9,3 +9,4 @@ readme = "../../README.md"
 
 [dependencies]
 nolx-types = { path = "../nolx-types" }
+nolxfs = { path = "../nolxfs" }

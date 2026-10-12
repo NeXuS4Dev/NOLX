@@ -307,6 +307,30 @@ impl<'a> Queue<'a> {
     }
 }
 
+/// Evaluate a POSIX `pathconf(2)` / `fpathconf(2)` query against NOLX's VFS limits.
+///
+/// # Errors
+///
+/// `errno::EINVAL` if `name` is not a recognised `_PC_*` selector.
+pub const fn pathconf_value(name: i32) -> Result<i64, i32> {
+    use nolx_types::abi::pathconf_name;
+    match name {
+        pathconf_name::PC_LINK_MAX => Ok(65_535),
+        pathconf_name::PC_MAX_CANON => Ok(255),
+        pathconf_name::PC_MAX_INPUT => Ok(255),
+        pathconf_name::PC_NAME_MAX => Ok(scalars::NAME_MAX as i64),
+        pathconf_name::PC_PATH_MAX => Ok(scalars::PATH_MAX as i64),
+        pathconf_name::PC_PIPE_BUF => Ok(4096),
+        pathconf_name::PC_CHOWN_RESTRICTED => Ok(1),
+        pathconf_name::PC_NO_TRUNC => Ok(1),
+        pathconf_name::PC_VDISABLE => Ok(0),
+        pathconf_name::PC_SYMLINK_MAX => Ok(scalars::PATH_MAX as i64 - 1),
+        pathconf_name::PC_2_SYMLINKS => Ok(1),
+        pathconf_name::PC_FILESIZEBITS => Ok(64),
+        _ => Err(errno::EINVAL),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -643,5 +667,214 @@ mod tests {
         let t = sample_tree();
         assert!(resolve(&t, b"/to_dir/file", Final::Follow).is_ok());
         assert_eq!(t.symlink_budget(), 1);
+    }
+
+    #[test]
+    fn leading_slash_ignores_the_start_node() {
+        struct CwdTree {
+            inner: Tree,
+            cwd: NodeId,
+        }
+        impl Resolver for CwdTree {
+            fn start(&self, absolute: bool) -> NodeId {
+                if absolute {
+                    NodeId { mount: 0, ino: 0 }
+                } else {
+                    self.cwd
+                }
+            }
+            fn lookup(&self, dir: NodeId, name: &[u8]) -> Result<NodeId, i32> {
+                self.inner.lookup(dir, name)
+            }
+            fn parent(&self, node: NodeId) -> NodeId {
+                self.inner.parent(node)
+            }
+            fn is_dir(&self, node: NodeId) -> bool {
+                self.inner.is_dir(node)
+            }
+            fn is_symlink(&self, node: NodeId) -> bool {
+                self.inner.is_symlink(node)
+            }
+            fn read_link(&self, node: NodeId) -> Result<Vec<u8>, i32> {
+                self.inner.read_link(node)
+            }
+            fn may_search(&self, dir: NodeId) -> Result<(), i32> {
+                self.inner.may_search(dir)
+            }
+            fn symlink_budget(&self) -> u32 {
+                self.inner.symlink_budget()
+            }
+            fn note_symlink(&self) {
+                self.inner.note_symlink()
+            }
+        }
+
+        let inner = sample_tree();
+        let sub = resolve(&inner, b"/dir/sub", Final::Follow).unwrap().node;
+        let tree = CwdTree { inner, cwd: sub };
+
+        // Relative lookup starts at `cwd` (`/dir/sub`).
+        let rel = resolve(&tree, b"deep", Final::Follow).unwrap();
+        assert_eq!(tree.inner.nodes[rel.node.ino as usize].name, "deep");
+
+        // Leading slash ignores `cwd` and starts at root.
+        let abs = resolve(&tree, b"/dir/file", Final::Follow).unwrap();
+        assert_eq!(tree.inner.nodes[abs.node.ino as usize].name, "file");
+    }
+
+    #[test]
+    fn dot_dot_and_dot() {
+        let t = sample_tree();
+        let r = resolve(&t, b"/./dir/./sub/.././file", Final::Follow).unwrap();
+        assert_eq!(t.nodes[r.node.ino as usize].name, "file");
+        assert_eq!(
+            resolve(&t, b"/../../..", Final::Follow).unwrap().node.ino,
+            0
+        );
+    }
+
+    #[test]
+    fn path_too_long_is_enametoolong() {
+        let t = sample_tree();
+        let over = vec![b'/'; scalars::PATH_MAX + 1];
+        assert_eq!(resolve(&t, &over, Final::Follow), Err(errno::ENAMETOOLONG));
+    }
+
+    #[test]
+    fn component_too_long_is_enametoolong() {
+        let t = sample_tree();
+        let mut path = vec![b'/'];
+        path.extend(core::iter::repeat_n(b'x', scalars::NAME_MAX + 1));
+        assert_eq!(resolve(&t, &path, Final::Follow), Err(errno::ENAMETOOLONG));
+    }
+
+    #[test]
+    fn repeated_slashes_collapse() {
+        let t = sample_tree();
+        let a = resolve(&t, b"/dir/sub/deep", Final::Follow).unwrap();
+        let b = resolve(&t, b"////dir///sub////deep", Final::Follow).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn symlink_loop_is_eloop() {
+        let t = sample_tree();
+        assert_eq!(resolve(&t, b"/loop", Final::Follow), Err(errno::ELOOP));
+        let t2 = sample_tree();
+        assert_eq!(resolve(&t2, b"/a", Final::Follow), Err(errno::ELOOP));
+    }
+
+    #[test]
+    fn symlink_depth_limit_is_enforced() {
+        let mut t = Tree::new();
+        t.add(0, "end", S_IFREG | 0o644);
+        let mut prev = String::from("end");
+        for i in 0..=scalars::SYMLOOP_MAX {
+            let name = alloc::format!("hop{i}");
+            t.add_link(0, &name, &prev);
+            prev = name;
+        }
+        // Exactly SYMLOOP_MAX links succeeds.
+        let ok_name = alloc::format!("/hop{}", scalars::SYMLOOP_MAX - 1);
+        assert!(resolve(&t, ok_name.as_bytes(), Final::Follow).is_ok());
+
+        // SYMLOOP_MAX + 1 links fails with ELOOP.
+        let t_over = {
+            let mut t2 = Tree::new();
+            t2.add(0, "end", S_IFREG | 0o644);
+            let mut p = String::from("end");
+            for i in 0..=scalars::SYMLOOP_MAX {
+                let n = alloc::format!("hop{i}");
+                t2.add_link(0, &n, &p);
+                p = n;
+            }
+            t2
+        };
+        let over_name = alloc::format!("/hop{}", scalars::SYMLOOP_MAX);
+        assert_eq!(
+            resolve(&t_over, over_name.as_bytes(), Final::Follow),
+            Err(errno::ELOOP)
+        );
+    }
+
+    #[test]
+    fn no_follow_stops_at_the_last_component() {
+        let t = sample_tree();
+        let r = resolve(&t, b"/to_dir", Final::NoFollow).unwrap();
+        assert!(t.is_symlink(r.node));
+    }
+
+    #[test]
+    fn missing_execute_is_eacces() {
+        struct PermTree(Tree, u64);
+        impl Resolver for PermTree {
+            fn start(&self, a: bool) -> NodeId {
+                self.0.start(a)
+            }
+            fn lookup(&self, d: NodeId, n: &[u8]) -> Result<NodeId, i32> {
+                self.0.lookup(d, n)
+            }
+            fn parent(&self, n: NodeId) -> NodeId {
+                self.0.parent(n)
+            }
+            fn is_dir(&self, n: NodeId) -> bool {
+                self.0.is_dir(n)
+            }
+            fn is_symlink(&self, n: NodeId) -> bool {
+                self.0.is_symlink(n)
+            }
+            fn read_link(&self, n: NodeId) -> Result<Vec<u8>, i32> {
+                self.0.read_link(n)
+            }
+            fn may_search(&self, d: NodeId) -> Result<(), i32> {
+                if d.ino == self.1 {
+                    Err(errno::EACCES)
+                } else {
+                    Ok(())
+                }
+            }
+            fn symlink_budget(&self) -> u32 {
+                self.0.symlink_budget()
+            }
+            fn note_symlink(&self) {
+                self.0.note_symlink()
+            }
+        }
+        let raw = sample_tree();
+        let dir_ino = resolve(&raw, b"/dir", Final::Follow).unwrap().node.ino;
+        let pt = PermTree(raw, dir_ino);
+        assert_eq!(
+            resolve(&pt, b"/dir/file", Final::Follow),
+            Err(errno::EACCES)
+        );
+    }
+
+    #[test]
+    fn not_a_directory_is_enotdir() {
+        let t = sample_tree();
+        assert_eq!(
+            resolve(&t, b"/dir/file/child", Final::Follow),
+            Err(errno::ENOTDIR)
+        );
+        assert_eq!(
+            resolve(&t, b"/dir/file/", Final::Follow),
+            Err(errno::ENOTDIR)
+        );
+    }
+
+    #[test]
+    fn pathconf_reports_posix_limits_and_rejects_unknown_selector() {
+        use nolx_types::abi::pathconf_name::*;
+        assert_eq!(pathconf_value(PC_NAME_MAX), Ok(scalars::NAME_MAX as i64));
+        assert_eq!(pathconf_value(PC_PATH_MAX), Ok(scalars::PATH_MAX as i64));
+        assert_eq!(pathconf_value(PC_NO_TRUNC), Ok(1));
+        assert_eq!(pathconf_value(PC_CHOWN_RESTRICTED), Ok(1));
+        assert_eq!(pathconf_value(PC_2_SYMLINKS), Ok(1));
+        assert_eq!(
+            pathconf_value(PC_SYMLINK_MAX),
+            Ok(scalars::PATH_MAX as i64 - 1)
+        );
+        assert_eq!(pathconf_value(PC_FILESIZEBITS), Ok(64));
+        assert_eq!(pathconf_value(-999), Err(errno::EINVAL));
     }
 }

@@ -22,6 +22,11 @@ pub const PASS_MARKER: &str =
     "NOLX: user mode T2: hello ran in ring 3, hello exited with status 42, \
      init observed 42 and exited with status 42";
 
+/// The M7 ring-3 `tmpfs` T2 marker CI greps for.
+pub const TMPFS_PASS_MARKER: &str =
+    "NOLX: tmpfs T2: ring-3 open/write/lseek/read/close/unlink on /tmp/m7-check \
+     (28 bytes round-tripped, verified=true)";
+
 /// `hello`'s exit status the test demands.
 const HELLO_STATUS: i32 = 42;
 /// `init`'s exit status the test demands.
@@ -32,8 +37,10 @@ const INIT_PID: u64 = 1;
 const HELLO_PID: u64 = 2;
 /// Bytes in `hello`'s greeting line.
 const HELLO_WROTE: u64 = 25;
-/// Bytes in `init`'s success line.
-const INIT_WROTE: u64 = 34;
+/// Bytes in `init`'s output (`tmpfs: ring-3 read/write ok\n` + `init: child exited with status 42\n`).
+const INIT_WROTE: u64 = 62;
+/// Bytes round-tripped through `/tmp/m7-check` in `tmpfs`.
+const TMPFS_BYTES: u64 = 28;
 
 /// Start the user phase: install the idle thread and spawn `init` at ring 3.
 pub fn begin(console: &mut crate::hal::console::Console) {
@@ -80,6 +87,8 @@ pub fn complete() -> bool {
 pub fn report(console: &mut crate::hal::console::Console) -> bool {
     let init = process_status(INIT_PID);
     let hello = process_status(HELLO_PID);
+    let tmpfs = user::tmpfs_evidence();
+    user::cleanup_vfs();
 
     let hello_ok = hello.is_some_and(|(zombie, status, written)| {
         zombie && status == HELLO_STATUS && written >= HELLO_WROTE
@@ -87,9 +96,17 @@ pub fn report(console: &mut crate::hal::console::Console) -> bool {
     let init_ok = init.is_some_and(|(zombie, status, written)| {
         zombie && status == INIT_STATUS && written >= INIT_WROTE
     });
+    let tmpfs_ok = tmpfs.opens == 1
+        && tmpfs.bytes_written == TMPFS_BYTES
+        && tmpfs.seeks == 1
+        && tmpfs.bytes_read == TMPFS_BYTES
+        && tmpfs.closes == 1
+        && tmpfs.unlinks == 1
+        && tmpfs.verified;
 
-    if hello_ok && init_ok {
+    if hello_ok && init_ok && tmpfs_ok {
         let _ = writeln!(console, "{PASS_MARKER}");
+        let _ = writeln!(console, "{TMPFS_PASS_MARKER}");
         return true;
     }
 

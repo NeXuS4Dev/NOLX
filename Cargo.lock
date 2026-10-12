@@ -32,6 +32,8 @@ dependencies = [
  "nolx-mm-core",
  "nolx-obj-core",
  "nolx-types",
+ "nolx-vfs",
+ "nolxfs",
 ]
 
 [[package]]
@@ -58,6 +60,7 @@ name = "nolx-vfs"
 version = "0.1.0"
 dependencies = [
  "nolx-types",
+ "nolxfs",
 ]
 
 [[package]]

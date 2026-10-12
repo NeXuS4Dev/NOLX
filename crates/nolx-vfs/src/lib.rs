@@ -1,27 +1,38 @@
-//! The NOLX VFS: pathname resolution, mounts, and descriptors.
+//! Virtual File System, I/O Manager, Cache Manager, and filesystems (`devfs`, `tmpfs`,
+//! `initrd`, and `nolxfs`).
 //!
-//! This crate holds the parts of the filesystem layer whose behaviour POSIX specifies
-//! sentence by sentence and whose bugs are the most confusing kind -- a shell script that
-//! behaves differently on NOLX than on any other UNIX system. It is deliberately free of
-//! hardware and of any particular on-disk format, so all of it is testable on a host.
+//! This crate houses the host-testable core of Milestone 7 (`docs/architecture/02-posix-subsystem.md`
+//! and `docs/architecture/04-io-manager-drivers.md`):
 //!
-//! * [`path`] -- `namei`: the pathname resolution state machine.
-//! * [`mount`] -- the mount table and what happens at a mount point.
-//! * [`fd`] -- the per-process descriptor table.
-//!
-//! Errors here are POSIX `errno` values from [`nolx_types::errno`], because that is what
-//! the caller must ultimately return and translating twice is how error codes get lost.
+//! * [`io`]: IORBs, stack locations, completion routines, cancellation, completion ports,
+//!   driver objects, device stacks, and reference-tracked driver unload.
+//! * [`cache`]: `SharedCacheMap`, `copy_read` with sequential read-ahead, `copy_write` with
+//!   dirty-page tracking, the background lazy writer, and `MmFlushSection`.
+//! * [`path`]: POSIX `namei` pathname resolution (`SYMLOOP_MAX`, `O_NOFOLLOW`, `PATH_MAX`,
+//!   `NAME_MAX`, search permissions, `pathconf`).
+//! * [`mount`]: mount table with downward/upward crossings, propagation classes (`Private`,
+//!   `Shared`, `Slave`, `Unbindable`), bind mounts, and `pivot_root`.
+//! * [`fd`]: per-process file descriptor table (`dup`, `dup2`, `fcntl(F_DUPFD)`, `FD_CLOEXEC`).
+//! * [`devfs`]: `/dev/null`, `/dev/zero`, `/dev/full`, `/dev/console`, and custom char devices.
+//! * [`tmpfs`]: bounded in-memory POSIX filesystem with deferred unlink reclamation (`UN-001`),
+//!   hard links, symlinks, and atomic loop-checked `rename`.
+//! * [`initrd`]: SVR4 ASCII `cpio` (`070701`/`070702`) and POSIX `ustar` `tar` reader.
+//! * [`nolxfs_vfs`]: native NOLXFS volume driver backed by `crates/nolxfs` B-trees and extents.
+//! * [`vfs`]: unified `VirtualFileSystem`, `FileObject`, and `ProcessVfsContext` (`umask`,
+//!   `chdir`, `chroot`).
 
 #![cfg_attr(not(test), no_std)]
-#![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
 extern crate alloc;
 
+pub mod cache;
+pub mod devfs;
 pub mod fd;
+pub mod initrd;
+pub mod io;
 pub mod mount;
+pub mod nolxfs_vfs;
 pub mod path;
-
-pub use crate::fd::{Descriptor, DescriptorTable};
-pub use crate::mount::{MountTable, NodeId};
-pub use crate::path::{resolve, Resolution, Resolver};
+pub mod tmpfs;
+pub mod vfs;

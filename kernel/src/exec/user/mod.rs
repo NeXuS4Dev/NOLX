@@ -24,6 +24,9 @@ use core::mem::MaybeUninit;
 use nolx_exec_core::scheduler::{Policy, Scheduler, SchedulerError, ThreadState};
 use nolx_exec_core::ThreadId;
 use nolx_hal_core::interrupt::InterruptFrame;
+use nolx_vfs::fd::DescriptorTable;
+use nolx_vfs::tmpfs::Tmpfs;
+use nolx_vfs::vfs::{FsInstance, ProcessVfsContext, VirtualFileSystem};
 
 use crate::hal::context::initialize_user_stack;
 use crate::mm::space::{self, Space};
@@ -384,8 +387,23 @@ pub fn spawn(parent: u64, path: &str, image: &[u8], argv: &[&str]) -> Result<u64
     spawn_impl(&mut TABLE.lock(), parent, path, image, argv)
 }
 
-/// Prepare the scheduler for the user test: install the idle thread.
+/// Prepare the scheduler and VFS for the user test: install the idle thread and mount
+/// the ring-3 `tmpfs` instance.
 pub fn begin() -> Result<(), SetupError> {
+    {
+        let mut vfs = VirtualFileSystem::new();
+        let root = vfs
+            .mount_root(
+                FsInstance::Tmpfs(Tmpfs::with_limits(64, 16 * 1024)),
+                "tmpfs",
+            )
+            .expect("ring-3 root tmpfs mount must succeed");
+        let mut ctx = ProcessVfsContext::new(root);
+        ctx.fds = DescriptorTable::with_stdio(0, 1, 2);
+        let _ = vfs.mkdir(&ctx, b"/tmp", 0o777);
+        *USER_VFS.lock() = Some((vfs, ctx));
+        *TMPFS_EVIDENCE.lock() = TmpfsT2Evidence::new();
+    }
     let mut table = TABLE.lock();
     table
         .scheduler
@@ -596,4 +614,161 @@ pub fn active() -> bool {
                     .snapshot(process.thread_id)
                     .is_some_and(|snapshot| snapshot.state != ThreadState::Terminated)
         })
+}
+
+/// Kernel-observed evidence chain for the ring-3 `tmpfs` T2 round-trip test.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TmpfsT2Evidence {
+    /// Successful `SYS_OPEN` calls on `tmpfs`.
+    pub opens: u64,
+    /// Bytes written via `SYS_WRITE` to `tmpfs` descriptors (`fd >= 3`).
+    pub bytes_written: u64,
+    /// Successful `SYS_LSEEK` calls on `tmpfs` descriptors.
+    pub seeks: u64,
+    /// Bytes read back via `SYS_READ` from `tmpfs` descriptors.
+    pub bytes_read: u64,
+    /// Successful `SYS_CLOSE` calls on `tmpfs` descriptors.
+    pub closes: u64,
+    /// Successful `SYS_UNLINK` calls on `tmpfs`.
+    pub unlinks: u64,
+    /// `true` if the bytes read back via `SYS_READ` matched `"tmpfs: ring-3 read/write ok\n"`.
+    pub verified: bool,
+}
+
+impl TmpfsT2Evidence {
+    const fn new() -> Self {
+        Self {
+            opens: 0,
+            bytes_written: 0,
+            seeks: 0,
+            bytes_read: 0,
+            closes: 0,
+            unlinks: 0,
+            verified: false,
+        }
+    }
+}
+
+static USER_VFS: IrqMutex<Option<(VirtualFileSystem, ProcessVfsContext)>> = IrqMutex::new(None);
+static TMPFS_EVIDENCE: IrqMutex<TmpfsT2Evidence> = IrqMutex::new(TmpfsT2Evidence::new());
+
+/// Snapshot the ring-3 `tmpfs` T2 evidence chain.
+#[must_use]
+pub fn tmpfs_evidence() -> TmpfsT2Evidence {
+    *TMPFS_EVIDENCE.lock()
+}
+
+/// Release the ring-3 `VirtualFileSystem` heap allocations once all user processes have
+/// exited, returning the kernel heap to zero bytes in use before `mm::heap::selftest`.
+pub fn cleanup_vfs() {
+    *USER_VFS.lock() = None;
+}
+
+/// Ring-3 `open(path_user, flags, mode)` backed by `USER_VFS` (`tmpfs`).
+pub fn open_file(path_user: u64, flags: u32, mode: u32) -> Result<u64, i32> {
+    let slot = TABLE.lock().current.ok_or(nolx_types::errno::ESRCH)?;
+    // SAFETY: the calling thread's slot is live and its address space is active.
+    let space = unsafe { space_of(slot) };
+    let path = loader::read_user_string(space, path_user).map_err(load_error_code)?;
+
+    let mut guard = USER_VFS.lock();
+    let (vfs, ctx) = guard.as_mut().ok_or(nolx_types::errno::ENOENT)?;
+    let fd = vfs.open(ctx, path.as_bytes(), flags, mode)?;
+    TMPFS_EVIDENCE.lock().opens += 1;
+    Ok(fd as u64)
+}
+
+/// Ring-3 `close(fd)` backed by `USER_VFS`.
+pub fn close_file(fd: usize) -> Result<u64, i32> {
+    let mut guard = USER_VFS.lock();
+    let (vfs, ctx) = guard.as_mut().ok_or(nolx_types::errno::EBADF)?;
+    vfs.close(ctx, fd)?;
+    TMPFS_EVIDENCE.lock().closes += 1;
+    Ok(0)
+}
+
+/// Ring-3 `write(fd, user_buffer, length)` to an open `tmpfs` file (`fd >= 3`).
+pub fn write_file(fd: usize, user_buffer: u64, length: u64) -> Result<u64, i32> {
+    if length == 0 {
+        return Ok(0);
+    }
+    let slot = TABLE.lock().current.ok_or(nolx_types::errno::ESRCH)?;
+    // SAFETY: the calling thread's slot is live and its address space is active.
+    let space = unsafe { space_of(slot) };
+
+    let mut done = 0u64;
+    let mut chunk = [0u8; 256];
+    while done < length {
+        let take = (length - done).min(chunk.len() as u64) as usize;
+        loader::read_user(space, user_buffer + done, &mut chunk[..take])
+            .map_err(load_error_code)?;
+        let written = {
+            let mut guard = USER_VFS.lock();
+            let (vfs, ctx) = guard.as_mut().ok_or(nolx_types::errno::EBADF)?;
+            vfs.write(ctx, fd, &chunk[..take])?
+        };
+        done += written as u64;
+        if written < take {
+            break;
+        }
+    }
+    TMPFS_EVIDENCE.lock().bytes_written += done;
+    Ok(done)
+}
+
+/// Ring-3 `read(fd, user_buffer, length)` from an open `tmpfs` file.
+pub fn read_file(fd: usize, user_buffer: u64, length: u64) -> Result<u64, i32> {
+    if length == 0 {
+        return Ok(0);
+    }
+    let slot = TABLE.lock().current.ok_or(nolx_types::errno::ESRCH)?;
+    // SAFETY: the calling thread's slot is live and its address space is active.
+    let space = unsafe { space_of(slot) };
+
+    let mut done = 0u64;
+    let mut chunk = [0u8; 256];
+    while done < length {
+        let take = (length - done).min(chunk.len() as u64) as usize;
+        let n = {
+            let mut guard = USER_VFS.lock();
+            let (vfs, ctx) = guard.as_mut().ok_or(nolx_types::errno::EBADF)?;
+            vfs.read(ctx, fd, &mut chunk[..take])?
+        };
+        if n == 0 {
+            break;
+        }
+        loader::write_user(space, user_buffer + done, &chunk[..n]).map_err(load_error_code)?;
+        if done == 0 && n == 28 && &chunk[..28] == b"tmpfs: ring-3 read/write ok\n" {
+            TMPFS_EVIDENCE.lock().verified = true;
+        }
+        done += n as u64;
+        if n < take {
+            break;
+        }
+    }
+    TMPFS_EVIDENCE.lock().bytes_read += done;
+    Ok(done)
+}
+
+/// Ring-3 `lseek(fd, offset, whence)` on an open `tmpfs` file.
+pub fn lseek_file(fd: usize, offset: i64, whence: i32) -> Result<u64, i32> {
+    let mut guard = USER_VFS.lock();
+    let (vfs, ctx) = guard.as_mut().ok_or(nolx_types::errno::EBADF)?;
+    let pos = vfs.lseek(ctx, fd, offset, whence)?;
+    TMPFS_EVIDENCE.lock().seeks += 1;
+    Ok(pos)
+}
+
+/// Ring-3 `unlink(path_user)` on `USER_VFS`.
+pub fn unlink_file(path_user: u64) -> Result<u64, i32> {
+    let slot = TABLE.lock().current.ok_or(nolx_types::errno::ESRCH)?;
+    // SAFETY: the calling thread's slot is live and its address space is active.
+    let space = unsafe { space_of(slot) };
+    let path = loader::read_user_string(space, path_user).map_err(load_error_code)?;
+
+    let mut guard = USER_VFS.lock();
+    let (vfs, ctx) = guard.as_mut().ok_or(nolx_types::errno::ENOENT)?;
+    vfs.unlink(ctx, path.as_bytes())?;
+    TMPFS_EVIDENCE.lock().unlinks += 1;
+    Ok(0)
 }

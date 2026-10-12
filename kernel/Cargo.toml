@@ -36,3 +36,5 @@ nolx-obj-core = { path = "../crates/nolx-obj-core" }
 # table. Kernel-specific object headers and address-space storage wrap this core model.
 nolx-exec-core = { path = "../crates/nolx-exec-core" }
 nolx-types = { path = "../crates/nolx-types" }
+nolx-vfs = { path = "../crates/nolx-vfs" }
+nolxfs = { path = "../crates/nolxfs" }

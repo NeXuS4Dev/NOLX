@@ -463,7 +463,12 @@ mod tests {
         assert_eq!(syscall::SYS_WAITID, 4);
         assert_eq!(syscall::SYS_GETPID, 5);
         assert_eq!(syscall::SYS_POSIX_SPAWN, 31);
+        assert_eq!(syscall::SYS_OPEN, 100);
+        assert_eq!(syscall::SYS_CLOSE, 103);
+        assert_eq!(syscall::SYS_READ, 104);
         assert_eq!(syscall::SYS_WRITE, 105);
+        assert_eq!(syscall::SYS_LSEEK, 110);
+        assert_eq!(syscall::SYS_UNLINK, 139);
         assert_eq!(
             syscall::HIGHEST,
             syscall::TABLE.iter().map(|(n, _)| *n).max().unwrap()

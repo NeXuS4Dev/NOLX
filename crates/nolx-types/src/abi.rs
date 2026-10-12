@@ -162,6 +162,98 @@ pub const MAX_ARG_COUNT: usize = 128;
 /// Maximum bytes one argument or environment string may occupy on the initial stack.
 pub const MAX_ARG_BYTES: usize = 4096;
 
+/// Open file flags (`<fcntl.h>`).
+pub mod open_flags {
+    /// Open for reading only (`O_RDONLY`).
+    pub const O_RDONLY: u32 = 0x0000;
+    /// Open for writing only (`O_WRONLY`).
+    pub const O_WRONLY: u32 = 0x0001;
+    /// Open for reading and writing (`O_RDWR`).
+    pub const O_RDWR: u32 = 0x0002;
+    /// Mask for the file access modes (`O_ACCMODE`).
+    pub const O_ACCMODE: u32 = 0x0003;
+    /// Create file if it does not exist (`O_CREAT`).
+    pub const O_CREAT: u32 = 0x0040;
+    /// Exclusive use flag (`O_EXCL`).
+    pub const O_EXCL: u32 = 0x0080;
+    /// Do not assign controlling terminal (`O_NOCTTY`).
+    pub const O_NOCTTY: u32 = 0x0100;
+    /// Truncate flag (`O_TRUNC`).
+    pub const O_TRUNC: u32 = 0x0200;
+    /// Set append mode (`O_APPEND`).
+    pub const O_APPEND: u32 = 0x0400;
+    /// Non-blocking mode (`O_NONBLOCK`).
+    pub const O_NONBLOCK: u32 = 0x0800;
+    /// Write according to synchronized I/O data integrity completion (`O_DSYNC`).
+    pub const O_DSYNC: u32 = 0x1000;
+    /// Write according to synchronized I/O file integrity completion (`O_SYNC`).
+    pub const O_SYNC: u32 = 0x2000;
+    /// Synchronized read I/O operations (`O_RSYNC`).
+    pub const O_RSYNC: u32 = 0x4000;
+    /// Fail if not a directory (`O_DIRECTORY`).
+    pub const O_DIRECTORY: u32 = 0x0001_0000;
+    /// Do not follow symbolic links (`O_NOFOLLOW`).
+    pub const O_NOFOLLOW: u32 = 0x0002_0000;
+    /// Set `FD_CLOEXEC` atomically at open (`O_CLOEXEC`).
+    pub const O_CLOEXEC: u32 = 0x0008_0000;
+}
+
+/// `whence` values for `lseek(2)` (`<unistd.h>`).
+pub mod seek {
+    /// Set file offset to `offset` (`SEEK_SET`).
+    pub const SEEK_SET: i32 = 0;
+    /// Set file offset to current plus `offset` (`SEEK_CUR`).
+    pub const SEEK_CUR: i32 = 1;
+    /// Set file offset to EOF plus `offset` (`SEEK_END`).
+    pub const SEEK_END: i32 = 2;
+}
+
+/// `cmd` values and descriptor flags for `fcntl(2)` (`<fcntl.h>`).
+pub mod fcntl_cmd {
+    /// Duplicate file descriptor (`F_DUPFD`).
+    pub const F_DUPFD: i32 = 0;
+    /// Get file descriptor flags (`F_GETFD`).
+    pub const F_GETFD: i32 = 1;
+    /// Set file descriptor flags (`F_SETFD`).
+    pub const F_SETFD: i32 = 2;
+    /// Get file status flags and file access modes (`F_GETFL`).
+    pub const F_GETFL: i32 = 3;
+    /// Set file status flags (`F_SETFL`).
+    pub const F_SETFL: i32 = 4;
+    /// Duplicate file descriptor with the close-on-exec flag set (`F_DUPFD_CLOEXEC`).
+    pub const F_DUPFD_CLOEXEC: i32 = 1030;
+    /// Close the file descriptor upon execution of an `exec` family function (`FD_CLOEXEC`).
+    pub const FD_CLOEXEC: i32 = 1;
+}
+
+/// `name` values for `pathconf(2)` and `fpathconf(2)` (`<unistd.h>`).
+pub mod pathconf_name {
+    /// Maximum number of links to a single file (`_PC_LINK_MAX`).
+    pub const PC_LINK_MAX: i32 = 1;
+    /// Maximum number of bytes in a terminal canonical input line (`_PC_MAX_CANON`).
+    pub const PC_MAX_CANON: i32 = 2;
+    /// Minimum number of bytes for which space is available in a terminal input queue (`_PC_MAX_INPUT`).
+    pub const PC_MAX_INPUT: i32 = 3;
+    /// Maximum number of bytes in a filename (`_PC_NAME_MAX`).
+    pub const PC_NAME_MAX: i32 = 4;
+    /// Maximum number of bytes in a pathname, including the terminating NUL (`_PC_PATH_MAX`).
+    pub const PC_PATH_MAX: i32 = 5;
+    /// Maximum number of bytes that is guaranteed to be atomic when writing to a pipe (`_PC_PIPE_BUF`).
+    pub const PC_PIPE_BUF: i32 = 6;
+    /// The use of `chown` and `fchown` is restricted (`_PC_CHOWN_RESTRICTED`).
+    pub const PC_CHOWN_RESTRICTED: i32 = 7;
+    /// Pathname components longer than `NAME_MAX` generate an error (`_PC_NO_TRUNC`).
+    pub const PC_NO_TRUNC: i32 = 8;
+    /// Terminal special characters can be disabled using this character value (`_PC_VDISABLE`).
+    pub const PC_VDISABLE: i32 = 9;
+    /// Maximum number of bytes in a symbolic link (`_PC_SYMLINK_MAX`).
+    pub const PC_SYMLINK_MAX: i32 = 10;
+    /// Symbolic links can be created (`_PC_2_SYMLINKS`).
+    pub const PC_2_SYMLINKS: i32 = 11;
+    /// Minimum number of bits needed to represent the maximum file size (`_PC_FILESIZEBITS`).
+    pub const PC_FILESIZEBITS: i32 = 12;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
