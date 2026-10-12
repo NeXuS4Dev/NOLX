@@ -16,6 +16,7 @@ version = "0.1.0"
 dependencies = [
  "nolx-mm-core",
  "nolx-obj-core",
+ "nolx-types",
 ]
 
 [[package]]

@@ -141,10 +141,14 @@ impl<const NODES: usize> AddressSpace<NODES> {
         // slot. They are shared by reference (the entries point at the kernel's own PDPTs),
         // not copied, so a kernel mapping costs one table no matter how many address spaces
         // see it.
+        //
+        // The source is the *kernel's* root, not whatever root is currently loaded: a spawn
+        // runs under the parent's user CR3, and the parent's PML4 is a copy that could in
+        // principle be stale.
         let mut store = KernelTableStore::new();
-        let kernel_root = tables::current_root();
+        let kernel_root_frame = kernel_root();
         for slot in pml4_index(KERNEL_BASE)..512 {
-            let entry = store.entry(kernel_root, slot);
+            let entry = store.entry(kernel_root_frame, slot);
             if entry != 0 {
                 // SAFETY: the entry names a PDPT the kernel owns and is already walking, and
                 // the new PML4 is not the processor's root yet, so nothing else observes this

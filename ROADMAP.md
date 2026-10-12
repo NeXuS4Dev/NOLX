@@ -369,18 +369,36 @@ interleaved-output markers pass in QEMU; and every M5 assertion has a recorded t
 
 ### M6 implementation checkpoint — 2026-10-11
 
-The first M6 slice is in `crates/nolx-exec-core/src/elf.rs`: a bounded, allocation-free
-ELF64 `ET_EXEC` parser creates a load plan after validating file bounds, x86-64 identity,
-user virtual ranges, segment alignment and overlap, W^X, and executable entry-point
-membership. It also records validated `PT_INTERP`, `PT_TLS`, and `PT_GNU_STACK` metadata.
-The parser shares the user-range constants from `nolx-mm-core`; its host tests passed in
-[workflow 38163939179](https://github.com/NeXuS4Dev/NOLX/actions/runs/38163939179), and
-`ELF-001` is recorded as `tested-T1` in `docs/testing/assertions/elf.md`.
+**M6 is done on its milestone contract:** the listed tests pass in CI -- T2 "hello world"
+runs at ring 3 and exits with a status the parent observes, and T1 syscall table
+uniqueness/ABI round-trip is green in the host workspace -- and every M6 assertion is
+recorded in `docs/testing/assertions/` (`HAL-024..025`, `ELF-002..003`, `EXE-011..012`).
+The same boot run carries the M5 round-robin trace and the user-mode phase.
 
-This is validation groundwork, **not yet an executable loader**: mapping/copying pages,
-zero-fill, `ET_DYN` and ASLR, relocations, interpreter launch, auxv/initial stack, process
-creation, and the ring-3/syscall return path remain open. M6 remains in progress; no T2
-"hello world" claim is made by this slice.
+What the milestone body lists beyond those tests landed in slices:
+
+- **Ring-3 transition:** `syscall`/`sysret` fast path (`kernel/src/hal/syscall.S`), shared
+  conditional-`swapgs` restore path (`interrupts.S`), `TSS.RSP0` and a per-CPU scratch slot
+  updated per thread, `SFMASK` masking IF/TF/DF to close the pre-`swapgs` window. The GDT
+  orders the user pair data-below-code (0x18/0x23 selectors) for `sysret`, validated by
+  `scripts/verify-multiboot.py`.
+- **ELF64 loader:** `PT_LOAD` (R/W/X mapped to VAD protections, W^X refused), `PT_INTERP`,
+  `PT_TLS`, `PT_GNU_STACK` metadata; `ET_DYN` ASLR bias and `R_X86_64_RELATIVE`
+  relocations; auxv (`AT_PHDR`..`AT_EXECFN`, `AT_RANDOM`) and the SysV initial stack.
+  Page fills execute through the physical direct map, so `posix_spawn` can build a child's
+  space while the parent's space is the running one.
+- **Process creation:** `nxposix_spawn` (embedded-image registry, user-space argv pointer
+  table), `waitid(P_PID, WEXITED)` with a `siginfo` written at wake, `write`/`exit`/
+  `getpid`. The T2 evidence chain is kernel-observed: `hello` writes and exits 42, `init`
+  observes exactly 42 through `waitid` and exits 42.
+
+Checkpoint notes, honestly: `PT_INTERP` is parsed and recorded but not launched (there is
+no dynamic loader to start), and `nolx-libc` -- C17+POSIX headers, `crt0`, the dynloader,
+pthreads, locale, `dlopen` -- remains open work: the T2 programs are hand-assembled
+byte-deterministic images (`tools/user-elf/gen.py`) exercising the same ABI libc will.
+`fork`/`vfork`/`exec*` on top of `nxposix_spawn` (including true COW) is the process-model
+work of a later milestone slice. A full libc is the largest remaining M6 body item, in the
+same spirit as M5's SMP caveat.
 
 ## M7 — I/O Manager, VFS, and the first filesystems
 

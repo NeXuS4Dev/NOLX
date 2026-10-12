@@ -19,13 +19,25 @@ pub struct PerCpuData {
     pub cpu_id: u32,
     /// Nesting depth of interrupt dispatch on this processor.
     pub interrupt_depth: u32,
-    /// Current ring-0 stack top, later updated on a context switch.
+    /// Current ring-0 stack top, updated on every context switch.
     pub kernel_stack_top: u64,
+    /// Scratch slot holding the interrupted user `%rsp` across a `syscall` entry.
+    pub user_rsp_scratch: u64,
     /// Software IPL currently recorded for this processor.
     pub current_ipl: u8,
     /// Features detected on this processor at boot.
     pub features: CpuFeatures,
 }
+
+/// `offsetof(PerCpuData, kernel_stack_top)`, mirrored by `syscall.S`.
+pub const KERNEL_STACK_TOP_OFFSET: usize = 16;
+/// `offsetof(PerCpuData, user_rsp_scratch)`, mirrored by `syscall.S`.
+pub const USER_RSP_SCRATCH_OFFSET: usize = 24;
+
+const _: () =
+    assert!(core::mem::offset_of!(PerCpuData, kernel_stack_top) == KERNEL_STACK_TOP_OFFSET);
+const _: () =
+    assert!(core::mem::offset_of!(PerCpuData, user_rsp_scratch) == USER_RSP_SCRATCH_OFFSET);
 
 impl PerCpuData {
     const fn empty() -> Self {
@@ -34,6 +46,7 @@ impl PerCpuData {
             cpu_id: 0,
             interrupt_depth: 0,
             kernel_stack_top: 0,
+            user_rsp_scratch: 0,
             current_ipl: Ipl::PASSIVE.value(),
             features: CpuFeatures {
                 extended_edx: 0,
@@ -169,6 +182,45 @@ pub fn interrupts_enabled() -> bool {
         asm!("pushfq", "pop {}", out(reg) flags, options(nomem));
     }
     flags & (1 << 9) != 0
+}
+
+/// Publish the ring-0 stack a user-mode entry lands on: `TSS.RSP0` for interrupts and
+/// exceptions, and the GS scratch slot the `syscall` entry stub reads.
+///
+/// Both names are the same stack -- the current thread's kernel stack top -- and updating
+/// them together is what keeps a `syscall`, an IRQ, and an exception from disagreeing
+/// about where the kernel frame lives.
+pub fn set_kernel_stack_top(top: u64) {
+    // T2 forensics: a published zero top is exactly the failure mode that sent the next
+    // syscall entry to %rsp = 0. Catch it at the source.
+    assert!(top != 0, "set_kernel_stack_top(0)");
+    // SAFETY: `init` installed the BSP's GS base and the offset names a writable per-CPU
+    // field owned by the scheduler's context-switch path, which runs with interrupts off.
+    unsafe {
+        asm!(
+            "mov gs:[{offset}], {top}",
+            top = in(reg) top,
+            offset = const KERNEL_STACK_TOP_OFFSET,
+            options(nostack, preserves_flags),
+        );
+    }
+    super::tables::set_rsp0(top);
+}
+
+/// The ring-0 stack top a `syscall` from user mode will switch to.
+#[must_use]
+pub fn kernel_stack_top() -> u64 {
+    let top: u64;
+    // SAFETY: as `set_kernel_stack_top`; the field is always a valid stack top or zero.
+    unsafe {
+        asm!(
+            "mov {top}, gs:[{offset}]",
+            top = out(reg) top,
+            offset = const KERNEL_STACK_TOP_OFFSET,
+            options(nostack, readonly, preserves_flags),
+        );
+    }
+    top
 }
 
 /// Maskable interrupts, disabled for as long as the guard lives.

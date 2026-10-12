@@ -1,17 +1,6 @@
-# NOLX builds on stable Rust.
-#
-# We deliberately avoid nightly-only features. Everything the kernel needs -- `no_std`,
-# `core::arch::asm!`, `core::arch::global_asm!`, `MaybeUninit`, `const` generics -- is
-# stable, and a kernel that only builds on one specific nightly is a kernel that stops
-# building three months later.
-#
-# The kernel targets `x86_64-unknown-none`, a built-in tier-2 target with precompiled
-# `core` and `compiler_builtins`, so `-Z build-std` (and therefore nightly) is not needed.
-#
-#   rustup target add x86_64-unknown-none
-
+# Pin the toolchain: the ring-3 boot path must build identically everywhere.
+# 1.88.0 is the toolchain the M6 user-mode bring-up is verified against.
 [toolchain]
-channel = "stable"
+channel = "1.88.0"
 components = ["rustfmt", "clippy"]
 targets = ["x86_64-unknown-none"]
-profile = "minimal"

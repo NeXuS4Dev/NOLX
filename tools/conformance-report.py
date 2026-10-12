@@ -19,7 +19,6 @@ QEMU result has been recorded yet. Lines starting with `#` are comments.
 from __future__ import annotations
 
 import argparse
-import datetime
 import pathlib
 import re
 import sys
@@ -122,7 +121,7 @@ def render(rows: list[Row], errors: list[str]) -> str:
     )
     out.append("")
     out.append(
-        f"_Generated {datetime.date.today().isoformat()} from {len(rows)} assertions._"
+        f"_Generated from {len(rows)} assertions._"
     )
     out.append("")
 

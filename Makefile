@@ -4,6 +4,7 @@
 #   make kernel     build the kernel ELF for x86_64-unknown-none
 #   make bootcheck  assemble + link + validate the boot layer (needs no Rust at all)
 #   make fscheck    regenerate NOLXFS layouts, run layout tests, check the conformance DB
+#   make usercheck  regenerate the embedded ring-3 programs, fail if the tree is stale
 #   make report     regenerate docs/testing/CONFORMANCE.md
 #   make iso        build/nolx.iso, bootable with GRUB
 #   make run        boot under QEMU with the serial console on stdio
@@ -40,10 +41,10 @@ KERNEL_RUSTFLAGS := -C relocation-model=static -C code-model=kernel \
                     -C link-arg=-T$(CURDIR)/kernel/linker.ld \
                     -C link-arg=-no-pie -C link-arg=--build-id=none
 
-.PHONY: all check kernel bootcheck fscheck report iso run run-kernel mkfs fmt lint clean help \
+.PHONY: all check kernel bootcheck fscheck usercheck report iso run run-kernel mkfs fmt lint clean help \
         $(BUILD)
 
-all: check bootcheck fscheck kernel
+all: check bootcheck fscheck usercheck kernel
 
 $(BUILD):
 	@mkdir -p $(BUILD)
@@ -68,6 +69,10 @@ fscheck:
 	$(PYTHON) tools/nolxfs-codegen/gen.py --check
 	$(PYTHON) tools/nolxfs-codegen/test_layout.py
 	$(PYTHON) tools/conformance-report.py --check
+
+# Ring-3 test programs: hand-assembled, byte-deterministic, regenerated in place.
+usercheck:
+	$(PYTHON) tools/user-elf/gen.py --check
 
 report:
 	$(PYTHON) tools/conformance-report.py
