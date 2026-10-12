@@ -32,8 +32,10 @@ use crate::sync::{IrqMutex, SyncCell};
 /// The fixed number of user processes the table holds.
 pub const MAX_USER_PROCESSES: usize = 4;
 
-/// Kernel stack size per user thread: the entry stubs build a full frame here.
-pub const KERNEL_STACK_SIZE: usize = 16 * 1024;
+/// Kernel stack size per user thread: the entry stubs build a full frame here, and the
+/// loader runs on it with its load plan -- 32 KiB so a spawn can never borrow against the
+/// statics that sit below the stack.
+pub const KERNEL_STACK_SIZE: usize = 32 * 1024;
 
 /// User stack size, committed eagerly for the initial image and growable below.
 pub const USER_STACK_SIZE: u64 = 64 * 1024;
@@ -209,7 +211,12 @@ pub(crate) unsafe fn on_syscall(frame: *mut InterruptFrame) -> *mut InterruptFra
     };
     // SAFETY: as above; the same frame, still alive on this thread's kernel stack.
     let number = unsafe { (*frame).rax };
-    let result = crate::psx::dispatch(number as crate::psx::Number, request);
+    // The register is 64 bits and the table is 16: an unguarded cast would let a caller
+    // reach any handler by adding a multiple of 2^16 to the number.
+    let result = match u16::try_from(number) {
+        Ok(number) => crate::psx::dispatch(number, request),
+        Err(_) => -(nolx_types::errno::ENOSYS as i64),
+    };
     // SAFETY: as above; the frame is exclusive to this thread between entry and restore.
     unsafe {
         (*frame).rax = result as u64;

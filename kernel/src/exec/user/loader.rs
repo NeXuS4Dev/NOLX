@@ -338,7 +338,8 @@ pub fn load(
         }
     }
 
-    for relocation in image::relocations(image_bytes, &plan, bias)?.iter() {
+    for relocation in image::relocation_iter(image_bytes, &plan, bias)? {
+        let relocation = relocation?;
         write_user(space, relocation.address, &relocation.value.to_le_bytes())?;
     }
 

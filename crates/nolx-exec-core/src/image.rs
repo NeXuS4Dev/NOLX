@@ -229,22 +229,88 @@ const RELA_ENTRY_SIZE: u64 = 24;
 /// the executive's early-boot budget and is asserted, not assumed.
 pub const MAX_RELOCATIONS: usize = 256;
 
-/// Validate and collect the `R_X86_64_RELATIVE` relocations of `plan`.
+/// A bounded, allocation-free walk of one image's `DT_RELA` table.
+///
+/// The kernel applies relocations straight from this iterator: collecting them into a
+/// [`RelocationList`] first would put kilobytes of records on a process kernel stack,
+/// which is how the first ring-3 boot run lost its stack. [`relocations`] collects on the
+/// host, where the stack is deep.
+pub struct RelocationIter<'a> {
+    entries: &'a [[u8; RELA_ENTRY_SIZE as usize]],
+    plan: &'a Elf64LoadPlan<'a>,
+    bias: u64,
+    index: usize,
+}
+
+impl<'a> RelocationIter<'a> {
+    /// How many `DT_RELA` entries the table holds, `R_X86_64_NONE` included.
+    #[must_use]
+    pub const fn entries(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+impl Iterator for RelocationIter<'_> {
+    type Item = Result<Relocation, ImageError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let chunk = *self.entries.get(self.index)?;
+            self.index += 1;
+            match decode_relocation(&chunk, self.plan, self.bias) {
+                Ok(Some(relocation)) => return Some(Ok(relocation)),
+                Ok(None) => continue, // R_X86_64_NONE: nothing to apply.
+                Err(error) => return Some(Err(error)),
+            }
+        }
+    }
+}
+
+fn decode_relocation(
+    chunk: &[u8; RELA_ENTRY_SIZE as usize],
+    plan: &Elf64LoadPlan<'_>,
+    bias: u64,
+) -> Result<Option<Relocation>, ImageError> {
+    let offset = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
+    let info = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
+    let addend = i64::from_le_bytes(chunk[16..24].try_into().unwrap());
+    match info & 0xffff_ffff {
+        R_X86_64_NONE => Ok(None),
+        R_X86_64_RELATIVE => {
+            let address = offset
+                .checked_add(bias)
+                .ok_or(ImageError::RelocationOutOfBounds)?;
+            let value = (addend as u64)
+                .checked_add(bias)
+                .ok_or(ImageError::RelocationOutOfBounds)?;
+            if virtual_to_file(plan, offset).is_none() {
+                return Err(ImageError::RelocationOutOfBounds);
+            }
+            Ok(Some(Relocation { address, value }))
+        }
+        _ => Err(ImageError::UnsupportedRelocation),
+    }
+}
+
+/// Open the `R_X86_64_RELATIVE` relocation stream of `plan`.
 ///
 /// The dynamic table is walked inside `image` at the file range recorded in the plan; each
 /// `DT_RELA` target address is translated back to a file offset through the load segments.
 /// `R_X86_64_NONE` is accepted and skipped; every other type is refused, because a static
 /// loader that silently ignores a `GLOB_DAT` is a loader that produces a corrupt process.
-pub fn relocations(
-    image: &[u8],
-    plan: &Elf64LoadPlan<'_>,
+pub fn relocation_iter<'a>(
+    image: &'a [u8],
+    plan: &'a Elf64LoadPlan<'a>,
     bias: u64,
-) -> Result<RelocationList, ImageError> {
+) -> Result<RelocationIter<'a>, ImageError> {
+    let empty = || RelocationIter {
+        entries: &[],
+        plan,
+        bias,
+        index: 0,
+    };
     let Some(table) = plan.dynamic() else {
-        return Ok(RelocationList {
-            items: [None; MAX_RELOCATIONS],
-            count: 0,
-        });
+        return Ok(empty());
     };
 
     let table_start =
@@ -274,10 +340,7 @@ pub fn relocations(
         return Err(ImageError::MalformedDynamic);
     }
     if rela_size == 0 {
-        return Ok(RelocationList {
-            items: [None; MAX_RELOCATIONS],
-            count: 0,
-        });
+        return Ok(empty());
     }
 
     let count =
@@ -296,33 +359,31 @@ pub fn relocations(
         .get(rela_start..rela_end)
         .ok_or(ImageError::RelocationOutOfBounds)?;
 
-    let mut items = [None; MAX_RELOCATIONS];
     let (rela_entries, _) = rela_bytes.as_chunks::<{ RELA_ENTRY_SIZE as usize }>();
-    for (index, chunk) in rela_entries.iter().enumerate() {
-        let offset = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
-        let info = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
-        let addend = i64::from_le_bytes(chunk[16..24].try_into().unwrap());
-        match info & 0xffff_ffff {
-            R_X86_64_NONE => continue,
-            R_X86_64_RELATIVE => {
-                let address = offset
-                    .checked_add(bias)
-                    .ok_or(ImageError::RelocationOutOfBounds)?;
-                let value = (addend as u64)
-                    .checked_add(bias)
-                    .ok_or(ImageError::RelocationOutOfBounds)?;
-                if virtual_to_file(plan, offset).is_none() {
-                    return Err(ImageError::RelocationOutOfBounds);
-                }
-                items[index] = Some(Relocation { address, value });
-            }
-            _ => return Err(ImageError::UnsupportedRelocation),
-        }
-    }
-    Ok(RelocationList {
-        items,
-        count: rela_entries.len(),
+    Ok(RelocationIter {
+        entries: rela_entries,
+        plan,
+        bias,
+        index: 0,
     })
+}
+
+/// Validate and collect the `R_X86_64_RELATIVE` relocations of `plan`.
+///
+/// A convenience over [`relocation_iter`] for host tests and callers that want the whole
+/// list in hand. The kernel must not use this on a kernel stack: the list is kilobytes.
+pub fn relocations(
+    image: &[u8],
+    plan: &Elf64LoadPlan<'_>,
+    bias: u64,
+) -> Result<RelocationList, ImageError> {
+    let iter = relocation_iter(image, plan, bias)?;
+    let count = iter.entries();
+    let mut items = [None; MAX_RELOCATIONS];
+    for (applied, relocation) in iter.enumerate() {
+        items[applied] = Some(relocation?);
+    }
+    Ok(RelocationList { items, count })
 }
 
 /// The validated relocation list: fixed capacity, no allocation.
@@ -1037,6 +1098,25 @@ mod tests {
             init.windows(33)
                 .any(|window| window == b"init: child exit status mismatch\n"),
             "init's failure line is in its image"
+        );
+    }
+}
+
+#[cfg(test)]
+mod size_audit {
+    use super::*;
+
+    #[test]
+    fn the_kernel_stack_residents_stay_small() {
+        // The kernel applies relocations on a process kernel stack through
+        // `RelocationIter`, never `RelocationList`: that list is the whole reason the
+        // first ring-3 boot run lost its stack. These bounds are the contract.
+        let plan = core::mem::size_of::<crate::elf::Elf64LoadPlan<'static>>();
+        let iter = core::mem::size_of::<RelocationIter<'static>>();
+        assert!(plan <= 2048, "load plan grew past 2 KiB of stack: {plan}");
+        assert!(
+            iter <= 256,
+            "relocation iterator grew past 256 B of stack: {iter}"
         );
     }
 }
