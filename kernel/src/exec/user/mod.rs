@@ -301,13 +301,19 @@ fn resume_thread(table: &mut UserTable, next: Option<ThreadId>) -> *mut Interrup
                 table.frame_pointer(slot)
             ));
             {
-                let root = unsafe { space_of(slot) }.root();
+                // SAFETY: the new slot is live and its space was just activated; the borrow
+                // ends before this block returns and nothing else touches the slot here.
+                let target = unsafe { space_of(slot) };
+                let root = target.root();
                 let read_entry = |table_frame: u64, index: usize| -> u64 {
                     let byte = table_frame * 4096 + (index as u64) * 8;
+                    // SAFETY: every page-table frame is mapped by the direct map, and this
+                    // is the only reader while interrupts are off.
                     unsafe { core::ptr::read_volatile(crate::mm::phys::direct_ptr::<u64>(byte)) }
                 };
                 let kroot = crate::mm::space::kernel_root_frame();
                 let frame_ptr = table.frame_pointer(slot);
+                // SAFETY: the frame lives on this slot's kernel stack and stays live.
                 let frame = unsafe { &*frame_ptr };
                 crate::exec::user::dbg_line(format_args!(
                     "NOLX: t2-dbg space root={root:?} pml4[256]={:#x} pml4[510]={:#x} pml4[511]={:#x}",
@@ -329,6 +335,20 @@ fn resume_thread(table: &mut UserTable, next: Option<ThreadId>) -> *mut Interrup
                     frame.stack_pointer,
                     frame.stack_segment
                 ));
+                let code = target.translate(frame.instruction_pointer);
+                let stack = target.translate(frame.stack_pointer - 8);
+                crate::exec::user::dbg_line(format_args!(
+                    "NOLX: t2-dbg user maps code={code:?} stack={stack:?}"
+                ));
+                if let Some(code_map) = code {
+                    let phys = code_map.physical;
+                    let word =
+                        // SAFETY: the translation named this frame; the direct map covers it.
+                        unsafe { core::ptr::read_volatile(crate::mm::phys::direct_ptr::<u64>(phys)) };
+                    crate::exec::user::dbg_line(format_args!(
+                        "NOLX: t2-dbg code bytes at phys={phys:#x}: {word:#x}"
+                    ));
+                }
             }
         }
     }
