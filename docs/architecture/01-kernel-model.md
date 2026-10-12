@@ -169,7 +169,7 @@ Process and thread objects, the dispatcher, and the scheduler. Detailed in
 | Mechanism | Enforces |
 |---|---|
 | Rust visibility (`pub(crate)`, private modules) | Component interfaces |
-| `unsafe` confined to `hal/`, `mm/paging.rs`, and `obj/raw.rs` | Memory-safety budget |
+| `unsafe` confined to the code that must hold it -- `kernel/src/hal/`, `kernel/src/mm/`, `kernel/src/obj/`, `kernel/src/exec/`, and `kernel/src/sync.rs` -- and every block carrying a `// SAFETY:` invariant | Memory-safety budget |
 | Trait objects for device dispatch | Driver replaceability |
 | Object type callbacks | Uniform lifetime/security for every object |
 | IPL assertions | Blocking discipline |

@@ -285,7 +285,7 @@ next step to stop guessing.
   `kernel/src/obj/mod.rs` and checks the same transitions in its boot selftest. Factoring the
   shared rules into the kernel implementation remains a possible follow-up.
 
-### M4 implementation checkpoint 6 — lifecycle callbacks and namespace isolation (pending CI)
+### M4 implementation checkpoint 6 — lifecycle callbacks and namespace isolation (verified in CI)
 
 `kernel/src/obj/mod.rs` now gives object types create/open/parse/close/delete callbacks, and
 `kernel/src/obj/boot.rs` dispatches each hook at the appropriate object lifecycle transition.
@@ -293,13 +293,71 @@ The Device selftest covers successful callback dispatch and create/open rollback
 are initialized below `\Sessions\<id>`; private namespaces have independent fixed-capacity
 roots, boundary-descriptor checks on read/write/delete, audited decisions, stale-generation
 rejection, and nonempty-destroy refusal. The boot test uses equal names in two sessions and two
-private roots to prove the state stays isolated. CI asserts the new boot markers before this
-checkpoint is promoted.
+private roots to prove the state stays isolated. The three new markers are asserted by the boot
+smoke test, and workflow run
+[38249363821](https://github.com/NeXuS4Dev/NOLX/actions/runs/38249363821) on revision `15aee68`
+passed every job with them, so the checkpoint is verified in CI rather than merely implemented.
 
 The current header ABI and its out-of-line fields are documented in
 `docs/architecture/01-kernel-model.md`: security descriptors are held in the boot manager's
 parallel table and names are namespace bindings. The quota-owner pointer/body allocation remains
 future work rather than an implemented header field.
+
+### M4 verification checkpoint — 2026-10-12
+
+M4 is **done**: the code exists, the tests listed under it pass in CI, and its assertions are
+recorded in `docs/testing/assertions/obj.md`. All fourteen rows are now backed by a passing
+record -- nine `tested-T1` host rows and five `tested-T2` boot rows (OBJ-006, OBJ-010, OBJ-011,
+OBJ-012, OBJ-013); no `pending-T2` row is left in the area.
+
+* **What CI proves.** Run [38249363821](https://github.com/NeXuS4Dev/NOLX/actions/runs/38249363821)
+  ran on revision `15aee68`, the tree that carries checkpoint 6, and every one of the six jobs
+  passed: boot layer, NOLXFS layout, host tests, fmt + clippy + unsafe audit, the
+  `x86_64-unknown-none` kernel build, and the QEMU boot smoke test. The host-test log names the
+  M4 cases individually -- `handle::fuzz_tests::random_open_close_matches_a_shadow_model` (20,000
+  steps against a shadow model),
+  `refcount::fuzz_tests::random_open_close_unbind_keeps_counts_exact_and_frees_once` (30,000 steps
+  against an oracle), the `namespace::tests` suite including the three private-namespace boundary
+  cases, and the `security::tests` ACL, integrity, privilege, and audit-wrap vectors -- with no
+  failure in any target. The boot smoke test greps for each M4 marker -- `NOLX: objmgr online`,
+  `obj: namespace: \Device ...`, `NOLX: obj selftest: 1 object, 2 handles`,
+  `NOLX: obj session selftest: sessions 0 and 1 are isolated`,
+  `NOLX: obj private namespace selftest: boundaries enforced, isolated roots`,
+  `NOLX: obj type callback selftest: create/open/parse/close/delete invoked`, and
+  `NOLX: srm selftest: 10 access checks (6 granted, 4 denied)` -- and the same job fails on any
+  `PANIC`, `BUGCHECK`, or `CPU exception` line. The self test prints its markers only after every
+  check returns `Ok`, and `kernel/src/main.rs` panics on any `Err`, so a marker in the log is the
+  checks having passed, not a banner printed regardless of them. The pull request that records this
+  promotion re-runs the same six jobs on the tree carrying it, and its log is posted there.
+* **What the serial log shows.** `report-serial` posts the log to the pull request, so the detail
+  behind the markers is readable rather than trusted:
+  `refcount (1,0) -> (2,1) -> (3,2) -> (2,1) -> (1,1) -> freed, live objects 0 -> 0; audit ok`,
+  `private namespace selftest: boundaries enforced, isolated roots, stale ids rejected, audit
+  delta 15 (1 refused)`, and `srm selftest: 10 access checks (6 granted, 4 denied), 1 backup
+  bypass, 1 integrity refusal, 1 deny entry`. The two audit pairs are the manager's own counters
+  read back at boot: part two requires the log's delta to equal `cases + 2` decisions and exactly
+  the four refusing cases, and the private-namespace phase requires its own delta to be 15 decisions
+  with 1 refusal. The printed numbers are therefore what the audit log measured, and a boot that
+  disagreed would print nothing at all and panic instead.
+* **What was re-run in the sandbox.** `make bootcheck` (boot trampoline assembled, linked against
+  the real `kernel/linker.ld`, Multiboot header and 256 stubs validated), `make fscheck` (layout
+  generator idempotent, 31 layout tests, conformance database 141 assertions / 0 problems),
+  `make usercheck`, and `scripts/check-unsafe.sh` (219 unsafe blocks, 0 without a `SAFETY:`
+  comment). This sandbox has no `rustc` and no QEMU, and its network reaches neither the Rust
+  distribution nor a package mirror, so `cargo test`, clippy, the kernel build, and the QEMU boot
+  are not re-executed here -- they are read off the CI run above, which is the record this project
+  promotes on.
+* **Two under-claims found and fixed while verifying.** OBJ-014 named three host tests that exist
+  and run in CI but was still recorded as `implemented`, so it is now `tested-T1`; and the five M4
+  boot rows still read `pending-T2` although `docs/architecture` and this roadmap already described
+  checkpoints 3 to 6 as CI-verified, which is what the promotion above settles. `01-kernel-model.md`
+  also still described the `unsafe` budget as `hal/`, `mm/paging.rs`, and `obj/raw.rs`, and neither
+  of those two files exists; the row now names the trees that actually hold unsafe blocks and the
+  rule CI enforces.
+* **Not claimed.** Object-body allocation and per-body quota ownership stay deferred (see the
+  checkpoint 6 text and `01-kernel-model.md` §3), and the callback assertion is "each Device hook
+  ran" rather than an exact invocation count; pinning the counts to exact values is the natural
+  next step once a second object type registers callbacks.
 
 ## M5 — Executive core: processes, threads, dispatcher
 

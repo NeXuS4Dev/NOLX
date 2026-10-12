@@ -81,8 +81,13 @@ Boot log markers used by CI:
 | `NOLX: timer reached 100 ticks` | T2 confirmed 100 periodic timer interrupts and a monotonic-clock read |
 | `wall-clock: CMOS RTC UTC epoch=` | T2 confirmed the CMOS source was decoded and reported during boot |
 | `NOLX: mm online` | M3 memory-map bootstrap initialized |
-| `NOLX: objmgr online` | M4 complete |
-| `NOLX: init started` | user mode reached |
+| `NOLX: objmgr online` | The Object Manager registered its types; the executive can create objects |
+| `NOLX: obj selftest: 1 object, 2 handles` | M4 reference rules: a handle implies a pointer reference, a widening duplicate is refused, and the object is freed exactly when the last reference goes |
+| `NOLX: obj session selftest: sessions 0 and 1 are isolated` | M4 per-session directories below `\Sessions\<id>` resolve an equal name to distinct objects |
+| `NOLX: obj private namespace selftest: boundaries enforced, isolated roots` | M4 private namespaces: independent roots, boundary READ/WRITE/DELETE checks, nonempty-destroy refusal, stale-id rejection, exact audit delta |
+| `NOLX: obj type callback selftest: create/open/parse/close/delete invoked` | M4 object-type lifecycle callbacks dispatched at their transitions, with create/open rollback |
+| `NOLX: srm selftest: 10 access checks (6 granted, 4 denied)` | M4 Security Reference Monitor: DACL order, privileges, integrity labels, and audit totals agree with the cases |
+| `NOLX: user mode T2: init spawned (pid 1), entering ring 3` | user mode reached; CI also requires the parent-observed exit status 42 and the ring-3 tmpfs round-trip |
 
 CI's normal QEMU smoke test asserts ACPI, HPET, APIC calibration, HAL, memory, and subsystem
 markers and waits for 100 selected-backend timer interrupts. A second boot hides local-APIC
