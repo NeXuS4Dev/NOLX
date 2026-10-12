@@ -165,7 +165,8 @@ jobs:
   #
   # The list below is the project's honest progress record: a marker is asserted when the
   # kernel emits it, and not before. M6 reaches ring 3: the same run carries the M5
-  # kernel-thread round-robin and the user-mode "hello world" T2 test.
+  # kernel-thread round-robin, the M6 user-mode "hello world" T2 test, and the M7 I/O,
+  # Cache Manager, VFS/filesystems, and ring-3 tmpfs read/write T2 tests.
   boot-smoke:
     name: QEMU boot smoke test
     runs-on: ubuntu-latest
@@ -252,10 +253,17 @@ jobs:
             "NOLX: srm selftest: 10 access checks (6 granted, 4 denied)" \
             "NOLX: process selftest: 2 processes, 2 address spaces, PEB/job metadata, thread context, isolated/inherited handles, token-checked open/deny, teardown returned resources" \
             "NOLX: executive scheduler prepared: BSP idle context, three kernel threads, 16 KiB stacks" \
+            "io: 16 major codes" \
+            "NOLX: io selftest: 2 drivers, 2 stacked devices, 3 IORBs (1 sync, 1 async completion port, 1 cancelled), unload busy->ok; audit ok" \
+            "NOLX: cache selftest: 1 shared map, 2 copy-writes, 3 copy-reads, 2 read-ahead pages, lazy writer + MmFlushSection flushed 2 dirty pages; audit ok" \
+            "NOLX: vfs selftest: mounted tmpfs(/), devfs(/dev), initrd(/initrd), nolxfs(/mnt/nolxfs); tmpfs write/read 32 bytes verified=true, devfs ok, initrd ok, nolxfs ok; audit ok" \
+            "NOLX: io online" \
             "NOLX: round-robin T2:" \
             "NOLX: user mode T2: init spawned (pid 1), entering ring 3" \
             "hello: hello from ring 3" \
+            "tmpfs: ring-3 read/write ok" \
             "init: child exited with status 42" \
+            "NOLX: tmpfs T2: ring-3 open/write/lseek/read/close/unlink on /tmp/m7-check (28 bytes round-tripped, verified=true)" \
             "NOLX: init sequence complete, halting the boot processor" \
             "NOLX: timer reached 100 ticks; nominal 100 Hz"
           do
@@ -274,6 +282,12 @@ jobs:
             'NOLX: user mode T2: hello ran in ring 3, hello exited with status 42, init observed 42 and exited with status 42' \
             build/serial.log; then
             echo "the ring-3 hello world did not run to a parent-observed exit status 42"
+            exit 1
+          fi
+          if ! grep -qF \
+            'NOLX: tmpfs T2: ring-3 open/write/lseek/read/close/unlink on /tmp/m7-check (28 bytes round-tripped, verified=true)' \
+            build/serial.log; then
+            echo "the ring-3 tmpfs read/write round-trip did not complete cleanly"
             exit 1
           fi
           if grep -qF 'NOLX: user mode T2: FAIL' build/serial.log; then

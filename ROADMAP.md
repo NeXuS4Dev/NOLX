@@ -415,6 +415,43 @@ same spirit as M5's SMP caveat.
 - Tests: T1 pathname-resolution state machine against a scripted filesystem tree
   (every POSIX `pathconf`/`ENOENT`/`ELOOP` case); T2 read/write a file in tmpfs.
 
+### M7 implementation checkpoint — 2026-10-12
+
+**M7 is done:** its code, host tests (T1), QEMU boot self-tests and ring-3 `tmpfs` round-trip
+(T2), and specification assertions (`docs/testing/assertions/vfs.md` and
+`docs/testing/assertions/io.md`) are in place and verified in CI (workflow
+[38240528081](https://github.com/NeXuS4Dev/NOLX/actions/runs/38240528081) on revision
+`6dfedca` passed all six jobs):
+
+- **I/O Manager and device stacks (`crates/nolx-vfs/src/io.rs`, `kernel/src/io/mod.rs`):**
+  fixed-size `Iorb` with 16 `MajorFunction` codes, 8-deep `IoStackLocation` arrays,
+  top-down filter/function device dispatch, bottom-up completion routines with
+  `ContinueCompletion` / `ShortCircuit`, `IoCompletionPort` queuing for asynchronous IORBs,
+  atomic cancellation routines (`ECANCELED`), and reference-tracked `DriverObject` unload
+  (`EBUSY` while devices or in-flight IORBs remain).
+- **Cache Manager (`crates/nolx-vfs/src/cache.rs`):** `SharedCacheMap` with 4 KiB
+  page-granular caching (`copy_read`, `copy_write`), sequential detector and read-ahead
+  prefetching, bounded background `lazy_writer_tick`, and `mm_flush_section` /
+  `mm_purge_section` coherency primitives.
+- **VFS layer (`crates/nolx-vfs/src/{path,mount,fd,vfs}.rs`):** `FileObject` open-file
+  descriptions, `namei` pathname resolution with `SYMLOOP_MAX`, `O_NOFOLLOW`, `..` across
+  mount points, `chroot` confinement, `pathconf` / `fpathconf` limits, mount propagation
+  classes (`Private`, `Shared` peer groups, `Slave` one-way propagation, `Unbindable`) and
+  `pivot_root`, `DescriptorTable` with `dup`, `dup2`, and `fcntl` (`F_DUPFD`,
+  `F_DUPFD_CLOEXEC`, `F_GETFD`, `F_SETFD`, `F_GETFL`, `F_SETFL`), and `umask` mode masking.
+- **Filesystems (`crates/nolx-vfs/src/{devfs,tmpfs,initrd,nolxfs_vfs}.rs`):**
+  `devfs` (`/dev/null`, `/dev/zero`, `/dev/full`, `/dev/console`, and custom `mknod`
+  nodes), bounded `tmpfs` (regular files, directories, symlinks, hard links, rename with
+  descendant cycle detection, unlink-while-open retention until last descriptor close, and
+  inode/byte quotas), read-only `initrd` (SVR4 `newc` cpio and POSIX `ustar` tar archives),
+  and the `NOLXFS` VFS driver backed by `crates/nolxfs` (`mkfs::probe`, B-tree
+  `INODE`/`DIR_REC`/`FILE_EXTENT` records, and Fletcher-64 verification).
+- **Ring-3 `tmpfs` T2 and POSIX syscalls (`kernel/src/psx/mod.rs`, `kernel/src/exec/user/`):**
+  `SYS_OPEN`, `SYS_CLOSE`, `SYS_READ`, `SYS_WRITE`, `SYS_LSEEK`, and `SYS_UNLINK` wired into
+  the ring-3 syscall table; `init` opens `/tmp/m7-check` (`O_CREAT | O_EXCL | O_RDWR`),
+  writes 28 bytes, `lseek`s to 0, reads back 28 bytes, closes and unlinks `/tmp/m7-check`,
+  and prints the round-tripped payload to stdout before spawning `hello`.
+
 ## M8 — NOLXFS
 
 APFS-shaped design, our own implementation: container → checkpoint ring → live superblock

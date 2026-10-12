@@ -1,0 +1,13 @@
+# Assertions: I/O Manager, device stacks, and Cache Manager
+
+Source: NOLX M7 -- `ROADMAP.md`, `docs/architecture/04-io-manager-drivers.md`, and the I/O Manager and Cache Manager contracts in `crates/nolx-vfs` and `kernel/src/io/mod.rs`.
+
+Rows are pipe-delimited: `ID | specification reference | status | test`.
+Statuses: `unimplemented`, `implemented`, `tested-T1`, `pending-T2`, `tested-T2`, `tested-T3`.
+A `tested-*` row that names no test is rejected by the generator.
+
+IO-001 | NOLX M7 IORB and Device Stack: fixed-size IORB with per-layer stack locations routes major/minor function codes top-down through attached filter and function device objects and runs completion routines bottom-up with ShortCircuit | tested-T1 | crates/nolx-vfs io::tests::synchronous_dispatch_walks_two_layer_stack_and_completes_bottom_up, completion_routine_short_circuit_halts_upward_walk
+IO-002 | NOLX M7 Asynchronous I/O and Cancellation: Pending IORBs post completions to bound IoCompletionPorts when completed, and cancel_iorb atomically invokes the installed cancel routine and completes with ECANCELED | tested-T1 | crates/nolx-vfs io::tests::asynchronous_iorb_posts_to_completion_port_on_complete, cancel_iorb_invokes_cancel_routine_and_posts_ecanceled
+IO-003 | NOLX M7 Driver Reference Tracking and Unload: DriverObject tracks owned devices and in-flight IORBs, refusing unload_driver with EBUSY until all in-flight IORBs complete and devices detach | tested-T1 | crates/nolx-vfs io::tests::driver_unload_refuses_in_flight_iorb_and_succeeds_after_completion
+IO-004 | NOLX M7 Cache Manager: SharedCacheMap provides 4 KiB page-granular copy_read/copy_write, sequential read-ahead prefetching, bounded lazy-writer flushing, and MmFlushSection/MmPurgeSection coherency | tested-T1 | crates/nolx-vfs cache::tests::copy_write_and_copy_read_hit_cached_pages, sequential_reads_trigger_read_ahead_prefetch, lazy_writer_tick_flushes_bounded_dirty_pages_per_sweep, mm_flush_section_and_mm_purge_section_enforce_coherency
+IO-005 | NOLX M7 I/O and Cache Boot Self-Tests: kernel boot self-tests exercise 2-layer driver/device stacks, sync/async/cancelled IORBs, driver unload, SharedCacheMap read-ahead, lazy writer, and MmFlushSection | tested-T2 | `.github/workflows/ci.yml` boot-smoke asserted `NOLX: io selftest: 2 drivers, 2 stacked devices, 3 IORBs (1 sync, 1 async completion port, 1 cancelled), unload busy->ok; audit ok` and `NOLX: cache selftest: 1 shared map, 2 copy-writes, 3 copy-reads, 2 read-ahead pages, lazy writer + MmFlushSection flushed 2 dirty pages; audit ok`; workflow [38240528081](https://github.com/NeXuS4Dev/NOLX/actions/runs/38240528081) on revision `6dfedca` passed.

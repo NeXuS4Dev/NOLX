@@ -1099,6 +1099,15 @@ mod tests {
                 .any(|window| window == b"init: child exit status mismatch\n"),
             "init's failure line is in its image"
         );
+        assert!(
+            init.windows(28)
+                .any(|window| window == b"tmpfs: ring-3 read/write ok\n"),
+            "init's tmpfs payload is in its image"
+        );
+        assert!(
+            init.windows(14).any(|window| window == b"/tmp/m7-check\0"),
+            "init's tmpfs test path is in its image"
+        );
     }
 }
 

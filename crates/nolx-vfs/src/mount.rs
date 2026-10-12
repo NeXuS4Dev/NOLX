@@ -18,7 +18,7 @@ use nolx_types::errno;
 ///
 /// The mount is part of the identity because two mounted filesystems can both have an
 /// inode 1, and they are different files.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeId {
     /// The mount the node belongs to.
     pub mount: u32,
@@ -50,6 +50,23 @@ pub mod flags {
     pub const BIND: u64 = 1 << 5;
 }
 
+/// Mount event propagation class (`MS_PRIVATE`, `MS_SHARED`, `MS_SLAVE`, `MS_UNBINDABLE`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PropagationClass {
+    /// Mount and unmount events do not propagate into or out of this mount.
+    #[default]
+    Private,
+    /// Mount and unmount events propagate bi-directionally among all peers in `peer_group`
+    /// and downward to any `Slave` mounts whose `master_group` matches `peer_group`.
+    Shared,
+    /// Mount and unmount events propagate one-way *from* `master_group` into this mount,
+    /// but mounts performed under this mount do not propagate back to the master.
+    Slave,
+    /// Like `Private`, and in addition any attempt to `bind_mount` this mount fails with
+    /// `EINVAL`.
+    Unbindable,
+}
+
 /// One entry in the mount table.
 #[derive(Clone, Debug)]
 pub struct Mount {
@@ -65,6 +82,12 @@ pub struct Mount {
     pub source: String,
     /// The filesystem type name.
     pub fstype: String,
+    /// Propagation class for mount/unmount events under this mount.
+    pub propagation: PropagationClass,
+    /// Peer group id when `propagation == PropagationClass::Shared`.
+    pub peer_group: Option<u32>,
+    /// Master peer group id when `propagation == PropagationClass::Slave`.
+    pub master_group: Option<u32>,
 }
 
 /// The per-process mount table.
@@ -76,6 +99,7 @@ pub struct Mount {
 pub struct MountTable {
     mounts: Vec<Mount>,
     next_id: u32,
+    next_peer_group: u32,
 }
 
 impl MountTable {
@@ -85,6 +109,7 @@ impl MountTable {
         Self {
             mounts: Vec::new(),
             next_id: 1,
+            next_peer_group: 1,
         }
     }
 
@@ -121,7 +146,70 @@ impl MountTable {
         if self.cross_down(covered).is_some() {
             return Err(errno::EBUSY);
         }
-        self.add(Some(covered), root, mflags, source, fstype)
+        let primary_id = self.add(Some(covered), root, mflags, source.clone(), fstype.clone())?;
+
+        // Propagate to peer and slave mounts if the parent mount containing `covered` is `Shared`.
+        if let Some(parent_group) = self
+            .mount_of(covered)
+            .filter(|m| m.propagation == PropagationClass::Shared)
+            .and_then(|m| m.peer_group)
+        {
+            let recipients: Vec<(u32, PropagationClass, Option<u32>)> = self
+                .mounts
+                .iter()
+                .filter(|m| {
+                    m.root.mount != covered.mount
+                        && ((m.propagation == PropagationClass::Shared
+                            && m.peer_group == Some(parent_group))
+                            || (m.propagation == PropagationClass::Slave
+                                && m.master_group == Some(parent_group)))
+                })
+                .map(|m| (m.root.mount, m.propagation, m.peer_group))
+                .collect();
+
+            let child_peer_group = self.alloc_peer_group()?;
+            if let Some(primary) = self.mounts.iter_mut().find(|m| m.id == primary_id) {
+                primary.propagation = PropagationClass::Shared;
+                primary.peer_group = Some(child_peer_group);
+            }
+
+            for (target_mount_num, recip_class, _recip_peer) in recipients {
+                let target_covered = NodeId::new(target_mount_num, covered.ino);
+                if self.cross_down(target_covered).is_some() {
+                    continue;
+                }
+                let replica_mount_num = self.next_id + 1000;
+                let replica_root = NodeId::new(replica_mount_num, root.ino);
+                let rep_id = self.add(
+                    Some(target_covered),
+                    replica_root,
+                    mflags,
+                    source.clone(),
+                    fstype.clone(),
+                )?;
+                if let Some(rep) = self.mounts.iter_mut().find(|m| m.id == rep_id) {
+                    match recip_class {
+                        PropagationClass::Shared => {
+                            rep.propagation = PropagationClass::Shared;
+                            rep.peer_group = Some(child_peer_group);
+                        }
+                        PropagationClass::Slave => {
+                            rep.propagation = PropagationClass::Slave;
+                            rep.master_group = Some(child_peer_group);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        Ok(primary_id)
+    }
+
+    fn alloc_peer_group(&mut self) -> Result<u32, i32> {
+        let g = self.next_peer_group;
+        self.next_peer_group = self.next_peer_group.checked_add(1).ok_or(errno::EMFILE)?;
+        Ok(g)
     }
 
     fn add(
@@ -141,8 +229,143 @@ impl MountTable {
             flags: mflags,
             source,
             fstype,
+            propagation: PropagationClass::Private,
+            peer_group: None,
+            master_group: None,
         });
         Ok(id)
+    }
+
+    /// Change the propagation class of an existing mount (`id`).
+    ///
+    /// # Errors
+    ///
+    /// * `ENOENT` if no mount has `id`.
+    /// * `EINVAL` if `PropagationClass::Slave` is requested on a mount that is not currently
+    ///   in a peer group and has no master group.
+    pub fn set_propagation(&mut self, id: u32, class: PropagationClass) -> Result<(), i32> {
+        let new_group = if class == PropagationClass::Shared {
+            Some(self.alloc_peer_group()?)
+        } else {
+            None
+        };
+        let mount = self
+            .mounts
+            .iter_mut()
+            .find(|m| m.id == id)
+            .ok_or(errno::ENOENT)?;
+        match class {
+            PropagationClass::Private | PropagationClass::Unbindable => {
+                mount.propagation = class;
+                mount.peer_group = None;
+                mount.master_group = None;
+            }
+            PropagationClass::Shared => {
+                if mount.peer_group.is_none() {
+                    mount.peer_group = new_group;
+                }
+                mount.propagation = PropagationClass::Shared;
+            }
+            PropagationClass::Slave => {
+                let master = mount
+                    .peer_group
+                    .or(mount.master_group)
+                    .ok_or(errno::EINVAL)?;
+                mount.propagation = PropagationClass::Slave;
+                mount.peer_group = None;
+                mount.master_group = Some(master);
+            }
+        }
+        Ok(())
+    }
+
+    /// Create a bind mount of `source_mount_id` at `covered` with a distinct mount namespace
+    /// number `new_mount_num`.
+    ///
+    /// # Errors
+    ///
+    /// * `ENOENT` if `source_mount_id` does not exist.
+    /// * `EINVAL` if the source mount is [`PropagationClass::Unbindable`].
+    /// * `EBUSY` if `covered` is already a mount point.
+    pub fn bind_mount(
+        &mut self,
+        source_mount_id: u32,
+        covered: NodeId,
+        new_mount_num: u32,
+    ) -> Result<u32, i32> {
+        if self.cross_down(covered).is_some() {
+            return Err(errno::EBUSY);
+        }
+        let src = self
+            .mounts
+            .iter()
+            .find(|m| m.id == source_mount_id)
+            .cloned()
+            .ok_or(errno::ENOENT)?;
+        if src.propagation == PropagationClass::Unbindable {
+            return Err(errno::EINVAL);
+        }
+        let new_root = NodeId::new(new_mount_num, src.root.ino);
+        let id = self.add(
+            Some(covered),
+            new_root,
+            src.flags | flags::BIND,
+            src.source,
+            src.fstype,
+        )?;
+        if let Some(m) = self.mounts.iter_mut().find(|m| m.id == id) {
+            match src.propagation {
+                PropagationClass::Shared => {
+                    m.propagation = PropagationClass::Shared;
+                    m.peer_group = src.peer_group;
+                }
+                PropagationClass::Slave => {
+                    m.propagation = PropagationClass::Slave;
+                    m.master_group = src.master_group;
+                }
+                PropagationClass::Private | PropagationClass::Unbindable => {
+                    m.propagation = PropagationClass::Private;
+                }
+            }
+        }
+        Ok(id)
+    }
+
+    /// Swap the root mount with an existing sub-mount (`new_root_mount_id`), placing the
+    /// previous root mount on `put_old` (`pivot_root(2)`).
+    ///
+    /// Returns the new root [`NodeId`].
+    ///
+    /// # Errors
+    ///
+    /// * `ENOENT` if `new_root_mount_id` or the current root mount does not exist.
+    /// * `EINVAL` if `new_root_mount_id` is already the root mount or `put_old` does not lie
+    ///   inside the new root mount.
+    /// * `EBUSY` if `put_old` is already covered by another mount.
+    pub fn pivot_root(&mut self, new_root_mount_id: u32, put_old: NodeId) -> Result<NodeId, i32> {
+        if self.cross_down(put_old).is_some() {
+            return Err(errno::EBUSY);
+        }
+        let old_root_idx = self
+            .mounts
+            .iter()
+            .position(|m| m.covered.is_none())
+            .ok_or(errno::ENOENT)?;
+        let new_root_idx = self
+            .mounts
+            .iter()
+            .position(|m| m.id == new_root_mount_id)
+            .ok_or(errno::ENOENT)?;
+        if old_root_idx == new_root_idx {
+            return Err(errno::EINVAL);
+        }
+        let new_root_node = self.mounts[new_root_idx].root;
+        if put_old.mount != new_root_node.mount {
+            return Err(errno::EINVAL);
+        }
+        self.mounts[new_root_idx].covered = None;
+        self.mounts[old_root_idx].covered = Some(put_old);
+        Ok(new_root_node)
     }
 
     /// Remove a mount.
@@ -429,5 +652,110 @@ mod tests {
     fn node_identity_includes_the_mount() {
         assert_ne!(NodeId::new(1, 1), NodeId::new(2, 1));
         assert_eq!(NodeId::new(1, 1), NodeId::new(1, 1));
+    }
+
+    #[test]
+    fn cross_down_returns_mounted_root() {
+        let mut t = table();
+        let covered = NodeId::new(1, 5);
+        t.mount_over(
+            covered,
+            NodeId::new(2, 1),
+            0,
+            String::from("/dev/x"),
+            String::from("nolxfs"),
+        )
+        .unwrap();
+        assert_eq!(t.cross_down(covered), Some(NodeId::new(2, 1)));
+    }
+
+    #[test]
+    fn cross_up_returns_covered_node() {
+        let mut t = table();
+        let covered = NodeId::new(1, 5);
+        t.mount_over(
+            covered,
+            NodeId::new(2, 1),
+            0,
+            String::from("/dev/x"),
+            String::from("nolxfs"),
+        )
+        .unwrap();
+        assert_eq!(t.cross_up(NodeId::new(2, 1)), Some(covered));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn root_mount_Does_Not_cross_up() {
+        let t = table();
+        assert_eq!(t.cross_up(NodeId::new(1, 1)), None);
+    }
+
+    #[test]
+    fn shared_and_slave_mount_propagation_and_unbindable_rules() {
+        let mut t = table();
+        let root_id = t.all()[0].id;
+        t.set_propagation(root_id, PropagationClass::Shared)
+            .unwrap();
+
+        // Bind root (mount 1) onto NodeId(1, 10) as mount 2 -> becomes Shared peer in same group.
+        let peer_id = t.bind_mount(root_id, NodeId::new(1, 10), 2).unwrap();
+        // Bind root onto NodeId(1, 11) as mount 3 and demote it to Slave.
+        let slave_id = t.bind_mount(root_id, NodeId::new(1, 11), 3).unwrap();
+        t.set_propagation(slave_id, PropagationClass::Slave)
+            .unwrap();
+
+        // Mounting over NodeId(1, 50) inside mount 1 propagates to both peer (mount 2) and slave (mount 3).
+        t.mount_over(
+            NodeId::new(1, 50),
+            NodeId::new(4, 1),
+            0,
+            String::from("sub"),
+            String::from("tmpfs"),
+        )
+        .unwrap();
+        assert!(t.cross_down(NodeId::new(1, 50)).is_some());
+        assert!(t.cross_down(NodeId::new(2, 50)).is_some());
+        assert!(t.cross_down(NodeId::new(3, 50)).is_some());
+
+        // Mounting under the Slave (mount 3) does NOT propagate back to master (mount 1 or 2).
+        t.mount_over(
+            NodeId::new(3, 60),
+            NodeId::new(5, 1),
+            0,
+            String::from("local"),
+            String::from("tmpfs"),
+        )
+        .unwrap();
+        assert!(t.cross_down(NodeId::new(3, 60)).is_some());
+        assert_eq!(t.cross_down(NodeId::new(1, 60)), None);
+        assert_eq!(t.cross_down(NodeId::new(2, 60)), None);
+
+        // Unbindable mount refuses bind_mount with EINVAL.
+        t.set_propagation(peer_id, PropagationClass::Unbindable)
+            .unwrap();
+        assert_eq!(
+            t.bind_mount(peer_id, NodeId::new(1, 12), 6),
+            Err(errno::EINVAL)
+        );
+    }
+
+    #[test]
+    fn pivot_root_swaps_root_and_places_old_root_at_put_old() {
+        let mut t = table();
+        let new_root_id = t
+            .mount_over(
+                NodeId::new(1, 8),
+                NodeId::new(2, 1),
+                0,
+                String::from("newroot"),
+                String::from("tmpfs"),
+            )
+            .unwrap();
+        let put_old = NodeId::new(2, 99);
+        let new_root = t.pivot_root(new_root_id, put_old).unwrap();
+        assert_eq!(new_root, NodeId::new(2, 1));
+        assert_eq!(t.root_node(), Some(NodeId::new(2, 1)));
+        assert_eq!(t.cross_down(put_old), Some(NodeId::new(1, 1)));
     }
 }

@@ -43,7 +43,16 @@ BANNER = ("GENERATED FILE -- DO NOT EDIT.\n"
 SYS_EXIT = 0
 SYS_WAITID = 4
 SYS_POSIX_SPAWN = 31
+SYS_OPEN = 100
+SYS_CLOSE = 103
+SYS_READ = 104
 SYS_WRITE = 105
+SYS_LSEEK = 110
+SYS_UNLINK = 139
+O_RDWR = 0x0002
+O_CREAT = 0x0040
+O_EXCL = 0x0080
+SEEK_SET = 0
 P_PID = 1
 WEXITED = 4
 SIGINFO_STATUS_OFFSET = 24  # x86-64 siginfo_t: signo, errno, code, pad, pid, uid, status
@@ -78,9 +87,21 @@ class Asm:
         """mov rdi, imm32 (sign-extended)."""
         self.raw(b"\x48\xc7\xc7" + value.to_bytes(4, "little", signed=True))
 
+    def mov_rsi(self, value: int) -> None:
+        """mov rsi, imm32 (sign-extended)."""
+        self.raw(b"\x48\xc7\xc6" + value.to_bytes(4, "little", signed=True))
+
     def mov_rdx(self, value: int) -> None:
         """mov rdx, imm32 (sign-extended)."""
         self.raw(b"\x48\xc7\xc2" + value.to_bytes(4, "little", signed=True))
+
+    def mov_r12_rax(self) -> None:
+        """mov r12, rax (callee-saved across syscall)."""
+        self.raw(b"\x49\x89\xc4")
+
+    def mov_rdi_r12(self) -> None:
+        """mov rdi, r12."""
+        self.raw(b"\x4c\x89\xe7")
 
     def mov_r10d(self, value: int) -> None:
         """mov r10d, imm32."""
@@ -208,6 +229,8 @@ INIT_DATA = 0x0042_1000
 INIT_OK_MESSAGE = b"init: child exited with status 42\n"
 INIT_BAD_MESSAGE = b"init: child exit status mismatch\n"
 INIT_PATH = b"hello"
+TMPFS_FILE_PATH = b"/tmp/m7-check"
+TMPFS_MESSAGE = b"tmpfs: ring-3 read/write ok\n"
 
 # Data-segment layout, offsets from INIT_DATA.
 DATA_PID = 0x00
@@ -216,7 +239,10 @@ DATA_PATH = 0x18
 DATA_OK = 0x20
 DATA_BAD = 0x42
 DATA_INFO = 0x68
-DATA_END = 0xE8
+DATA_TMPFS_PATH = 0xE8
+DATA_TMPFS_MSG = 0xF8
+DATA_READ_BUF = 0x118
+DATA_END = 0x138
 
 
 def build_init() -> bytes:
@@ -240,6 +266,67 @@ def build_init() -> bytes:
     asm.mov_eax_label("status")
     asm.cmp_eax(EXPECTED_STATUS)
     asm.jne("mismatch")
+
+    # M7 T2: open("/tmp/m7-check", O_CREAT | O_EXCL | O_RDWR, 0o644) -> fd 3
+    asm.lea("rdi", "tmpfs_path")
+    asm.mov_rsi(O_CREAT | O_EXCL | O_RDWR)
+    asm.mov_rdx(0o644)
+    asm.mov_rax(SYS_OPEN)
+    asm.syscall()
+    asm.cmp_eax(3)
+    asm.jne("mismatch")
+    asm.mov_r12_rax()
+
+    # write(fd, TMPFS_MESSAGE, 28)
+    asm.mov_rdi_r12()
+    asm.lea("rsi", "tmpfs_msg")
+    asm.mov_rdx(len(TMPFS_MESSAGE))
+    asm.mov_rax(SYS_WRITE)
+    asm.syscall()
+    asm.cmp_eax(len(TMPFS_MESSAGE))
+    asm.jne("mismatch")
+
+    # lseek(fd, 0, SEEK_SET)
+    asm.mov_rdi_r12()
+    asm.mov_rsi(0)
+    asm.mov_rdx(SEEK_SET)
+    asm.mov_rax(SYS_LSEEK)
+    asm.syscall()
+    asm.cmp_eax(0)
+    asm.jne("mismatch")
+
+    # read(fd, read_buf, 28)
+    asm.mov_rdi_r12()
+    asm.lea("rsi", "read_buf")
+    asm.mov_rdx(len(TMPFS_MESSAGE))
+    asm.mov_rax(SYS_READ)
+    asm.syscall()
+    asm.cmp_eax(len(TMPFS_MESSAGE))
+    asm.jne("mismatch")
+
+    # close(fd)
+    asm.mov_rdi_r12()
+    asm.mov_rax(SYS_CLOSE)
+    asm.syscall()
+    asm.cmp_eax(0)
+    asm.jne("mismatch")
+
+    # unlink("/tmp/m7-check")
+    asm.lea("rdi", "tmpfs_path")
+    asm.mov_rax(SYS_UNLINK)
+    asm.syscall()
+    asm.cmp_eax(0)
+    asm.jne("mismatch")
+
+    # write(1, read_buf, 28) -- emit the bytes read back from tmpfs to stdout
+    asm.lea("rsi", "read_buf")
+    asm.mov_rdx(len(TMPFS_MESSAGE))
+    asm.mov_rax(SYS_WRITE)
+    asm.mov_rdi(1)
+    asm.syscall()
+    asm.cmp_eax(len(TMPFS_MESSAGE))
+    asm.jne("mismatch")
+
     # write(1, ok, len(ok)); exit(42)
     asm.lea("rsi", "ok")
     asm.mov_rdx(len(INIT_OK_MESSAGE))
@@ -266,6 +353,9 @@ def build_init() -> bytes:
     asm.label("bad")
     asm.label("info")
     asm.label("status")
+    asm.label("tmpfs_path")
+    asm.label("tmpfs_msg")
+    asm.label("read_buf")
     asm.labels["pid"] = INIT_DATA + DATA_PID
     asm.labels["argv"] = INIT_DATA + DATA_ARGV
     asm.labels["path"] = INIT_DATA + DATA_PATH
@@ -273,12 +363,18 @@ def build_init() -> bytes:
     asm.labels["bad"] = INIT_DATA + DATA_BAD
     asm.labels["info"] = INIT_DATA + DATA_INFO
     asm.labels["status"] = INIT_DATA + DATA_INFO + SIGINFO_STATUS_OFFSET
+    asm.labels["tmpfs_path"] = INIT_DATA + DATA_TMPFS_PATH
+    asm.labels["tmpfs_msg"] = INIT_DATA + DATA_TMPFS_MSG
+    asm.labels["read_buf"] = INIT_DATA + DATA_READ_BUF
     code = asm.finish()
 
     assert len(code) <= PAGE - 0x100, "init text grew past its first page"
     assert DATA_OK + len(INIT_OK_MESSAGE) <= DATA_BAD
     assert DATA_BAD + len(INIT_BAD_MESSAGE) <= DATA_INFO
-    assert DATA_INFO + 128 == DATA_END
+    assert DATA_INFO + 128 == DATA_TMPFS_PATH
+    assert DATA_TMPFS_PATH + len(TMPFS_FILE_PATH) + 1 <= DATA_TMPFS_MSG
+    assert DATA_TMPFS_MSG + len(TMPFS_MESSAGE) <= DATA_READ_BUF
+    assert DATA_READ_BUF + 32 == DATA_END
 
     text_filesz = 0x100 + len(code)
     data = bytearray(DATA_END)
@@ -287,6 +383,8 @@ def build_init() -> bytes:
     data[DATA_ARGV + 8:DATA_ARGV + 16] = (0).to_bytes(8, "little")
     data[DATA_OK:DATA_OK + len(INIT_OK_MESSAGE)] = INIT_OK_MESSAGE
     data[DATA_BAD:DATA_BAD + len(INIT_BAD_MESSAGE)] = INIT_BAD_MESSAGE
+    data[DATA_TMPFS_PATH:DATA_TMPFS_PATH + len(TMPFS_FILE_PATH) + 1] = TMPFS_FILE_PATH + b"\x00"
+    data[DATA_TMPFS_MSG:DATA_TMPFS_MSG + len(TMPFS_MESSAGE)] = TMPFS_MESSAGE
 
     filesz = PAGE + len(data)
     image = bytearray(filesz)
