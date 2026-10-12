@@ -212,8 +212,7 @@ pub(crate) unsafe fn on_syscall(frame: *mut InterruptFrame) -> *mut InterruptFra
     // SAFETY: as above; the same frame, still alive on this thread's kernel stack.
     let number = unsafe { (*frame).rax };
     dbg_line(format_args!(
-        "NOLX: t2-dbg syscall rax={} a0={:#x} a1={:#x} frame={:?} top={:#x}",
-        number,
+        "NOLX: t2-dbg syscall rax={number} a0={:#x} a1={:#x} frame={:?} top={:#x}",
         request.a0,
         request.a1,
         frame,
@@ -362,8 +361,7 @@ pub fn exit_current(status: i32) {
     table.processes[slot].exit_status = status;
     let pid = table.processes[slot].pid;
     dbg_line(format_args!(
-        "NOLX: t2-dbg exit pid={} slot={} status={}",
-        pid, slot, status
+        "NOLX: t2-dbg exit pid={pid} slot={slot} status={status}"
     ));
 
     let parent = table.processes[slot].parent;
@@ -625,8 +623,8 @@ fn spawn_impl(
     };
     table.frames[slot] = frame as usize;
     dbg_line(format_args!(
-        "NOLX: t2-dbg spawned pid={} slot={} thread={:?} stack_top={:#x} frame={:?} entry={:#x} user_rsp={:#x}",
-        pid, slot, thread_id, stack_top, frame, entry.rip, entry.rsp
+        "NOLX: t2-dbg spawned pid={pid} slot={slot} thread={thread_id:?} stack_top={stack_top:#x} frame={:?} entry={:#x} user_rsp={:#x}",
+        frame, entry.rip, entry.rsp
     ));
     Ok(pid)
 }
