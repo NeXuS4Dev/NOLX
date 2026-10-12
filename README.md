@@ -72,7 +72,7 @@ Milestone tracking lives in [ROADMAP.md](ROADMAP.md). Current state:
 | M1 — Boot layer: Multiboot → long mode → kernel entry | **done** — boot layer machine-verified, kernel entry reached under QEMU |
 | M2 — HAL: console, GDT, IDT, PIC/APIC, timer | **done** — ACPI/HPET discovery, xAPIC/x2APIC, I/O APIC routing, TPR/EOI, calibrated LAPIC/TSC-deadline paths with PIC/PIT fallback; every HAL T2 assertion now has a passing QEMU run |
 | M3 — Physical/virtual memory, kernel heap | **done** — frame map with kernel reservations, buddy allocator with per-CPU magazines, boot-time stress test under live interrupts, higher-half switch with the identity map dropped and verified, frame-backed `GlobalAlloc` heap, per-process address spaces with demand paging and copy-on-write, pool accounting, and a one-node NUMA list; all 11 boot assertions are `tested-T2` and full CI run [38162486568](https://github.com/NeXuS4Dev/NOLX/actions/runs/38162486568) passed all six jobs |
-| M4 — Object Manager and handles | **implemented, verification pending** — type lifecycle callbacks, generation-checked handle-table primitives, session directories, boundary-protected private namespaces, Security Reference Monitor, host tests, and expanded T2 boot selftests (see ROADMAP M4). Security descriptors and names are out-of-line; per-body quota ownership remains deferred. |
+| M4 — Object Manager and handles | **done** — type lifecycle callbacks, generation-checked handle-table primitives, session directories, boundary-protected private namespaces, Security Reference Monitor, host tests, and expanded T2 boot selftests. All 14 assertions are recorded (9 `tested-T1`, 5 `tested-T2`, none pending), and CI run [38249363821](https://github.com/NeXuS4Dev/NOLX/actions/runs/38249363821) on revision `15aee68` passed all six jobs with every M4 boot marker asserted (see [ROADMAP M4](ROADMAP.md)). Security descriptors and names are out-of-line; per-body quota ownership remains deferred. |
 | M5 — Executive core: processes, threads, dispatcher | **done** — host-tested process/thread, scheduler, dispatcher, DPC, and lock contracts; QEMU process/thread self-tests and the preemptive `ABCABCABCABC` trace pass in CI (see [run 38162486568](https://github.com/NeXuS4Dev/NOLX/actions/runs/38162486568)) |
 | M6 — User mode, ELF, and syscall ABI | **done** — ring-3 `syscall`/`sysret` with TSS.RSP0 and per-thread GS discipline; ELF64 loader (`ET_EXEC`/`ET_DYN`, ASLR, `R_X86_64_RELATIVE`, auxv/initial stack); `nxposix_spawn`/`waitid`/`write`/`exit`/`getpid`; T2 ring-3 `hello world` exits 42 with a parent-observed status in CI; T1 syscall-table uniqueness and ABI round-trip (see [ROADMAP.md](ROADMAP.md)) |
 | M7 — I/O Manager, VFS, and the first filesystems | **done** — IORB with 8-deep stack locations, completion routines, async completion ports, cancellation, and reference-tracked driver unload; Cache Manager (`SharedCacheMap`, read-ahead, lazy writer, `MmFlushSection`); VFS (`FileObject`, `namei`, `pathconf`, mount propagation classes, `pivot_root`, `fcntl`, `umask`, `chroot`); `devfs`, `tmpfs`, `initrd` (cpio/tar), and `NOLXFS` VFS driver; T1 pathname/VFS/I/O/filesystem suites (102 tests in `nolx-vfs`) and T2 boot self-tests + ring-3 `tmpfs` read/write round-trip in CI (see [run 38240528081](https://github.com/NeXuS4Dev/NOLX/actions/runs/38240528081) and [ROADMAP.md](ROADMAP.md)) |
@@ -130,6 +130,18 @@ This repository is honest about which artifacts were executed and which were not
   through a local, an `Option`, and a `teardown(self)` reserved 108,640 bytes of a 64 KiB
   kernel stack, writing past it into `.bss` silently. The space is now built in place and
   torn down through a borrow, which puts the same self test at 14,768 bytes of stack.
+* **CI-verified (2026-10-12):** workflow run
+  [38249363821](https://github.com/NeXuS4Dev/NOLX/actions/runs/38249363821) on revision
+  `15aee68` -- the tree that carries M4 checkpoint 6 -- passed all six jobs. Its QEMU boot smoke
+  test asserted the five M4 T2 markers (`NOLX: obj selftest: 1 object, 2 handles`,
+  `NOLX: obj session selftest: sessions 0 and 1 are isolated`,
+  `NOLX: obj private namespace selftest: boundaries enforced, isolated roots`,
+  `NOLX: obj type callback selftest: create/open/parse/close/delete invoked`, and
+  `NOLX: srm selftest: 10 access checks (6 granted, 4 denied)`), and its host-test job ran the
+  M4 T1 suite, including both seeded fuzz tests. That run is what promotes OBJ-006, OBJ-010,
+  OBJ-011, OBJ-012, and OBJ-013 from `pending-T2` to `tested-T2`; this sandbox has no `rustc`
+  and no QEMU, so those two jobs are read from the run rather than re-executed here, while
+  `make bootcheck fscheck usercheck` and `scripts/check-unsafe.sh` were run here and passed.
 * **CI-verified (2026-10-10):** workflow run
   [38086516018](https://github.com/NeXuS4Dev/NOLX/actions/runs/38086516018) on revision
   `dc2d8d1` passed every job: boot layer, NOLXFS layout, host tests, fmt + clippy + unsafe
