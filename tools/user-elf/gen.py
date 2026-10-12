@@ -46,7 +46,7 @@ SYS_POSIX_SPAWN = 31
 SYS_WRITE = 105
 P_PID = 1
 WEXITED = 4
-SIGINFO_STATUS_OFFSET = 20
+SIGINFO_STATUS_OFFSET = 24  # x86-64 siginfo_t: signo, errno, code, pad, pid, uid, status
 EXPECTED_STATUS = 42
 
 PAGE = 0x1000
@@ -178,9 +178,6 @@ HELLO_PATH = b"hello"
 
 def build_hello() -> bytes:
     asm = Asm(HELLO_TEXT)
-    # TEMPORARY T2 forensics: a guaranteed #UD as the very first instruction proves
-    # (or disproves) that the ring-3 iretq ever completes. Remove once the resume works.
-    asm.raw(b"\x0f\x0b")
     asm.lea("rsi", "msg")
     asm.mov_rdx(len(HELLO_MESSAGE))
     asm.mov_rax(SYS_WRITE)

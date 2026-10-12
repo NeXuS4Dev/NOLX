@@ -81,7 +81,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@v1
         with:
-          toolchain: stable
+          toolchain: 1.88.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Regenerate first, so a stale generated file cannot mask a failure
@@ -123,7 +123,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@v1
         with:
-          toolchain: stable
+          toolchain: 1.88.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: cargo fmt
@@ -142,7 +142,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@v1
         with:
-          toolchain: stable
+          toolchain: 1.88.0
           targets: x86_64-unknown-none
       - uses: Swatinem/rust-cache@v2
       - name: Clippy the kernel for its own target
@@ -173,7 +173,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@v1
         with:
-          toolchain: stable
+          toolchain: 1.88.0
           targets: x86_64-unknown-none
       - uses: Swatinem/rust-cache@v2
       - name: Install QEMU
@@ -324,7 +324,7 @@ jobs:
           # self test maps pages, resolves faults, and leaves the frame and table counts
           # exactly where it found them, or it panics.
           if ! grep -Eq \
-            'NOLX: address space selftest: [2-9][0-9]* space\(s\), [0-9]+ VAD\(s\), [1-9][0-9]* fault cause\(s\) resolved \([1-9][0-9]* demand-zero, [1-9][0-9]* copy-on-write, [1-9][0-9]* stack growth\), [1-9][0-9]* refusal\(s\); [1-9][0-9]* page\(s\) mapped; free frames ([0-9]+) -> \1; page tables allocated ([0-9]+) -> ([0-9]+), released \2 -> \3; system PTE peak [1-9][0-9]* KiB; audit ok' \
+            'NOLX: address space selftest: [2-9][0-9]* space\(s\), [0-9]+ VAD\(s\), [1-9][0-9]* fault cause\(s\) resolved \([1-9][0-9]* demand-zero, [1-9][0-9]* copy-on-write, [1-9][0-9]* stack growth\), [1-9][0-9]* refusal\(s\); [1-9][0-9]* page\(s\) mapped; free frames ([0-9]+) -> \1; page tables allocated ([0-9]+) -> ([0-9]+), released [0-9]+ -> [0-9]+; system PTE peak [1-9][0-9]* KiB; audit ok' \
             build/serial.log; then
             echo "the address-space self test did not complete cleanly"
             exit 1

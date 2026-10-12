@@ -1071,10 +1071,9 @@ mod tests {
             let entry = plan.entry_point();
             let page = entry & !0xfff;
             let slot = memory.get(&page).expect("entry page is mapped");
-            // 0x48 = the first byte of `lea` (init, and hello once its ud2 probe is
-            // removed); 0x0f = hello's temporary `ud2` forensics opcode.
-            assert!(
-                slot[(entry & 0xfff) as usize] == 0x48 || slot[(entry & 0xfff) as usize] == 0x0f,
+            assert_eq!(
+                slot[(entry & 0xfff) as usize],
+                0x48,
                 "{path} entry byte reached the entry address"
             );
         }
