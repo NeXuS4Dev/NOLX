@@ -12,12 +12,12 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 |---|---|---|
 | `unimplemented` | 0 | 100.0% |
 | `implemented` | 5 | 100.0% |
-| `tested-T1` | 104 | 90.8% |
-| `pending-T2` | 8 | — |
-| `tested-T2` | 24 | 17.0% |
+| `tested-T1` | 104 | 92.9% |
+| `pending-T2` | 5 | — |
+| `tested-T2` | 27 | 19.1% |
 | `tested-T3` | 0 | 0.0% |
 
-**128 of 141 assertions have a passing automated test; 8 are awaiting T2 results.**
+**131 of 141 assertions have a passing automated test; 5 are awaiting T2 results.**
 
 ## By area
 
@@ -26,10 +26,10 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | elf | 3 | 3 | 3 | 0 | 0 | 0 |
 | exec | 12 | 12 | 9 | 0 | 3 | 0 |
 | hal | 25 | 25 | 11 | 0 | 10 | 0 |
-| io | 5 | 5 | 4 | 1 | 0 | 0 |
+| io | 5 | 5 | 4 | 0 | 1 | 0 |
 | mm | 34 | 34 | 23 | 0 | 11 | 0 |
 | obj | 14 | 14 | 8 | 5 | 0 | 0 |
-| vfs | 48 | 48 | 46 | 2 | 0 | 0 |
+| vfs | 48 | 48 | 46 | 0 | 2 | 0 |
 
 ## Unimplemented assertions (0)
 
@@ -45,18 +45,15 @@ None.
 | HAL-021 | I/O APIC routes: GSI windows and ISA overrides are validated, redirections start masked, and NMI sources use MADT polarity/trigger flags |
 | OBJ-014 | The generic private namespace primitive gates reads, writes, deletes, and symlink creation with its boundary descriptor while preserving symlink resolution within its independent root |
 
-## Pending T2 verification (8)
+## Pending T2 verification (5)
 
 | ID | Specification reference | Configured test |
 |---|---|---|
-| IO-005 | NOLX M7 I/O and Cache Boot Self-Tests: kernel boot self-tests exercise 2-layer driver/device stacks, sync/async/cancelled IORBs, driver unload, SharedCacheMap read-ahead, lazy writer, and MmFlushSection | .github/workflows/ci.yml boot-smoke asserts NOLX: io selftest: 2 drivers, 2 stacked devices, 3 IORBs (1 sync, 1 async completion port, 1 cancelled), unload busy->ok; audit ok and NOLX: cache selftest: 1 shared map, 2 copy-writes, 3 copy-reads, 2 read-ahead pages, lazy writer + MmFlushSection flushed 2 dirty pages; audit ok |
 | OBJ-006 | An object's references follow the rules: a handle implies a pointer reference, and the object is freed exactly when the last reference goes | `kernel/src/obj/boot.rs` `selftest` drives one object through (1,0) -> (2,1) -> (3,2) -> (2,1) -> (1,1) -> freed, checks each step, and requires the live count to return to its start. Boot marker `NOLX: obj selftest: 1 object, 2 handles` (CI run 38133425376, revision 35728d3, boot smoke green). |
 | OBJ-010 | At boot, `open` enforces the monitor's decisions for a SYSTEM, reader, refused, backup, and low-integrity token against a device and a labelled log, and the audit log agrees with what was asked | `kernel/src/obj/boot.rs` `selftest`, part two. Boot marker `NOLX: srm selftest: 10 access checks (6 granted, 4 denied)`. |
 | OBJ-011 | Object type create/open/parse/close/delete callbacks run at their lifecycle transitions; a type-rejected create or open leaves no header, handle, or reference leak | `kernel/src/obj/mod.rs` registers the Device callbacks and `kernel/src/obj/boot.rs` dispatches them; the selftest forces create/open rejection, checks rollback, and requires every callback count to advance. Boot marker `NOLX: obj type callback selftest: create/open/parse/close/delete invoked`. |
 | OBJ-012 | Session directories are initialized under `\\Sessions\\<id>` and the same child name in two sessions resolves to distinct objects | `kernel/src/obj/boot.rs` selftest creates `SharedName` in sessions 0 and 1 and checks distinct ids and lookups. Boot marker `NOLX: obj session selftest: sessions 0 and 1 are isolated`. |
 | OBJ-013 | Private namespaces isolate identical paths, enforce boundary READ/WRITE/DELETE checks, audit allowed and refused operations, reject destruction while nonempty, and invalidate stale ids after slot reuse | `kernel/src/obj/boot.rs` selftest creates same-path objects in two roots, follows a private link, checks one outsider denial and an exact audit delta, cleans up objects/directories, and verifies stale-generation rejection. Boot marker `NOLX: obj private namespace selftest: boundaries enforced, isolated roots`. |
-| FS-005 | NOLX M7 VFS Boot Self-Test: kernel mounts tmpfs (/), devfs (/dev), initrd (/initrd), and NOLXFS (/mnt/nolxfs) and verifies cross-mount resolution and I/O at boot | .github/workflows/ci.yml boot-smoke asserts NOLX: vfs selftest: mounted tmpfs(/), devfs(/dev), initrd(/initrd), nolxfs(/mnt/nolxfs); tmpfs write/read 32 bytes verified=true, devfs ok, initrd ok, nolxfs ok; audit ok |
-| FS-006 | NOLX M7 Ring-3 tmpfs T2: ring-3 init opens /tmp/m7-check with O_CREAT+O_EXCL+O_RDWR, writes 28 bytes, seeks to 0, reads back 28 bytes, closes, unlinks, and prints the payload to stdout | .github/workflows/ci.yml boot-smoke asserts tmpfs: ring-3 read/write ok and NOLX: tmpfs T2: ring-3 open/write/lseek/read/close/unlink on /tmp/m7-check (28 bytes round-tripped, verified=true) |
 
 ## All assertions
 
@@ -94,8 +91,8 @@ None.
 | FS-002 | vfs | NOLX M7 tmpfs: bounded in-memory POSIX filesystem supports regular files, directories, symlinks, hard links, rename, unlink-while-open, truncate, and enforces inode/byte capacity with ENOSPC | `tested-T1` | crates/nolx-vfs tmpfs::tests::create_write_read_and_truncate_regular_file, unlink_open_file_keeps_data_until_last_handle_closes, rename_moves_entry_and_rejects_descendant_directory_move, byte_and_inode_quotas_return_enospc |
 | FS-003 | vfs | NOLX M7 initrd: read-only initial ramdisk parses both SVR4 newc cpio and POSIX ustar tar archives, synthesizes intermediate directories, resolves symlinks, and rejects mutations with EROFS | `tested-T1` | crates/nolx-vfs initrd::tests::cpio_newc_parses_directories_files_and_symlinks, ustar_tar_parses_files_directories_and_symlinks, auto_detection_accepts_cpio_and_tar_and_mutations_return_erofs |
 | FS-004 | vfs | NOLX M7 NOLXFS VFS: formats, probes, mounts, and persists directories, regular file extents, hard links, unlinks, and renames in the on-disk B-tree with Fletcher-64 checksum verification | `tested-T1` | crates/nolx-vfs nolxfs_vfs::tests::format_mount_create_write_read_and_remount_persists |
-| FS-005 | vfs | NOLX M7 VFS Boot Self-Test: kernel mounts tmpfs (/), devfs (/dev), initrd (/initrd), and NOLXFS (/mnt/nolxfs) and verifies cross-mount resolution and I/O at boot | `pending-T2` | .github/workflows/ci.yml boot-smoke asserts NOLX: vfs selftest: mounted tmpfs(/), devfs(/dev), initrd(/initrd), nolxfs(/mnt/nolxfs); tmpfs write/read 32 bytes verified=true, devfs ok, initrd ok, nolxfs ok; audit ok |
-| FS-006 | vfs | NOLX M7 Ring-3 tmpfs T2: ring-3 init opens /tmp/m7-check with O_CREAT+O_EXCL+O_RDWR, writes 28 bytes, seeks to 0, reads back 28 bytes, closes, unlinks, and prints the payload to stdout | `pending-T2` | .github/workflows/ci.yml boot-smoke asserts tmpfs: ring-3 read/write ok and NOLX: tmpfs T2: ring-3 open/write/lseek/read/close/unlink on /tmp/m7-check (28 bytes round-tripped, verified=true) |
+| FS-005 | vfs | NOLX M7 VFS Boot Self-Test: kernel mounts tmpfs (/), devfs (/dev), initrd (/initrd), and NOLXFS (/mnt/nolxfs) and verifies cross-mount resolution and I/O at boot | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserted `NOLX: vfs selftest: mounted tmpfs(/), devfs(/dev), initrd(/initrd), nolxfs(/mnt/nolxfs); tmpfs write/read 32 bytes verified=true, devfs ok, initrd ok, nolxfs ok; audit ok`; workflow [38240528081](https://github.com/NeXuS4Dev/NOLX/actions/runs/38240528081) on revision `6dfedca` passed. |
+| FS-006 | vfs | NOLX M7 Ring-3 tmpfs T2: ring-3 init opens /tmp/m7-check with O_CREAT+O_EXCL+O_RDWR, writes 28 bytes, seeks to 0, reads back 28 bytes, closes, unlinks, and prints the payload to stdout | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserted `tmpfs: ring-3 read/write ok` and `NOLX: tmpfs T2: ring-3 open/write/lseek/read/close/unlink on /tmp/m7-check (28 bytes round-tripped, verified=true)`; workflow [38240528081](https://github.com/NeXuS4Dev/NOLX/actions/runs/38240528081) on revision `6dfedca` passed. |
 | HAL-001 | hal | x86-64 IDT: a long-mode interrupt gate is 16 bytes and preserves all 64 handler-address bits | `tested-T1` | nolx-hal-core idt::tests::gate_layout_is_sixteen_bytes; idt::tests::gate_splits_and_reassembles_a_canonical_handler_address |
 | HAL-002 | hal | x86-64 IDT: the interrupt-gate type, DPL, and IST fields are encoded in their architectural bit positions | `tested-T1` | nolx-hal-core idt::tests::gate_encodes_the_interrupt_type_privilege_and_ist |
 | HAL-003 | hal | x86-64 exceptions: error-code vectors are identified so stubs normalize their stack frames | `tested-T1` | nolx-hal-core vectors::tests::hardware_error_code_exceptions_are_exactly_the_known_vectors |
@@ -125,7 +122,7 @@ None.
 | IO-002 | io | NOLX M7 Asynchronous I/O and Cancellation: Pending IORBs post completions to bound IoCompletionPorts when completed, and cancel_iorb atomically invokes the installed cancel routine and completes with ECANCELED | `tested-T1` | crates/nolx-vfs io::tests::asynchronous_iorb_posts_to_completion_port_on_complete, cancel_iorb_invokes_cancel_routine_and_posts_ecanceled |
 | IO-003 | io | NOLX M7 Driver Reference Tracking and Unload: DriverObject tracks owned devices and in-flight IORBs, refusing unload_driver with EBUSY until all in-flight IORBs complete and devices detach | `tested-T1` | crates/nolx-vfs io::tests::driver_unload_refuses_in_flight_iorb_and_succeeds_after_completion |
 | IO-004 | io | NOLX M7 Cache Manager: SharedCacheMap provides 4 KiB page-granular copy_read/copy_write, sequential read-ahead prefetching, bounded lazy-writer flushing, and MmFlushSection/MmPurgeSection coherency | `tested-T1` | crates/nolx-vfs cache::tests::copy_write_and_copy_read_hit_cached_pages, sequential_reads_trigger_read_ahead_prefetch, lazy_writer_tick_flushes_bounded_dirty_pages_per_sweep, mm_flush_section_and_mm_purge_section_enforce_coherency |
-| IO-005 | io | NOLX M7 I/O and Cache Boot Self-Tests: kernel boot self-tests exercise 2-layer driver/device stacks, sync/async/cancelled IORBs, driver unload, SharedCacheMap read-ahead, lazy writer, and MmFlushSection | `pending-T2` | .github/workflows/ci.yml boot-smoke asserts NOLX: io selftest: 2 drivers, 2 stacked devices, 3 IORBs (1 sync, 1 async completion port, 1 cancelled), unload busy->ok; audit ok and NOLX: cache selftest: 1 shared map, 2 copy-writes, 3 copy-reads, 2 read-ahead pages, lazy writer + MmFlushSection flushed 2 dirty pages; audit ok |
+| IO-005 | io | NOLX M7 I/O and Cache Boot Self-Tests: kernel boot self-tests exercise 2-layer driver/device stacks, sync/async/cancelled IORBs, driver unload, SharedCacheMap read-ahead, lazy writer, and MmFlushSection | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserted `NOLX: io selftest: 2 drivers, 2 stacked devices, 3 IORBs (1 sync, 1 async completion port, 1 cancelled), unload busy->ok; audit ok` and `NOLX: cache selftest: 1 shared map, 2 copy-writes, 3 copy-reads, 2 read-ahead pages, lazy writer + MmFlushSection flushed 2 dirty pages; audit ok`; workflow [38240528081](https://github.com/NeXuS4Dev/NOLX/actions/runs/38240528081) on revision `6dfedca` passed. |
 | MM-001 | mm | Buddy allocator: a region is carved into aligned power-of-two blocks, allocation splits the smallest block that fits, and alignment is preserved | `tested-T1` | nolx-mm-core buddy::tests::a_region_is_carved_into_aligned_blocks; buddy::tests::allocation_splits_down_to_the_requested_order; buddy::tests::every_allocation_is_aligned_to_its_order |
 | MM-002 | mm | Buddy allocator: freeing a block coalesces with its buddy, up to the largest aligned block the region can hold | `tested-T1` | nolx-mm-core buddy::tests::free_coalesces_with_a_free_buddy; buddy::tests::freeing_a_whole_region_restores_one_block_per_order |
 | MM-003 | mm | Buddy allocator: a misaligned block, an order above the ceiling, and a frame outside the managed range are refused and change nothing | `tested-T1` | nolx-mm-core buddy::tests::misaligned_and_out_of_range_frees_are_refused |

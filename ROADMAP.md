@@ -419,7 +419,9 @@ same spirit as M5's SMP caveat.
 
 **M7 is done:** its code, host tests (T1), QEMU boot self-tests and ring-3 `tmpfs` round-trip
 (T2), and specification assertions (`docs/testing/assertions/vfs.md` and
-`docs/testing/assertions/io.md`) are in place and verified in CI:
+`docs/testing/assertions/io.md`) are in place and verified in CI (workflow
+[38240528081](https://github.com/NeXuS4Dev/NOLX/actions/runs/38240528081) on revision
+`6dfedca` passed all six jobs):
 
 - **I/O Manager and device stacks (`crates/nolx-vfs/src/io.rs`, `kernel/src/io/mod.rs`):**
   fixed-size `Iorb` with 16 `MajorFunction` codes, 8-deep `IoStackLocation` arrays,
