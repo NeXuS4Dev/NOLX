@@ -211,6 +211,14 @@ pub(crate) unsafe fn on_syscall(frame: *mut InterruptFrame) -> *mut InterruptFra
     };
     // SAFETY: as above; the same frame, still alive on this thread's kernel stack.
     let number = unsafe { (*frame).rax };
+    dbg_line(format_args!(
+        "NOLX: t2-dbg syscall rax={} a0={:#x} a1={:#x} frame={:?} top={:#x}",
+        number,
+        request.a0,
+        request.a1,
+        frame,
+        crate::hal::cpu::kernel_stack_top()
+    ));
     // The register is 64 bits and the table is 16: an unguarded cast would let a caller
     // reach any handler by adding a multiple of 2^16 to the number.
     let result = match u16::try_from(number) {
@@ -284,13 +292,38 @@ fn resume_thread(table: &mut UserTable, next: Option<ThreadId>) -> *mut Interrup
         if let Some(slot) = next_slot {
             // SAFETY: the new slot is live and no space is active after the deactivation.
             unsafe { space_of(slot).activate() };
-            crate::hal::cpu::set_kernel_stack_top(table.processes[slot].kernel_stack_top);
+            let top = table.processes[slot].kernel_stack_top;
+            crate::hal::cpu::set_kernel_stack_top(top);
+            crate::exec::user::dbg_line(format_args!(
+                "NOLX: t2-dbg switch prev={:?} next={:?} top={:#x} frame={:?}",
+                previous,
+                next_slot,
+                top,
+                table.frame_pointer(slot)
+            ));
         }
     }
     table.current = next_slot;
     match next_slot {
         Some(slot) => table.frame_pointer(slot),
         None => table.idle_frame_pointer(),
+    }
+}
+
+/// One debug line on the serial console (temporary T2 forensics).
+pub fn dbg_line(args: core::fmt::Arguments<'_>) {
+    struct W;
+    impl core::fmt::Write for W {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            for byte in s.bytes() {
+                crate::hal::console::raw_put_byte(byte);
+            }
+            Ok(())
+        }
+    }
+    let _ = core::fmt::write(&mut W, args);
+    for byte in b"\n".iter().copied() {
+        crate::hal::console::raw_put_byte(byte);
     }
 }
 
@@ -328,6 +361,10 @@ pub fn exit_current(status: i32) {
     table.processes[slot].zombie = true;
     table.processes[slot].exit_status = status;
     let pid = table.processes[slot].pid;
+    dbg_line(format_args!(
+        "NOLX: t2-dbg exit pid={} slot={} status={}",
+        pid, slot, status
+    ));
 
     let parent = table.processes[slot].parent;
     let Some(parent_slot) = (if parent == 0 {
@@ -478,6 +515,13 @@ pub fn waitid(child_pid: u64, info_user: u64) -> i64 {
         table.processes[slot].blocked = true;
         table.processes[slot].wait_pid = child_pid;
         table.processes[slot].wait_info = info_user;
+        dbg_line(format_args!(
+            "NOLX: t2-dbg waitid block pid={} child={} child_zombie={} child_live={}",
+            table.processes[slot].pid,
+            child_pid,
+            table.processes[child_slot].zombie,
+            table.processes[child_slot].live
+        ));
         return 0;
     }
     let status = table.processes[child_slot].exit_status;
@@ -580,6 +624,10 @@ fn spawn_impl(
         kernel_stack_top: stack_top,
     };
     table.frames[slot] = frame as usize;
+    dbg_line(format_args!(
+        "NOLX: t2-dbg spawned pid={} slot={} thread={:?} stack_top={:#x} frame={:?} entry={:#x} user_rsp={:#x}",
+        pid, slot, thread_id, stack_top, frame, entry.rip, entry.rsp
+    ));
     Ok(pid)
 }
 

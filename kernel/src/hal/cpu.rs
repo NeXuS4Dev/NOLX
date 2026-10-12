@@ -191,6 +191,9 @@ pub fn interrupts_enabled() -> bool {
 /// them together is what keeps a `syscall`, an IRQ, and an exception from disagreeing
 /// about where the kernel frame lives.
 pub fn set_kernel_stack_top(top: u64) {
+    // T2 forensics: a published zero top is exactly the failure mode that sent the next
+    // syscall entry to %rsp = 0. Catch it at the source.
+    assert!(top != 0, "set_kernel_stack_top(0)");
     // SAFETY: `init` installed the BSP's GS base and the offset names a writable per-CPU
     // field owned by the scheduler's context-switch path, which runs with interrupts off.
     unsafe {
