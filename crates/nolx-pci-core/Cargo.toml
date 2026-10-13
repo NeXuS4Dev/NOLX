@@ -1,0 +1,12 @@
+[package]
+name = "nolx-pci-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-testable PCI configuration-space logic for NOLX: address encoding, function discovery, BAR decoding and sizing, capability walking"
+readme = "../../README.md"
+publish = false
+
+[lib]
+path = "src/lib.rs"

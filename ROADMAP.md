@@ -551,6 +551,15 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
 
 ## M9 — Devices and drivers
 
+**Status: started.** First slice landed on branch `arena/d71a2d5c-nolx`: `crates/nolx-pci-core`
+holds the host-testable PCI configuration-space logic -- `0xCF8` address encoding, function
+identity, BAR decoding and sizing with restore-after-probe, capability-list walking with a
+bounded loop guard, and bridge-aware bus enumeration -- behind a `ConfigSpace` trait. Assertions
+PCI-001 to PCI-008 are recorded as `implemented` in `docs/testing/assertions/pci.md`. Not yet
+done: the kernel `ConfigSpace` over port I/O and its boot inventory marker, PCIe ECAM, MSI/MSI-X,
+and every driver below. Those rows are promoted only once CI has run them.
+
+
 - PCI/PCIe enumeration, BAR assignment, MSI/MSI-X, capability walking.
 - Storage: AHCI (SATA), NVMe, virtio-blk; block layer with partitions (GPT), request
   merging, per-device queues.
