@@ -211,6 +211,25 @@ jobs:
             -device virtio-blk-pci,drive=vd0 \
             | tee build/serial.log || true
           cat build/serial.log >> /tmp/job.log
+      # The round trip wrote sectors 8 to 11 and the kernel printed their checksum. Here the
+      # image file, as QEMU left it, is checksummed over the same sectors: a match means the
+      # write reached the disk and was not only held in the device's cache.
+      - name: The written sectors are on the disk image
+        run: |
+          set -e
+          line=$(grep -Eo 'wrote 4 sectors at 8, read back, crc32 0x[0-9a-f]{8} matches' build/serial.log | head -1 || true)
+          if [ -z "$line" ]; then
+            echo "the virtio round trip did not report a checksum"
+            exit 1
+          fi
+          want=$(echo "$line" | grep -Eo '0x[0-9a-f]{8}')
+          got=$(python3 -c "import zlib; d=open('build/disk.img','rb').read()[8*512:12*512]; print('0x%08x' % (zlib.crc32(d) & 0xffffffff))")
+          echo "the kernel wrote crc32 $want; the disk image's sectors 8 to 11 have crc32 $got"
+          if [ "$want" != "$got" ]; then
+            echo "the disk image does not hold the data the kernel wrote"
+            exit 1
+          fi
+
       # These are the markers the kernel actually reaches today. The list is the project's
       # honest progress record: a marker is added when the kernel emits it, not before.
       - name: Assert the boot markers
@@ -347,6 +366,10 @@ jobs:
           # DRIVER_OK set; then sector 0 was read through the queue and matches the disk image.
           if ! grep -Eq 'virtio-blk: [0-9a-f]{2}:[0-9a-f]{2}\.[0-7] capacity [1-9][0-9]* sectors \([0-9]+ bytes\), queue size [0-9]+, driver ok' build/serial.log; then
             echo "the virtio block device did not reach driver ok"
+            exit 1
+          fi
+          if ! grep -Eq 'virtio-blk: wrote 4 sectors at 8, read back, crc32 0x[0-9a-f]{8} matches the written data' build/serial.log; then
+            echo "the virtio round trip did not verify"
             exit 1
           fi
           if ! grep -Fq 'virtio-blk: sector 0 read, status ok, first 16 bytes match the disk image' build/serial.log; then

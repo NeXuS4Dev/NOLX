@@ -6,9 +6,14 @@
 //! This module supplies what the rules cannot: register access through [`mmio`] windows, queue
 //! memory from the frame allocator and reached through the direct map, and the polling.
 //!
-//! The probe is synchronous and polled. There are no interrupts yet, so the request waits for
-//! the used ring to move before the result is read. Every wait is bounded, so a device that
+//! The probe is synchronous and polled. There are no interrupts yet, so each request waits for
+//! the used ring to move before its result is read. Every wait is bounded, so a device that
 //! never answers is reported as a timeout instead of hanging boot.
+//!
+//! After the sector-0 read, the probe writes a 2 KiB pattern to sectors 8 to 11, reads it back,
+//! and compares CRC-32 checksums. Those sectors are not part of the image's known content; CI
+//! computes the same checksum over the image file after QEMU exits, so the write has to have
+//! reached the disk and not only the device's cache.
 
 use crate::hal::pci::LegacyPorts;
 use crate::mm::mmio::{self, Region};
@@ -30,6 +35,11 @@ const REQUEST_DATA: u64 = 512;
 /// The first bytes of sector 0 of the disk image, which CI writes before the boot. The probe
 /// checks them so that it proves the bytes came from the disk, not from memory it zeroed.
 const SECTOR_PATTERN: &[u8] = b"NOLX-BLK-SECTOR0";
+/// The first sector of the round-trip area, and how many sectors it spans.
+const ROUND_TRIP_SECTOR: u64 = 8;
+const ROUND_TRIP_SECTORS: u32 = 4;
+/// Bytes in the round-trip area. The request page holds it after the header and status.
+const ROUND_TRIP_BYTES: usize = ROUND_TRIP_SECTORS as usize * virtio::SECTOR_BYTES as usize;
 
 /// Why the probe stopped.
 #[derive(Debug)]
@@ -56,6 +66,8 @@ pub enum Failure {
     Timeout(&'static str),
     /// The data read back is not the pattern the disk image holds.
     Pattern,
+    /// The round trip read back different bytes from the ones written.
+    RoundTrip,
 }
 
 impl From<MmioError> for Failure {
@@ -122,13 +134,60 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
 
     let notify_offset =
         virtio::notify_address(&notify_cap, queue.notify_offset) - u64::from(notify_cap.offset);
-    read_sector_zero(&queue, &notify, notify_offset)?;
+    let mut disk = Disk {
+        queue,
+        notify,
+        notify_offset,
+        request: Dma::new()?,
+    };
+
+    disk.transfer(virtio::BLK_T_IN, 0, virtio::SECTOR_BYTES as u32)?;
+    let first: [u8; 16] = disk.request.read_array(REQUEST_DATA);
+    if first[..SECTOR_PATTERN.len()] != *SECTOR_PATTERN {
+        return Err(Failure::Pattern);
+    }
     let _ = writeln!(
         console,
         "virtio-blk: sector 0 read, status ok, first {} bytes match the disk image",
         SECTOR_PATTERN.len()
     );
+
+    round_trip(&mut disk, console)
+}
+
+/// Write the round-trip pattern, read it back into a cleared buffer, and compare. Prints the
+/// checksum CI checks against the disk image.
+fn round_trip(disk: &mut Disk, console: &mut dyn HalConsole) -> Result<(), Failure> {
+    let mut written = [0u8; ROUND_TRIP_BYTES];
+    fill_pattern(&mut written);
+    disk.request.write(REQUEST_DATA, &written);
+    disk.transfer(virtio::BLK_T_OUT, ROUND_TRIP_SECTOR, ROUND_TRIP_BYTES as u32)?;
+
+    // Clear the buffer first, so that bytes which match only because they were never replaced
+    // cannot pass the comparison.
+    disk.request.write(REQUEST_DATA, &[0u8; ROUND_TRIP_BYTES]);
+    disk.transfer(virtio::BLK_T_IN, ROUND_TRIP_SECTOR, ROUND_TRIP_BYTES as u32)?;
+    let read_back: [u8; ROUND_TRIP_BYTES] = disk.request.read_array(REQUEST_DATA);
+    if read_back != written {
+        return Err(Failure::RoundTrip);
+    }
+    let checksum = virtio::crc32(&read_back);
+    let _ = writeln!(
+        console,
+        "virtio-blk: wrote {ROUND_TRIP_SECTORS} sectors at {ROUND_TRIP_SECTOR}, read back, \
+         crc32 {checksum:#010x} matches the written data"
+    );
     Ok(())
+}
+
+/// A deterministic pattern that is not a repeating short sequence, so a shifted or stale read
+/// does not match it by accident.
+fn fill_pattern(out: &mut [u8]) {
+    for (index, byte) in out.iter_mut().enumerate() {
+        *byte = (index as u8).wrapping_mul(7)
+            ^ ((index >> 8) as u8).wrapping_mul(131)
+            ^ 0xA5;
+    }
 }
 
 /// The first virtio block device on the bus, if there is one.
@@ -241,6 +300,12 @@ impl Dma {
         }
     }
 
+    fn read_array<const N: usize>(&self, offset: u64) -> [u8; N] {
+        let mut bytes = [0u8; N];
+        self.read(offset, &mut bytes);
+        bytes
+    }
+
     fn write16(&self, offset: u64, value: u16) {
         self.write(offset, &value.to_le_bytes());
     }
@@ -258,6 +323,66 @@ struct Queue {
     notify_offset: u16,
     ring: Dma,
     layout: virtio::SplitLayout,
+    /// Requests published so far. The available index is this count, wrapping.
+    submitted: u16,
+}
+
+/// The disk once it is running: its queue, the notify register, and the request page.
+struct Disk {
+    queue: Queue,
+    notify: Region,
+    notify_offset: u64,
+    request: Dma,
+}
+
+impl Disk {
+    /// Run one request of `len` bytes at `sector` and wait for the device to complete it. For a
+    /// write, the data must already be in the request page; for a read, it is there afterwards.
+    fn transfer(&mut self, kind: u32, sector: u64, len: u32) -> Result<(), Failure> {
+        let request = &self.request;
+        request.write(REQUEST_HEADER, &virtio::block_request_header(kind, sector));
+        // A status byte the device never writes stays at this value, which is not `BLK_S_OK`.
+        request.write(REQUEST_STATUS, &[0xFF]);
+        let (header, data, status) = (
+            request.address(REQUEST_HEADER),
+            request.address(REQUEST_DATA),
+            request.address(REQUEST_STATUS),
+        );
+        let chain = if kind == virtio::BLK_T_OUT {
+            virtio::block_write_chain(header, data, status, len)
+        } else {
+            virtio::block_read_chain(header, data, status, len)
+        };
+        for (index, descriptor) in chain.iter().enumerate() {
+            self.queue.ring.write(index as u64 * 16, &descriptor.to_bytes());
+        }
+
+        // Publish the chain: the head goes in the available ring at this request's slot, then
+        // the index moves past it. The fences keep the device from seeing the index before the
+        // entry it names.
+        let slot = u64::from(self.queue.submitted % self.queue.size);
+        self.queue.submitted = self.queue.submitted.wrapping_add(1);
+        let avail = self.queue.layout.avail_offset;
+        self.queue.ring.write16(avail + 4 + 2 * slot, 0);
+        fence(Ordering::SeqCst);
+        self.queue.ring.write16(avail + 2, self.queue.submitted);
+        fence(Ordering::SeqCst);
+        self.notify.write16(self.notify_offset, 0)?;
+
+        // The used index must have moved past the count before this request.
+        let used = self.queue.layout.used_offset;
+        let before = self.queue.submitted.wrapping_sub(1);
+        let ring = &self.queue.ring;
+        poll(
+            || Ok(virtio::has_completion(ring.read16(used + 2), before)),
+            "block request",
+        )?;
+
+        let mut status_byte = [0u8; 1];
+        self.request.read(REQUEST_STATUS, &mut status_byte);
+        virtio::block_status(status_byte[0])?;
+        Ok(())
+    }
 }
 
 /// Select queue 0, size it, give the device its three ring addresses, and enable it.
@@ -289,53 +414,6 @@ fn setup_queue(common: &Region) -> Result<Queue, Failure> {
         notify_offset,
         ring,
         layout,
+        submitted: 0,
     })
-}
-
-/// Read sector 0 into the request page's data buffer, then check the status and the bytes.
-fn read_sector_zero(queue: &Queue, notify: &Region, notify_offset: u64) -> Result<(), Failure> {
-    let request = Dma::new()?;
-    request.write(
-        REQUEST_HEADER,
-        &virtio::block_request_header(virtio::BLK_T_IN, 0),
-    );
-    // A status byte the device never writes stays at this value, which is not `BLK_S_OK`.
-    request.write(REQUEST_STATUS, &[0xFF]);
-
-    let chain = virtio::block_read_chain(
-        request.address(REQUEST_HEADER),
-        request.address(REQUEST_DATA),
-        request.address(REQUEST_STATUS),
-        virtio::SECTOR_BYTES as u32,
-    );
-    for (index, descriptor) in chain.iter().enumerate() {
-        queue.ring.write(index as u64 * 16, &descriptor.to_bytes());
-    }
-
-    // Publish the chain: the head goes in the available ring, then the index moves past it. The
-    // fences keep the device from seeing the index before the entry it names.
-    let avail = queue.layout.avail_offset;
-    let slot = 0u64;
-    queue.ring.write16(avail + 4 + 2 * slot, 0);
-    fence(Ordering::SeqCst);
-    queue.ring.write16(avail + 2, 1);
-    fence(Ordering::SeqCst);
-    notify.write16(notify_offset, 0)?;
-
-    let used = queue.layout.used_offset;
-    poll(
-        || Ok(virtio::has_completion(queue.ring.read16(used + 2), 0)),
-        "block read",
-    )?;
-
-    let mut status_byte = [0u8; 1];
-    request.read(REQUEST_STATUS, &mut status_byte);
-    virtio::block_status(status_byte[0])?;
-
-    let mut first = [0u8; 16];
-    request.read(REQUEST_DATA, &mut first);
-    if first[..SECTOR_PATTERN.len()] != *SECTOR_PATTERN {
-        return Err(Failure::Pattern);
-    }
-    Ok(())
 }

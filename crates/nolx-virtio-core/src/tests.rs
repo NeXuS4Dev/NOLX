@@ -376,3 +376,21 @@ fn the_capacity_joins_its_halves_little_endian() {
     assert_eq!(capacity_sectors(0, 1), 1 << 32);
     assert_eq!(capacity_sectors(u32::MAX, u32::MAX), u64::MAX);
 }
+
+#[test]
+fn a_write_chain_makes_the_data_device_readable() {
+    let chain = block_write_chain(0x1000, 0x2000, 0x3000, 2048);
+    assert_eq!(chain[0].flags, DESC_NEXT, "the header is device-readable");
+    assert_eq!(chain[1].addr, 0x2000);
+    assert_eq!(chain[1].len, 2048);
+    assert_eq!(chain[1].flags, DESC_NEXT, "a write's data is read by the device, not written");
+    assert_eq!(chain[2].flags, DESC_WRITE, "the status byte is still device-writable");
+    assert_eq!(block_write_chain(0, 0, 0, 512)[0].next, 1);
+}
+
+#[test]
+fn crc32_matches_the_standard_check_value() {
+    assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+    assert_eq!(crc32(b""), 0);
+    assert_ne!(crc32(b"abc"), crc32(b"abd"), "a one-bit change is seen");
+}

@@ -368,6 +368,32 @@ pub fn block_read_chain(header: u64, data: u64, status: u64, len: u32) -> [Descr
     ]
 }
 
+/// The descriptor chain for one write of `len` bytes: the header and the data are both
+/// device-readable, and the status byte is device-writable. Same layout as
+/// [`block_read_chain`].
+#[must_use]
+pub fn block_write_chain(header: u64, data: u64, status: u64, len: u32) -> [Descriptor; 3] {
+    let mut chain = block_read_chain(header, data, status, len);
+    chain[1].flags = DESC_NEXT;
+    chain
+}
+
+/// CRC-32 (IEEE 802.3, the zlib and Ethernet polynomial) of `bytes`. The probe uses it to
+/// check what it wrote against what it read back, and CI checks the same value against the disk
+/// image. It is a checksum for that comparison, not a virtio rule.
+#[must_use]
+pub fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
 /// Interpret the status byte the device wrote for a block request.
 pub const fn block_status(byte: u8) -> Result<(), VirtioError> {
     if byte == BLK_S_OK {
