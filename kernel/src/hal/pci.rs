@@ -16,7 +16,7 @@ use nolx_pci_core::{Bar, BarSet, Bdf, ConfigSpace};
 use super::{inl, outl};
 
 /// The legacy configuration mechanism over the two architected ports.
-struct LegacyPorts;
+pub struct LegacyPorts;
 
 impl ConfigSpace for LegacyPorts {
     fn read_u32(&mut self, bdf: Bdf, offset: u8) -> u32 {

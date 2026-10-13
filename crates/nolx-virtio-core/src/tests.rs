@@ -312,3 +312,48 @@ fn capacity_is_sectors_times_512_and_overflow_is_reported() {
     assert_eq!(capacity_bytes(2048), Some(1 << 20));
     assert_eq!(capacity_bytes(u64::MAX), None);
 }
+
+#[test]
+fn only_the_block_device_ids_are_accepted() {
+    assert!(is_block_device(VENDOR_VIRTIO, DEVICE_BLOCK_TRANSITIONAL));
+    assert!(is_block_device(VENDOR_VIRTIO, DEVICE_BLOCK_MODERN));
+    assert!(!is_block_device(VENDOR_VIRTIO, 0x1041), "the network device is not a block device");
+    assert!(!is_block_device(0x8086, DEVICE_BLOCK_MODERN), "the vendor must be virtio");
+}
+
+#[test]
+fn a_read_chain_has_the_request_data_and_status_in_order() {
+    let chain = block_read_chain(0x1000, 0x2000, 0x3000, 512);
+    assert_eq!(chain[0].addr, 0x1000);
+    assert_eq!(chain[0].len, 16);
+    assert_eq!(chain[0].flags, DESC_NEXT, "the header is device-readable");
+    assert_eq!(chain[0].next, 1);
+    assert_eq!(chain[1].addr, 0x2000);
+    assert_eq!(chain[1].len, 512);
+    assert_eq!(chain[1].flags, DESC_NEXT | DESC_WRITE, "the data is device-writable");
+    assert_eq!(chain[1].next, 2);
+    assert_eq!(chain[2].addr, 0x3000);
+    assert_eq!(chain[2].len, 1);
+    assert_eq!(chain[2].flags, DESC_WRITE, "the status byte is device-writable and ends the chain");
+}
+
+#[test]
+fn a_block_status_is_ok_only_for_ok() {
+    assert_eq!(block_status(BLK_S_OK), Ok(()));
+    assert_eq!(block_status(BLK_S_IOERR), Err(VirtioError::RequestFailed(BLK_S_IOERR)));
+    assert_eq!(block_status(BLK_S_UNSUPP), Err(VirtioError::RequestFailed(BLK_S_UNSUPP)));
+}
+
+#[test]
+fn a_completion_is_seen_once_and_survives_wraparound() {
+    assert!(!has_completion(0, 0));
+    assert!(has_completion(1, 0));
+    assert!(has_completion(0, u16::MAX), "the index wrapped past 2^16");
+}
+
+#[test]
+fn the_capacity_joins_its_halves_little_endian() {
+    assert_eq!(capacity_sectors(2048, 0), 2048);
+    assert_eq!(capacity_sectors(0, 1), 1 << 32);
+    assert_eq!(capacity_sectors(u32::MAX, u32::MAX), u64::MAX);
+}

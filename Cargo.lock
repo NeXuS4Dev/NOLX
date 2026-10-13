@@ -41,6 +41,7 @@ dependencies = [
  "nolx-pci-core",
  "nolx-types",
  "nolx-vfs",
+ "nolx-virtio-core",
  "nolxfs",
 ]
 

@@ -21,6 +21,16 @@ use nolx_pci_core::{capabilities, Bdf, ConfigSpace};
 pub const VENDOR_VIRTIO: u16 = 0x1AF4;
 /// The modern (virtio 1.0+) PCI device ID of a block device: `0x1040 + device type 2`.
 pub const DEVICE_BLOCK_MODERN: u16 = 0x1042;
+/// The transitional PCI device ID of a block device. QEMU reports this one by default, and
+/// it carries the same modern capabilities, so the driver accepts it too.
+pub const DEVICE_BLOCK_TRANSITIONAL: u16 = 0x1001;
+
+/// Whether a PCI vendor and device ID name a virtio block device this driver can drive.
+#[must_use]
+pub const fn is_block_device(vendor: u16, device: u16) -> bool {
+    vendor == VENDOR_VIRTIO
+        && (device == DEVICE_BLOCK_MODERN || device == DEVICE_BLOCK_TRANSITIONAL)
+}
 /// The PCI capability ID of a vendor-specific capability; virtio uses it for every region.
 const CAP_ID_VENDOR: u8 = 0x09;
 
@@ -107,6 +117,8 @@ pub enum VirtioError {
     /// A vendor capability is malformed: too short, pointing past the configuration space, or
     /// naming a BAR that does not exist.
     MalformedCapability,
+    /// The device completed a block request with a status other than `BLK_S_OK`.
+    RequestFailed(u8),
 }
 
 /// One virtio vendor capability: where a register region lives.
@@ -327,6 +339,57 @@ pub const BLK_S_UNSUPP: u8 = 2;
 /// The unit a block request addresses sectors in. It is fixed at 512 bytes whatever the device's
 /// physical sector size.
 pub const SECTOR_BYTES: u64 = 512;
+
+/// The descriptor chain for one read of `len` bytes: the request header (device-readable), the
+/// data buffer (device-writable), and the status byte (device-writable). The buffers are given
+/// by physical address. The chain is three descriptors, head at index 0 and the next two
+/// linked after it, so the caller places them at consecutive table slots.
+#[must_use]
+pub fn block_read_chain(header: u64, data: u64, status: u64, len: u32) -> [Descriptor; 3] {
+    [
+        Descriptor {
+            addr: header,
+            len: 16,
+            flags: DESC_NEXT,
+            next: 1,
+        },
+        Descriptor {
+            addr: data,
+            len,
+            flags: DESC_NEXT | DESC_WRITE,
+            next: 2,
+        },
+        Descriptor {
+            addr: status,
+            len: 1,
+            flags: DESC_WRITE,
+            next: 0,
+        },
+    ]
+}
+
+/// Interpret the status byte the device wrote for a block request.
+pub const fn block_status(byte: u8) -> Result<(), VirtioError> {
+    if byte == BLK_S_OK {
+        Ok(())
+    } else {
+        Err(VirtioError::RequestFailed(byte))
+    }
+}
+
+/// Whether the device has completed a request since the driver last looked: the used ring's
+/// running index has moved. Indices wrap at 2^16, so the comparison is exact equality.
+#[must_use]
+pub const fn has_completion(used_index: u16, last_seen: u16) -> bool {
+    used_index != last_seen
+}
+
+/// The device's capacity in sectors, from the 64-bit little-endian field at the start of the
+/// block device configuration, given as its two halves.
+#[must_use]
+pub const fn capacity_sectors(low: u32, high: u32) -> u64 {
+    ((high as u64) << 32) | low as u64
+}
 
 /// The 16-byte header that begins every block request: type, reserved, then the sector.
 #[must_use]

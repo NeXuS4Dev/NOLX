@@ -200,9 +200,15 @@ jobs:
       - name: Boot and capture the serial log
         run: |
           set -o pipefail
+          # The disk the virtio-blk probe reads: 1 MiB, with a known pattern at the start of
+          # sector 0 that the probe checks against what the device returns.
+          truncate -s 1M build/disk.img
+          printf 'NOLX-BLK-SECTOR0' | dd of=build/disk.img conv=notrunc status=none
           timeout 30 qemu-system-x86_64 \
             -kernel build/nolx.elf \
             -m 512M -nographic -no-reboot \
+            -drive file=build/disk.img,if=none,id=vd0,format=raw \
+            -device virtio-blk-pci,drive=vd0 \
             | tee build/serial.log || true
           cat build/serial.log >> /tmp/job.log
       # These are the markers the kernel actually reaches today. The list is the project's
@@ -335,6 +341,16 @@ jobs:
           # decoded base and a power-of-two window size (the QEMU VGA device has BARs).
           if ! grep -Eq 'pci: [0-9a-f]{2}:[0-9a-f]{2}\.[0-7] bar[0-5] (io|mem32|mem64) 0x[0-9a-f]+ size 0x[0-9a-f]+' build/serial.log; then
             echo "PCI BAR sizing did not report any implemented BAR"
+            exit 1
+          fi
+          # virtio block: the device was found, its features negotiated, queue 0 enabled, and
+          # DRIVER_OK set; then sector 0 was read through the queue and matches the disk image.
+          if ! grep -Eq 'virtio-blk: [0-9a-f]{2}:[0-9a-f]{2}\.[0-7] capacity [1-9][0-9]* sectors \([0-9]+ bytes\), queue size [0-9]+, driver ok' build/serial.log; then
+            echo "the virtio block device did not reach driver ok"
+            exit 1
+          fi
+          if ! grep -Fq 'virtio-blk: sector 0 read, status ok, first 16 bytes match the disk image' build/serial.log; then
+            echo "the virtio block read did not return the disk image's sector 0"
             exit 1
           fi
           # MMIO windows: a device register range is mapped uncached through the window above the

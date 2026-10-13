@@ -39,5 +39,6 @@ nolx-types = { path = "../crates/nolx-types" }
 # Bus discovery: PCI configuration-space logic, host-tested. The kernel supplies only the
 # legacy port accesses (`hal::pci`).
 nolx-pci-core = { path = "../crates/nolx-pci-core" }
+nolx-virtio-core = { path = "../crates/nolx-virtio-core" }
 nolx-vfs = { path = "../crates/nolx-vfs" }
 nolxfs = { path = "../crates/nolxfs" }

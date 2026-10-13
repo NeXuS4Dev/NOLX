@@ -19,6 +19,7 @@ pub mod interrupts;
 pub mod ioapic;
 pub mod multiboot;
 pub mod pci;
+pub mod virtio_blk;
 pub mod pic;
 pub mod rtc;
 pub mod syscall;

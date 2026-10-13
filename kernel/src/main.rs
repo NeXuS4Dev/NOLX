@@ -146,6 +146,9 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
             panic!("mmio: window init failed: {error:?}");
         }
         mm::mmio::selfcheck(&mut console);
+        // The virtio block device: bring it up and read sector 0, polled. Failure is reported
+        // and boot goes on.
+        hal::virtio_blk::probe(&mut console);
 
         obj::init(&mut console);
         let _ = writeln!(console, "NOLX: objmgr online");
