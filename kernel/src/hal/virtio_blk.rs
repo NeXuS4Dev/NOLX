@@ -441,7 +441,7 @@ impl Disk {
     /// Read whole sectors starting at `sector` into `out`, one request of at most
     /// [`READ_CHUNK_BYTES`] at a time.
     pub(crate) fn read_sectors(&mut self, sector: u64, out: &mut [u8]) -> Result<(), Failure> {
-        if out.len() % gpt::SECTOR_SIZE != 0 {
+        if !out.len().is_multiple_of(gpt::SECTOR_SIZE) {
             return Err(Failure::Unaligned);
         }
         let mut done = 0;
@@ -458,7 +458,7 @@ impl Disk {
     /// Write whole sectors starting at `sector` from `data`, one request of at most
     /// [`READ_CHUNK_BYTES`] at a time. Each request completes before the next is published.
     pub(crate) fn write_sectors(&mut self, sector: u64, data: &[u8]) -> Result<(), Failure> {
-        if data.len() % gpt::SECTOR_SIZE != 0 {
+        if !data.len().is_multiple_of(gpt::SECTOR_SIZE) {
             return Err(Failure::Unaligned);
         }
         let mut done = 0;
