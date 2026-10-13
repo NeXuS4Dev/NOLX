@@ -58,8 +58,11 @@ pub enum Failure {
     Access(MmioError),
     /// A bounded wait ran out, with the step named.
     Timeout(&'static str),
-    /// The port reported a task-file error. The task-file register is recorded.
-    Device { tfd: u32 },
+    /// The port reported a task-file error.
+    Device {
+        /// The task-file register as the port last reported it.
+        tfd: u32,
+    },
     /// The data read back is not the pattern the disk image holds.
     Pattern,
 }
