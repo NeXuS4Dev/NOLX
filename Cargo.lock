@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "fsck-nolxfs"
+version = "0.1.0"
+dependencies = [
+ "nolxfs",
+]
+
+[[package]]
 name = "mkfs-nolxfs"
 version = "0.1.0"
 dependencies = [
@@ -73,4 +80,11 @@ name = "nolxfs"
 version = "0.1.0"
 dependencies = [
  "nolx-types",
+]
+
+[[package]]
+name = "nolxfs-dump"
+version = "0.1.0"
+dependencies = [
+ "nolxfs",
 ]
