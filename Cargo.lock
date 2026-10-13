@@ -31,6 +31,7 @@ dependencies = [
  "nolx-hal-core",
  "nolx-mm-core",
  "nolx-obj-core",
+ "nolx-pci-core",
  "nolx-types",
  "nolx-vfs",
  "nolxfs",
