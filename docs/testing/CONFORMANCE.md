@@ -11,13 +11,13 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | Status | Assertions | Cumulative verified at or above status |
 |---|---|---|
 | `unimplemented` | 0 | 100.0% |
-| `implemented` | 5 | 100.0% |
-| `tested-T1` | 127 | 97.0% |
+| `implemented` | 4 | 100.0% |
+| `tested-T1` | 127 | 97.6% |
 | `pending-T2` | 0 | — |
-| `tested-T2` | 34 | 20.5% |
+| `tested-T2` | 35 | 21.1% |
 | `tested-T3` | 0 | 0.0% |
 
-**161 of 166 assertions have a passing automated test; 0 are awaiting T2 results.**
+**162 of 166 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
@@ -30,14 +30,14 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | mm | 34 | 34 | 23 | 0 | 11 | 0 |
 | nxfs | 15 | 15 | 14 | 0 | 1 | 0 |
 | obj | 14 | 14 | 9 | 0 | 5 | 0 |
-| pci | 10 | 10 | 8 | 0 | 1 | 0 |
+| pci | 10 | 10 | 8 | 0 | 2 | 0 |
 | vfs | 48 | 48 | 46 | 0 | 2 | 0 |
 
 ## Unimplemented assertions (0)
 
 None.
 
-## Implemented but untested (5)
+## Implemented but untested (4)
 
 | ID | Specification reference |
 |---|---|
@@ -45,7 +45,6 @@ None.
 | HAL-019 | APIC arithmetic: x2APIC MSRs, compressed TPR priority classes, timer divisors, and HPET-based counter calibration are checked |
 | HAL-020 | HPET clocksource: 32-bit MMIO reads and wrap extension produce monotonic nanoseconds |
 | HAL-021 | I/O APIC routes: GSI windows and ISA overrides are validated, redirections start masked, and NMI sources use MADT polarity/trigger flags |
-| PCI-010 | NOLX M9 BAR sizing: a type-0 function's BARs are decoded and sized with the write-ones protocol; I/O and memory decoding are switched off during the probe and the command register is restored exactly, with its status bits untouched |
 
 ## Pending T2 verification (0)
 
@@ -193,7 +192,7 @@ None.
 | PCI-007 | pci | NOLX M9 Bus enumeration: every bus is scanned once; multifunction devices expose functions 0 to 7; buses beyond 0 are reached only through a PCI-to-PCI bridge whose secondary bus is above its own; a bridge that points back is refused and the scan terminates | `tested-T1` | nolx-pci-core tests::enumeration_follows_multifunction_devices_and_secondary_buses, tests::a_bridge_that_points_back_is_refused_and_enumeration_terminates |
 | PCI-008 | pci | NOLX M9 Inventory capacity: an inventory that is full refuses the next function and records that the list is incomplete | `tested-T1` | nolx-pci-core tests::an_inventory_refuses_the_function_after_its_last_slot |
 | PCI-009 | pci | NOLX M9 Boot discovery: the kernel enumerates configuration space through the legacy ports before the periodic timer starts and prints one `pci:` line per function, with a summary that flags an incomplete inventory | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `pci: N function(s), M bridge(s) refused` (N >= 1); workflow [38370090989](https://github.com/NeXuS4Dev/NOLX/actions/runs/38370090989) on revision `3a15bf4` passed all six jobs |
-| PCI-010 | pci | NOLX M9 BAR sizing: a type-0 function's BARs are decoded and sized with the write-ones protocol; I/O and memory decoding are switched off during the probe and the command register is restored exactly, with its status bits untouched | `implemented` | nolx-pci-core tests::bars_are_sized_decoded_and_restored, tests::sizing_switches_decoding_off_and_restores_the_command_register; kernel/src/hal/pci.rs report_bars (boot-smoke asserts `pci: BB:DD.F barN ... size 0x...` in .github/workflows/ci.yml; promotion to tested-T2 pending a green run) |
+| PCI-010 | pci | NOLX M9 BAR sizing: a type-0 function's BARs are decoded and sized with the write-ones protocol; I/O and memory decoding are switched off during the probe and the command register is restored exactly, with its status bits untouched | `tested-T2` | nolx-pci-core tests::bars_are_sized_decoded_and_restored, tests::sizing_switches_decoding_off_and_restores_the_command_register; kernel/src/hal/pci.rs report_bars (boot-smoke asserts `pci: BB:DD.F barN ... size 0x...`; workflow [38371460597](https://github.com/NeXuS4Dev/NOLX/actions/runs/38371460597) on revision `3b549d3` passed all six jobs) |
 | PN-001 | vfs | XBD 4.12 Pathname Resolution: a pathname beginning with a slash resolves against the root | `tested-T1` | crates/nolx-vfs path::tests::leading_slash_ignores_the_start_node |
 | PN-002 | vfs | XBD 4.12 Pathname Resolution: the empty pathname is invalid | `tested-T1` | crates/nolx-vfs path::tests::empty_path_is_enoent |
 | PN-003 | vfs | XBD 4.12 Pathname Resolution: the last component may be empty, and then refers to the directory itself | `tested-T1` | crates/nolx-vfs path::tests::trailing_slash_requires_a_directory |
