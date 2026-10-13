@@ -24,10 +24,7 @@ impl ConfigSpace for LegacyPorts {
         // every x86 PC. A configuration read has no side effect of its own; an absent function
         // reads as all ones, which discovery treats as "no device here".
         unsafe {
-            outl(
-                nolx_pci_core::CONFIG_ADDRESS_PORT,
-                nolx_pci_core::config_address(bdf, offset),
-            );
+            outl(nolx_pci_core::CONFIG_ADDRESS_PORT, nolx_pci_core::config_address(bdf, offset));
             inl(nolx_pci_core::CONFIG_DATA_PORT)
         }
     }
@@ -36,10 +33,7 @@ impl ConfigSpace for LegacyPorts {
         // SAFETY: as [`LegacyPorts::read_u32`]. Writes come only from the BAR sizing protocol,
         // which restores each register it changes; discovery itself never writes.
         unsafe {
-            outl(
-                nolx_pci_core::CONFIG_ADDRESS_PORT,
-                nolx_pci_core::config_address(bdf, offset),
-            );
+            outl(nolx_pci_core::CONFIG_ADDRESS_PORT, nolx_pci_core::config_address(bdf, offset));
             outl(nolx_pci_core::CONFIG_DATA_PORT, value);
         }
     }
