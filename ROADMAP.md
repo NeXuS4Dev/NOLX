@@ -573,8 +573,11 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
 - virtio-blk writes: a 2 KiB pattern is written to sectors 8 to 11, read back, and checked by
   CRC-32; CI checksums the same sectors in the disk image after QEMU exits. VIO-013 is
   `tested-T1`; VIO-014 and VIO-015 are `tested-T2` (run [38442239670](https://github.com/NeXuS4Dev/NOLX/actions/runs/38442239670)).
-  Not yet done: a file on NOLXFS written through the block layer, interrupts, the other
-  storage backends (AHCI, NVMe), and GPT.
+- GPT rules (`crates/nolx-block-core`): header signature, revision, header and table CRC-32,
+  the own-LBA and reserved-field checks, entry size, usable area, partition range, and overlap.
+  BLK-001 to BLK-021 are `tested-T1`. The kernel does not read a GPT yet.
+  Not yet done: the kernel reading a partitioned disk, a file on NOLXFS written through the block
+  layer, interrupts, and the other storage backends (AHCI, NVMe).
 
 Not yet done: PCIe ECAM, MSI/MSI-X, and every driver below.
 
