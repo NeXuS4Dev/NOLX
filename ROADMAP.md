@@ -566,7 +566,11 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   outside the direct map are mapped uncached in PML4 slot 257. MMIO-001 to MMIO-004 are
   `tested-T1`; MMIO-005 is `tested-T2` (the boot maps the local APIC through the window and
   checks it against the direct map).
-  Not yet done: the virtio-blk probe and the CI QEMU disk.
+- virtio-blk (`kernel/src/hal/virtio_blk.rs`): the probe finds the device, negotiates features,
+  sets up queue 0, and reads sector 0 through the ring, polled. VIO-010 is `tested-T1`; VIO-011
+  and VIO-012 are `tested-T2`, with CI attaching a 1 MiB disk whose sector 0 starts with a
+  known pattern (run [38404754464](https://github.com/NeXuS4Dev/NOLX/actions/runs/38404754464)).
+  Not yet done: writes, interrupts, and the other storage backends and the block layer.
 
 Not yet done: PCIe ECAM, MSI/MSI-X, and every driver below.
 
