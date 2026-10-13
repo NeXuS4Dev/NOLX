@@ -36,7 +36,7 @@ pub fn dump_to_string<D: BlockDevice>(dev: &mut D) -> Result<String> {
         "container: {} blocks x {} bytes ({} bytes)\n",
         layout.block_count,
         layout.block_size,
-        layout.block_count * layout.block_size,
+        layout.block_count * layout.block_size as u64,
     ));
     out.push_str(&format!(
         "  checkpoint ring: descriptors {} blocks at {}, data {} blocks at {}\n",
@@ -48,7 +48,7 @@ pub fn dump_to_string<D: BlockDevice>(dev: &mut D) -> Result<String> {
     ));
     out.push_str(&format!(
         "  first data block: {}, next xid (container): {}\n",
-        layout.first_data_block, info.sb.next_xid,
+        layout.first_data_block, csb_next_xid(dev)?,
     ));
 
     let found = checkpoint::find_latest(dev, &layout)?;
@@ -98,6 +98,11 @@ pub fn dump_to_string<D: BlockDevice>(dev: &mut D) -> Result<String> {
     Ok(out)
 }
 
+fn csb_next_xid<D: BlockDevice>(dev: &D) -> Result<u64> {
+    let csb: gen::nolx_nx_superblock_t = dev.read_object(0)?;
+    Ok(csb.next_xid)
+}
+
 fn dump_tree<D: BlockDevice>(dev: &D, fs_root: u64, out: &mut String) -> Result<()> {
     let entries = btree::walk::collect(dev, fs_root)?;
     let mut inodes: BTreeMap<u64, gen::nolx_inode_t> = BTreeMap::new();
@@ -122,8 +127,7 @@ fn dump_tree<D: BlockDevice>(dev: &D, fs_root: u64, out: &mut String) -> Result<
                         .val
                         .get(gen::nolx_direntry_t::DISK_SIZE..gen::nolx_direntry_t::DISK_SIZE + name_len)
                         .and_then(|b| core::str::from_utf8(b).ok())
-                        .unwrap_or("")
-                        .to_owned();
+                        .map_or_else(String::new, String::from);
                     children.entry(jkey_oid(raw)).or_default().push((name, dentry.ino));
                 }
             }
@@ -139,15 +143,17 @@ fn dump_tree<D: BlockDevice>(dev: &D, fs_root: u64, out: &mut String) -> Result<
                 }
             }
             gen::DREC_TYPE_XATTR => {
-                if let Some(xattr) = gen::nolx_xattr_rec_t::read_from(&entry.val) {
-                    let name_len = usize::from(xattr.name_len);
-                    let name = entry
-                        .val
-                        .get(gen::nolx_xattr_rec_t::DISK_SIZE..gen::nolx_xattr_rec_t::DISK_SIZE + name_len)
-                        .and_then(|b| core::str::from_utf8(b).ok())
-                        .unwrap_or("")
-                        .to_owned();
-                    xattrs.entry(jkey_oid(raw)).or_default().push(name);
+                // The attribute name lives in the key, after the xattr key
+                // header; the record value is the raw attribute bytes.
+                if entry.key.len() > gen::nolx_xattr_key_t::DISK_SIZE {
+                    let name: String = entry.key[gen::nolx_xattr_key_t::DISK_SIZE..]
+                        .iter()
+                        .take_while(|&&b| b != 0)
+                        .map(|&b| b as char)
+                        .collect();
+                    if !name.is_empty() {
+                        xattrs.entry(jkey_oid(raw)).or_default().push(name);
+                    }
                 }
             }
             _ => {}

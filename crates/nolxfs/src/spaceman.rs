@@ -206,7 +206,7 @@ impl SpaceMan {
         let mut sm = Self {
             space,
             block_size: layout.block_size,
-            bits: vec![0u8; ((space.chunk_count as usize) * bytes_per_chunk)],
+            bits: vec![0u8; (space.chunk_count as usize) * bytes_per_chunk],
             free_count: 0,
         };
         let infos_per_cib = space.infos_per_cib(layout.block_size);

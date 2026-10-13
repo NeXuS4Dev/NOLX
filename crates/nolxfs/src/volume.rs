@@ -50,7 +50,7 @@ use crate::btree::{self, BTree, KeyKind};
 use crate::checkpoint::{self, CheckpointState, FoundCheckpoint, SnapshotRecord};
 use crate::mkfs::{self, FormatOptions, VolumeInfo};
 use crate::omap::ObjectMap;
-use crate::on_disk::{self, extent_len, jkey_oid, jkey_type, pack_jkey, pack_len_and_flags, FsError, Result};
+use crate::on_disk::{extent_len, jkey_oid, jkey_type, pack_jkey, pack_len_and_flags, FsError, Result};
 use crate::on_disk_gen as gen;
 use crate::spaceman::{Reaper, SpaceAllocator, SpaceMan};
 use crate::Pod;
@@ -333,8 +333,8 @@ impl<D: BlockDevice> Volume<D> {
     ///
     /// [`FsError::NotFound`] if no live snapshot has that name, plus probe and
     /// checkpoint errors.
-    pub fn mount_snapshot(dev: D, name: &str) -> Result<Self> {
-        let info = mkfs::probe(&dev)?;
+    pub fn mount_snapshot(mut dev: D, name: &str) -> Result<Self> {
+        let info = mkfs::probe(&mut dev)?;
         let layout = info.layout;
         let found = checkpoint::find_latest(&dev, &layout)?.ok_or(FsError::NotFound)?;
         let record = found
@@ -350,8 +350,8 @@ impl<D: BlockDevice> Volume<D> {
     /// # Errors
     ///
     /// As [`Volume::mount_snapshot`].
-    pub fn mount_snapshot_xid(dev: D, xid: u64) -> Result<Self> {
-        let info = mkfs::probe(&dev)?;
+    pub fn mount_snapshot_xid(mut dev: D, xid: u64) -> Result<Self> {
+        let info = mkfs::probe(&mut dev)?;
         let layout = info.layout;
         let found = checkpoint::find_latest(&dev, &layout)?.ok_or(FsError::NotFound)?;
         let record = found
@@ -419,8 +419,6 @@ impl<D: BlockDevice> Volume<D> {
         &self.name
     }
 
-    /// Volume metadata: layout plus the superblock as last committed.
-    #[must_use]
     /// Current transaction id (the xid of the last commit).
     #[must_use]
     pub const fn xid(&self) -> u64 {
@@ -439,6 +437,8 @@ impl<D: BlockDevice> Volume<D> {
         self.vsb
     }
 
+    /// Volume metadata: layout plus the superblock as last committed.
+    #[must_use]
     pub const fn layout(&self) -> &mkfs::Layout {
         &self.layout
     }

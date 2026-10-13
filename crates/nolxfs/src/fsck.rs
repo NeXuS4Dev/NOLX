@@ -26,7 +26,7 @@ use core::fmt;
 use crate::blockdev::BlockDevice;
 use crate::btree::{self, BTree, KeyKind};
 use crate::checkpoint;
-use crate::mkfs::{self, Layout};
+use crate::mkfs;
 use crate::on_disk::{self, extent_len, jkey_oid, jkey_type, FsError, Result};
 use crate::on_disk_gen as gen;
 use crate::spaceman::{SpaceAllocator, SpaceMan};
@@ -288,8 +288,7 @@ pub fn check<D: BlockDevice>(dev: &mut D, repair: bool) -> Result<FsckReport> {
                         .val
                         .get(gen::nolx_direntry_t::DISK_SIZE..gen::nolx_direntry_t::DISK_SIZE + name_len)
                         .and_then(|b| core::str::from_utf8(b).ok())
-                        .unwrap_or("")
-                        .to_owned();
+                        .map_or_else(String::new, String::from);
                     if !inodes.contains_key(&dentry.ino) {
                         // The inode record may sort after this dentry in a
                         // full walk; resolve after the walk instead.
@@ -327,8 +326,7 @@ pub fn check<D: BlockDevice>(dev: &mut D, repair: bool) -> Result<FsckReport> {
                     .val
                     .get(gen::nolx_direntry_t::DISK_SIZE..gen::nolx_direntry_t::DISK_SIZE + name_len)
                     .and_then(|b| core::str::from_utf8(b).ok())
-                    .unwrap_or("")
-                    .to_owned();
+                    .map_or_else(String::new, String::from);
                 match inodes.get(&dentry.ino) {
                     None => report.issues.push(FsckIssue::DanglingDentry {
                         parent,

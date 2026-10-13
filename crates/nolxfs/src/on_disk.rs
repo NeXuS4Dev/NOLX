@@ -55,6 +55,18 @@ pub enum FsError {
     CorruptNode(&'static str),
     /// The operation cannot be done on a read-only mount.
     ReadOnly,
+    /// The named object does not exist.
+    NotFound,
+    /// The named object already exists.
+    AlreadyExists,
+    /// A path component that must be a directory is not one.
+    NotDirectory,
+    /// A directory was given where a non-directory is required.
+    IsDirectory,
+    /// A directory that must be empty still has entries.
+    NotEmpty,
+    /// A name exceeds the on-disk name length limit.
+    NameTooLong,
     /// The device failed.
     Device(crate::DevError),
 }
