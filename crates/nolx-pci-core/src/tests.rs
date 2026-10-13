@@ -240,6 +240,34 @@ fn bars_are_sized_decoded_and_restored() {
 }
 
 #[test]
+fn sizing_switches_decoding_off_and_restores_the_command_register() {
+    let mut machine = Machine::new();
+    let mut regs = Regs::endpoint(0x1AF4, 0x1000, 0x02, 0x00, false);
+    // Bus mastering (bit 2) is on; memory decoding (bit 1) is on. Only the decode bits are
+    // writable here, so the probe cannot disturb the status half of the register.
+    regs.values[1] = 0x0000_0006;
+    regs.writable[1] = 0x0000_0003;
+    regs.values[4] = 0xFEBC_0000;
+    regs.writable[4] = 0xFFFF_F000;
+    machine.add(bdf(0, 4, 0), regs);
+
+    let set = read_bars(&mut machine, bdf(0, 4, 0));
+    assert_eq!(set.sizes[0], Some(0x1000));
+
+    let command_writes: Vec<u32> = machine
+        .writes
+        .iter()
+        .filter(|write| write.1 == 0x04)
+        .map(|write| write.2)
+        .collect();
+    // Decoding off before the first probe, then the original value (decoding on) at the end.
+    assert_eq!(command_writes.first(), Some(&0x0000_0004));
+    assert_eq!(command_writes.last(), Some(&0x0000_0006));
+    let after = machine.regs(bdf(0, 4, 0)).expect("present");
+    assert_eq!(after.values[1], 0x0000_0006);
+}
+
+#[test]
 fn a_function_without_a_capability_bit_has_no_list() {
     let mut machine = Machine::new();
     let mut regs = Regs::endpoint(0x8086, 0x1, 0x01, 0x06, false);

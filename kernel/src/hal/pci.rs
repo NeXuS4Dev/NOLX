@@ -11,7 +11,7 @@
 //! assertion rows record that obligation rather than leaving it implicit.
 
 use nolx_hal_core::console::HalConsole;
-use nolx_pci_core::{Bdf, ConfigSpace};
+use nolx_pci_core::{Bar, BarSet, Bdf, ConfigSpace};
 
 use super::{inl, outl};
 
@@ -72,6 +72,33 @@ pub fn init(console: &mut dyn HalConsole) {
             info.prog_if,
             info.revision,
             info.header_type
+        );
+    }
+    for info in inventory.as_slice() {
+        if info.header_type == 0 {
+            let bars = nolx_pci_core::read_bars(&mut LegacyPorts, info.bdf);
+            report_bars(console, info.bdf, &bars);
+        }
+    }
+}
+
+/// Print every implemented BAR of one type-0 function, with its decoded base and window size.
+fn report_bars(console: &mut dyn HalConsole, bdf: Bdf, bars: &BarSet) {
+    let (bus, device, function) = (bdf.bus, bdf.device, bdf.function);
+    for (slot, bar) in bars.slots.iter().enumerate() {
+        let size = bars.sizes[slot].unwrap_or(0);
+        let (kind, base, prefetch) = match *bar {
+            Bar::Io { port } => ("io", u64::from(port), false),
+            Bar::Memory32 { base, prefetchable } => ("mem32", u64::from(base), prefetchable),
+            Bar::Memory64 { base, prefetchable } => ("mem64", base, prefetchable),
+            Bar::Unused | Bar::Reserved => ("none", 0, false),
+        };
+        if size == 0 {
+            continue;
+        }
+        let _ = writeln!(
+            console,
+            "pci: {bus:02x}:{device:02x}.{function} bar{slot} {kind} {base:#x} size {size:#x} prefetch={prefetch}"
         );
     }
 }

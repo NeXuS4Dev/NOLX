@@ -52,6 +52,8 @@ const OFF_SECONDARY_BUS: u8 = 0x18;
 
 /// Bit 4 of the status register: the capability list exists.
 const STATUS_CAP_LIST: u32 = 1 << 20;
+/// The command-register bits that let a function answer I/O (bit 0) and memory (bit 1) cycles.
+const COMMAND_DECODE_MASK: u32 = 0x3;
 /// Bit 7 of the header-type byte: the device has more than one function.
 const HEADER_MULTIFUNCTION: u8 = 0x80;
 /// Class code and subclass of a PCI-to-PCI bridge.
@@ -302,8 +304,16 @@ pub struct BarSet {
 /// Sizing follows the usual protocol: save the register, write all ones, read the mask the
 /// device kept, and restore the original value. The restore happens even when the probe finds
 /// nothing, so a function is never left with a half-sized window.
+///
+/// While the probe runs, the function's I/O and memory decoding are switched off in the command
+/// register, as the PCI specification recommends: a device answering at the bogus addresses a
+/// probe writes would otherwise claim memory it does not own. The command register is then put
+/// back exactly as it was. Only its low half is written, so the status bits (some of which are
+/// write-one-to-clear) are never touched.
 pub fn read_bars<C: ConfigSpace>(cfg: &mut C, bdf: Bdf) -> BarSet {
     let mut set = BarSet::default();
+    let command = cfg.read_u32(bdf, OFF_COMMAND) & 0xFFFF;
+    cfg.write_u32(bdf, OFF_COMMAND, command & !COMMAND_DECODE_MASK);
     let mut slot = 0usize;
     while slot < BAR_SLOTS {
         let offset = OFF_BAR0 + (slot as u8) * 4;
@@ -343,6 +353,7 @@ pub fn read_bars<C: ConfigSpace>(cfg: &mut C, bdf: Bdf) -> BarSet {
         }
         slot += width;
     }
+    cfg.write_u32(bdf, OFF_COMMAND, command);
     set
 }
 
