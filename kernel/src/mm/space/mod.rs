@@ -899,7 +899,8 @@ fn set_current(space: *mut ()) {
     }
 }
 
-fn kernel_root() -> Frame {
+/// The kernel's own PML4: captured once, while the kernel runs on it at boot.
+pub(crate) fn kernel_root() -> Frame {
     // SAFETY: single boot processor; the root is captured once, while the kernel is running on
     // it, and never changes.
     unsafe {

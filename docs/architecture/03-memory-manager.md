@@ -29,6 +29,15 @@ LAPIC and HPET MMIO windows are mapped through the same tables with caching disa
 they stay reachable after the identity map is gone. Slot 510 is reserved for the debugger's
 recursive mapping.
 
+Device registers that the direct map does not reach are mapped uncached in a dedicated window
+in PML4 slot 257, directly above the direct map (`MMIO_BASE = 0xffff_8080_0000_0000`, one
+gibibyte). `nolx_mm_core::mmio` plans each window and refuses any physical range that starts
+inside the direct map, because cacheable RAM must not get a second, uncached mapping. The
+window's top-level table is created at boot, before any address space exists, since spaces
+share the kernel's top-level entries by reference. Mappings are not yet removed. The boot
+self check maps the local APIC through the window and compares its version register with the
+direct map.
+
 The kernel builds its own GDT, IDT, and stack in the image window during `hal::init`, and
 then drops the boot identity map (`mm::tables::drop_identity_map`, the first thing
 `nolx_kernel_main` does after the HAL is up). Dropping it is verified rather than assumed:

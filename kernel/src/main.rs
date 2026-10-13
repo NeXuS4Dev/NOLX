@@ -139,6 +139,14 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
             mm::init_without_firmware(&mut console);
         }
 
+        // Device register windows. The table for the MMIO window is created now, before any
+        // address space exists, because spaces share the kernel's top-level entries. The
+        // self check maps the local APIC through the window and compares it with the direct map.
+        if let Err(error) = mm::mmio::init() {
+            panic!("mmio: window init failed: {error:?}");
+        }
+        mm::mmio::selfcheck(&mut console);
+
         obj::init(&mut console);
         let _ = writeln!(console, "NOLX: objmgr online");
         // The executive's view of the pools the memory manager charges. Printing it is what

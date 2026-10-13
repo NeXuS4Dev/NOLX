@@ -337,6 +337,12 @@ jobs:
             echo "PCI BAR sizing did not report any implemented BAR"
             exit 1
           fi
+          # MMIO windows: a device register range is mapped uncached through the window above the
+          # direct map, and reads the same value as the direct map (the local APIC version).
+          if ! grep -Eq 'mm: mmio: LAPIC 0x[0-9a-f]+ at 0x[0-9a-f]+: uncached=true, version 0x[0-9a-f]+ read through the window matches the direct map' build/serial.log; then
+            echo "the MMIO window check did not pass"
+            exit 1
+          fi
           # The pools are charged by the code that consumes memory -- the heap takes the
           # nonpaged pool, page tables take the system PTE pool -- and the report is the
           # executive's view of the same numbers.

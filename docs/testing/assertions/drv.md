@@ -1,11 +1,12 @@
-# Assertions: virtio transport and block device rules
+# Assertions: device register windows, virtio transport, and block device rules
 
-Source: NOLX M9 -- `ROADMAP.md` (Devices and drivers, virtio-blk) and `crates/nolx-virtio-core`.
-This file covers the host-testable rules of the virtio 1.x PCI transport and the block device's
-request format. VIO-001 to VIO-009 are `tested-T1`: the host tests in `nolx-virtio-core` are the
-evidence. No device has been driven yet, so no row is claimed as `tested-T2`. A boot-level row
-(a probe that finds a `-device virtio-blk-pci` disk in QEMU) will be added as `pending-T2` once
-the kernel probe and its CI disk exist.
+Source: NOLX M9 -- `ROADMAP.md` (Devices and drivers, virtio-blk) and `crates/nolx-virtio-core`,
+`crates/nolx-mm-core/src/mmio.rs`, `kernel/src/mm/mmio.rs`. This file covers the uncached
+windows that device registers are mapped through, the host-testable rules of the virtio 1.x
+PCI transport, and the block device's request format. VIO-001 to VIO-009 are `tested-T1`: the
+host tests in `nolx-virtio-core` are the evidence. MMIO-001 to MMIO-004 are `tested-T1` for the
+window rules; MMIO-005 is the boot check that maps the local APIC through the window. No device
+has been driven yet, so no virtio row is claimed as `tested-T2`.
 
 Rows are pipe-delimited: `ID | specification reference | status | test`.
 
@@ -18,3 +19,8 @@ VIO-006 | NOLX M9 Initialization order: the driver steps through ACKNOWLEDGE, DR
 VIO-007 | NOLX M9 Split virtqueue layout: for a queue of n entries the available ring starts after 16n bytes of descriptors, the used ring starts at the next 4-byte boundary, and only power-of-two sizes up to 32768 are accepted | tested-T1 | nolx-virtio-core tests::split_layout_matches_the_specification_sizes, tests::split_layout_refuses_sizes_the_device_cannot_use
 VIO-008 | NOLX M9 Descriptor encoding: a descriptor is 16 bytes, little-endian, with the address, length, flags, and next index at their specified offsets | tested-T1 | nolx-virtio-core tests::a_descriptor_encodes_little_endian_in_its_specified_fields
 VIO-009 | NOLX M9 Block request format: the 16-byte header holds the request type at offset 0, a zero reserved word, and the sector at offset 8; capacity is the sector count times 512, and an overflowing product is reported | tested-T1 | nolx-virtio-core tests::a_block_request_header_names_the_type_and_sector, tests::capacity_is_sectors_times_512_and_overflow_is_reported
+MMIO-001 | NOLX M9 Window placement: a device range is mapped at the next free address of the MMIO window, page-aligned, with its byte offset recorded, and each window is followed by an unmapped guard page; windows never overlap | tested-T1 | nolx-mm-core tests::the_window_covers_the_requested_range_with_its_offset, tests::a_range_that_crosses_a_page_boundary_takes_both_pages, tests::windows_are_disjoint_and_separated_by_a_guard_page, tests::the_window_runs_out_and_then_refuses, tests::a_window_too_large_for_what_is_left_is_refused_without_moving_the_arena
+MMIO-002 | NOLX M9 Window refusals: an empty range, a range past the physical address space, and a range that starts inside the direct map (cacheable RAM) are refused before any table is edited | tested-T1 | nolx-mm-core tests::an_empty_range_is_refused, tests::ranges_past_the_physical_address_space_are_refused, tests::a_range_that_starts_inside_the_direct_map_is_refused
+MMIO-003 | NOLX M9 Window mapping: the window occupies PML4 slot 257, directly above the direct map; its pages are present, writable, not executable, and uncached (cache-disable with write-through), and never user or global | tested-T1 | nolx-mm-core tests::mmio_pages_are_uncached_writable_and_never_executable, tests::the_window_slot_is_the_one_above_the_direct_map
+MMIO-004 | NOLX M9 Register access: a read or write through a mapped range is refused unless its width is 1, 2, or 4 bytes, its offset is aligned to the width, and it lies inside the range | tested-T1 | nolx-mm-core tests::accesses_must_be_aligned_and_inside_the_region
+MMIO-005 | NOLX M9 Boot window check: the local APIC is mapped through the window, uncached, and its version register reads the same value as through the direct map | pending-T2 | `.github/workflows/ci.yml` boot-smoke asserts `mm: mmio: LAPIC 0x... at 0x...: uncached=true, version 0x... read through the window matches the direct map`; kernel/src/mm/mmio.rs selfcheck
