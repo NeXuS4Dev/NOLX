@@ -12,13 +12,14 @@
 //!
 //! After the sector-0 read, the probe reads the GUID Partition Table: the primary header in LBA 1
 //! and the table it names, checked with the `nolx-block-core` rules, then prints the partitions in
-//! use. Then it writes a 2 KiB pattern to sectors 300 to 303, which lie in the usable area between
-//! the partitions, reads it back, and compares CRC-32 checksums. CI computes the same checksum over
-//! the image file after QEMU exits, so the write has to have reached the disk and not only the
-//! device's cache.
+//! use. Then it writes a 2 KiB pattern to sectors 1600 to 1603, in the gap after the last
+//! partition, reads it back, and compares CRC-32 checksums. CI computes the same checksum over the
+//! image file after QEMU exits, so the write has to have reached the disk and not only the device's
+//! cache. Last, it puts a NOLXFS volume on the first partition in use; see [`super::virtio_volume`].
 
 use alloc::vec;
 use nolx_block_core::{self as gpt, GptError, Header};
+use nolxfs::on_disk::FsError;
 
 use crate::hal::pci::LegacyPorts;
 use crate::mm::mmio::{self, Region};
@@ -43,7 +44,7 @@ const SECTOR_PATTERN: &[u8] = b"NOLX-BLK-SECTOR0";
 /// The first sector of the round-trip area, and how many sectors it spans. The area is in the
 /// usable part of the disk and between the partitions the CI image defines, so the write does not
 /// touch the partition table or a partition's data.
-const ROUND_TRIP_SECTOR: u64 = 300;
+const ROUND_TRIP_SECTOR: u64 = 1600;
 const ROUND_TRIP_SECTORS: u32 = 4;
 /// The most bytes one request carries. The request page has room for more, but a bounded size
 /// keeps every transfer the same shape.
@@ -82,6 +83,10 @@ pub enum Failure {
     Gpt(GptError),
     /// A read was asked for a length that is not a whole number of sectors.
     Unaligned,
+    /// The volume layer refused the partition or the file.
+    Volume(FsError),
+    /// The file read back is not the bytes that were written.
+    FileMismatch,
 }
 
 impl From<MmioError> for Failure {
@@ -105,6 +110,12 @@ impl From<mmio::Failure> for Failure {
 impl From<GptError> for Failure {
     fn from(error: GptError) -> Self {
         Self::Gpt(error)
+    }
+}
+
+impl From<FsError> for Failure {
+    fn from(error: FsError) -> Self {
+        Self::Volume(error)
     }
 }
 
@@ -172,18 +183,26 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
         SECTOR_PATTERN.len()
     );
 
-    read_partitions(&mut disk, sectors, console)?;
-    round_trip(&mut disk, console)
+    let volume = read_partitions(&mut disk, sectors, console)?;
+    round_trip(&mut disk, console)?;
+    match volume {
+        Some((first, last)) => super::virtio_volume::run(disk, first, last - first + 1, console),
+        None => {
+            let _ = writeln!(console, "virtio-blk: gpt has no partitions in use; no volume");
+            Ok(())
+        }
+    }
 }
 
 /// Read the primary GPT header from LBA 1 and the table it names, check both against the
 /// `nolx-block-core` rules, and print each partition in use. The table is read in requests of
-/// [`READ_CHUNK_BYTES`]; the header and table are checked before any entry is trusted.
+/// [`READ_CHUNK_BYTES`]; the header and table are checked before any entry is trusted. Returns the
+/// first and last LBA of the first partition in use, if there is one.
 fn read_partitions(
     disk: &mut Disk,
     capacity: u64,
     console: &mut dyn HalConsole,
-) -> Result<(), Failure> {
+) -> Result<Option<(u64, u64)>, Failure> {
     let mut sector = [0u8; gpt::SECTOR_SIZE];
     disk.read_sectors(1, &mut sector)?;
     let header = Header::parse(&sector, 1, capacity)?;
@@ -199,12 +218,16 @@ fn read_partitions(
         header.first_usable, header.last_usable
     );
 
+    let mut first_used = None;
     for index in 0..header.entry_count {
         let Some(part) = gpt::entry(&header, &table, index) else {
             break;
         };
         if part.is_unused() {
             continue;
+        }
+        if first_used.is_none() {
+            first_used = Some((part.first_lba, part.last_lba));
         }
         let _ = write!(
             console,
@@ -216,7 +239,7 @@ fn read_partitions(
         print_name(console, &part.name);
         let _ = writeln!(console);
     }
-    Ok(())
+    Ok(first_used)
 }
 
 /// Print a UTF-16 partition name, stopping at the first zero unit. An unpaired surrogate prints as
@@ -260,7 +283,7 @@ fn round_trip(disk: &mut Disk, console: &mut dyn HalConsole) -> Result<(), Failu
 
 /// A deterministic pattern that is not a repeating short sequence, so a shifted or stale read
 /// does not match it by accident.
-fn fill_pattern(out: &mut [u8]) {
+pub(crate) fn fill_pattern(out: &mut [u8]) {
     for (index, byte) in out.iter_mut().enumerate() {
         *byte = (index as u8).wrapping_mul(7) ^ ((index >> 8) as u8).wrapping_mul(131) ^ 0xA5;
     }
@@ -404,7 +427,7 @@ struct Queue {
 }
 
 /// The disk once it is running: its queue, the notify register, and the request page.
-struct Disk {
+pub(crate) struct Disk {
     queue: Queue,
     notify: Region,
     notify_offset: u64,
@@ -414,7 +437,7 @@ struct Disk {
 impl Disk {
     /// Read whole sectors starting at `sector` into `out`, one request of at most
     /// [`READ_CHUNK_BYTES`] at a time.
-    fn read_sectors(&mut self, sector: u64, out: &mut [u8]) -> Result<(), Failure> {
+    pub(crate) fn read_sectors(&mut self, sector: u64, out: &mut [u8]) -> Result<(), Failure> {
         if out.len() % gpt::SECTOR_SIZE != 0 {
             return Err(Failure::Unaligned);
         }
@@ -424,6 +447,23 @@ impl Disk {
             let first = sector + (done / gpt::SECTOR_SIZE) as u64;
             self.transfer(virtio::BLK_T_IN, first, len as u32)?;
             self.request.read(REQUEST_DATA, &mut out[done..done + len]);
+            done += len;
+        }
+        Ok(())
+    }
+
+    /// Write whole sectors starting at `sector` from `data`, one request of at most
+    /// [`READ_CHUNK_BYTES`] at a time. Each request completes before the next is published.
+    pub(crate) fn write_sectors(&mut self, sector: u64, data: &[u8]) -> Result<(), Failure> {
+        if data.len() % gpt::SECTOR_SIZE != 0 {
+            return Err(Failure::Unaligned);
+        }
+        let mut done = 0;
+        while done < data.len() {
+            let len = (data.len() - done).min(READ_CHUNK_BYTES);
+            let first = sector + (done / gpt::SECTOR_SIZE) as u64;
+            self.request.write(REQUEST_DATA, &data[done..done + len]);
+            self.transfer(virtio::BLK_T_OUT, first, len as u32)?;
             done += len;
         }
         Ok(())

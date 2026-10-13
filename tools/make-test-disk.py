@@ -7,11 +7,11 @@ The image has three things the kernel checks:
   and compares;
 * a protective MBR, so the image is a GPT disk to any reader that looks for one;
 * a GUID Partition Table with a primary header in LBA 1, a primary table in LBA 2 to 33, a backup
-  table, and a backup header in the last LBA. It holds two partitions, `nolx-data` at LBA 40 to 79
-  and `nolx-log` at LBA 128 to 255.
+  table, and a backup header in the last LBA. It holds two partitions, `nolx-data` at LBA 40 to
+  1039 (a NOLXFS volume the kernel formats) and `nolx-log` at LBA 1200 to 1299.
 
-The kernel's round trip writes to sectors 300 to 303, which lie in the usable area between the
-partitions, so the table is not overwritten.
+The kernel's raw round trip writes to sectors 1600 to 1603, in the gap after the last partition, so
+neither the table nor a partition is overwritten.
 
 Usage: make-test-disk.py OUTPUT
 """
@@ -38,8 +38,8 @@ LINUX_DATA = uuid.UUID("0fc63daf-8483-4772-8e79-3d69d8477de4").bytes_le
 
 # (type GUID, unique GUID, first LBA, last LBA, name)
 PARTITIONS = [
-    (LINUX_DATA, uuid.UUID(int=0x1001).bytes_le, 40, 79, "nolx-data"),
-    (LINUX_DATA, uuid.UUID(int=0x1002).bytes_le, 128, 255, "nolx-log"),
+    (LINUX_DATA, uuid.UUID(int=0x1001).bytes_le, 40, 1039, "nolx-data"),
+    (LINUX_DATA, uuid.UUID(int=0x1002).bytes_le, 1200, 1299, "nolx-log"),
 ]
 
 
