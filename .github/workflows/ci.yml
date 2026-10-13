@@ -203,7 +203,9 @@ jobs:
           # The disk the virtio-blk probe reads: 1 MiB, with a known pattern at the start of
           # sector 0 and a GUID Partition Table with two partitions. See tools/make-test-disk.py.
           python3 tools/make-test-disk.py build/disk.img
-          timeout 30 qemu-system-x86_64 \
+          # 60 seconds: the boot now also probes an AHCI controller, and the markers after the
+          # virtio work must still be reached before QEMU is stopped.
+          timeout 60 qemu-system-x86_64 \
             -kernel build/nolx.elf \
             -m 512M -nographic -no-reboot \
             -drive file=build/disk.img,if=none,id=vd0,format=raw \
