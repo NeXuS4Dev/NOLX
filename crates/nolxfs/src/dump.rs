@@ -247,6 +247,5 @@ fn dump_dir(
 }
 
 fn read_size(inode: &gen::nolx_inode_t) -> u64 {
-    gen::nolx_data_stream_t::read_from(&inode.data_stream)
-        .map_or(0, |ds| ds.total_bytes_written)
+    gen::nolx_data_stream_t::read_from(&inode.data_stream).map_or(0, |ds| ds.total_bytes_written)
 }

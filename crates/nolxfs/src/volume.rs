@@ -501,6 +501,9 @@ impl<D: BlockDevice> Volume<D> {
         }
         self.pending_xid = self.state.xid + 1;
         let xid = self.pending_xid;
+        // The replaced trees become reaper garbage — except the pinned
+        // `mkfs` layout blocks (tree roots below `first_data_block`), which
+        // live outside the bitmap-managed region and must never be freed.
         let mut old_blocks = Vec::new();
         for root in [
             self.state.fs_root,
@@ -509,7 +512,11 @@ impl<D: BlockDevice> Volume<D> {
             self.state.fext_root,
         ] {
             if root != 0 {
-                old_blocks.extend(btree::walk::blocks(&self.dev, root)?);
+                old_blocks.extend(
+                    btree::walk::blocks(&self.dev, root)?
+                        .into_iter()
+                        .filter(|&b| b >= self.layout.first_data_block),
+                );
             }
         }
         let fs_root = self.clone_tree(TreeKind::Fs, xid)?;
@@ -1841,7 +1848,9 @@ impl<D: BlockDevice> Volume<D> {
             }
         }
         for block in snap_tree_blocks {
-            self.reaper.defer(block, 1, self.pending_xid);
+            if block >= self.layout.first_data_block {
+                self.reaper.defer(block, 1, self.pending_xid);
+            }
         }
         self.tree_remove(TreeKind::SnapMeta, &record.xid.to_le_bytes())?;
         self.state.snapshots.retain(|s| s.name != name);
@@ -2277,5 +2286,58 @@ mod tests {
         let mut after = read_all(&vol, copy);
         after.truncate(16);
         assert_eq!(after, vec![9u8; 16]);
+    }
+}
+
+#[cfg(test)]
+mod m8_regression_tests {
+    use super::*;
+    use crate::blockdev::MemBlockDevice;
+
+    #[test]
+    fn rename_to_root_after_symlink_on_small_volume() {
+        let dev = MemBlockDevice::new(4096, 256);
+        let mut vol = Volume::format(
+            dev,
+            &mkfs::FormatOptions {
+                volume_name: String::from("small"),
+                ..mkfs::FormatOptions::default()
+            },
+        )
+        .unwrap();
+        let docs = vol.mkdir(gen::ROOT_INO, "docs", 0o755, 0, 0).unwrap();
+        let f = vol.create_file(docs, "a.txt", 0o644, 0, 0).unwrap();
+        vol.write_data(f, 0, b"adapter-data").unwrap();
+        assert_eq!(vol.lookup(docs, "a.txt").unwrap(), f);
+        vol.link(f, gen::ROOT_INO, "b.txt").unwrap();
+        assert_eq!(vol.lookup(gen::ROOT_INO, "b.txt").unwrap(), f);
+        let lnk = vol.symlink(gen::ROOT_INO, "lnk", b"/docs/a.txt", 0, 0).unwrap();
+        assert_eq!(vol.readlink(lnk).unwrap(), b"/docs/a.txt");
+        assert_eq!(vol.lookup(docs, "a.txt").unwrap(), f);
+        vol.rename(docs, "a.txt", gen::ROOT_INO, "c.txt").unwrap();
+        assert_eq!(vol.lookup(gen::ROOT_INO, "c.txt").unwrap(), f);
+        vol.commit().unwrap();
+    }
+
+    #[test]
+    fn link_and_commit_on_kernel_sized_volume() {
+        // 96 blocks is what the kernel boot self-test mounts.
+        let dev = MemBlockDevice::new(4096, 96);
+        let mut vol = Volume::format(
+            dev,
+            &mkfs::FormatOptions {
+                volume_name: String::from("nolx-boot"),
+                ..mkfs::FormatOptions::default()
+            },
+        )
+        .unwrap();
+        let f = vol.create_file(gen::ROOT_INO, "boot.txt", 0o644, 0, 0).unwrap();
+        vol.write_data(f, 0, b"nolxfs-v1-ok").unwrap();
+        vol.link(f, gen::ROOT_INO, "boot-link.txt").unwrap();
+        assert_eq!(vol.read_inode(f).unwrap().nlink, 2);
+        vol.commit().unwrap();
+        let vol = Volume::mount(vol.into_device()).unwrap();
+        let f2 = vol.lookup(gen::ROOT_INO, "boot-link.txt").unwrap();
+        assert_eq!(f2, f);
     }
 }

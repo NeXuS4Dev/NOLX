@@ -23,8 +23,8 @@ use nolx_types::scalars::{is_dir, is_reg, Gid, Mode, Stat, Uid, NAME_MAX};
 use nolxfs::blockdev::{BlockDevice, DevError};
 use nolxfs::mkfs::{self, FormatOptions, VolumeInfo};
 use nolxfs::on_disk::FsError;
-use nolxfs::volume::Volume;
 use nolxfs::on_disk_gen as gen;
+use nolxfs::volume::Volume;
 
 /// Root directory inode number in NOLXFS (`gen::ROOT_INO`).
 pub const NOLXFS_ROOT_INO: u64 = gen::ROOT_INO;
@@ -112,7 +112,7 @@ impl BlockDevice for SparseBlockDevice {
 /// them as one checkpoint, which is how the VFS gets atomic multi-operation
 /// transactions without knowing about xids.
 pub struct NolxfsVolume<D: BlockDevice = SparseBlockDevice> {
-    inner: Volume<D>,
+    inner: Box<Volume<D>>,
     info: Box<VolumeInfo>,
 }
 
@@ -142,7 +142,10 @@ impl NolxfsVolume<SparseBlockDevice> {
             layout: *inner.layout(),
             superblock: inner.volume_superblock(),
         });
-        Ok(Self { inner, info })
+        Ok(Self {
+            inner: Box::new(inner),
+            info,
+        })
     }
 }
 
@@ -155,7 +158,7 @@ impl<D: BlockDevice> NolxfsVolume<D> {
         let info = mkfs::probe(&mut dev).map_err(fs_err_to_errno)?;
         let inner = Volume::mount(dev).map_err(fs_err_to_errno)?;
         Ok(Self {
-            inner,
+            inner: Box::new(inner),
             info: Box::new(info),
         })
     }
@@ -166,7 +169,7 @@ impl<D: BlockDevice> NolxfsVolume<D> {
         let info = mkfs::probe(&mut probe_dev).map_err(fs_err_to_errno)?;
         let inner = Volume::mount_snapshot(probe_dev, name).map_err(fs_err_to_errno)?;
         Ok(Self {
-            inner,
+            inner: Box::new(inner),
             info: Box::new(info),
         })
     }
@@ -185,7 +188,7 @@ impl<D: BlockDevice> NolxfsVolume<D> {
 
     /// The underlying filesystem volume (snapshot creation, xattrs, cloning).
     #[must_use]
-    pub const fn volume(&self) -> &Volume<D> {
+    pub fn volume(&self) -> &Volume<D> {
         &self.inner
     }
 
@@ -461,7 +464,9 @@ mod tests {
         let (f, _) = vol.create_file(docs, "a.txt", 0o644, 0, 0, true).unwrap();
         vol.write(f, 0, b"adapter-data").unwrap();
         vol.link(f, NOLXFS_ROOT_INO, "b.txt").unwrap();
-        let lnk = vol.symlink(NOLXFS_ROOT_INO, "lnk", b"/docs/a.txt", 0, 0).unwrap();
+        let lnk = vol
+            .symlink(NOLXFS_ROOT_INO, "lnk", b"/docs/a.txt", 0, 0)
+            .unwrap();
         assert_eq!(vol.readlink(lnk).unwrap(), b"/docs/a.txt");
         vol.rename(docs, "a.txt", NOLXFS_ROOT_INO, "c.txt").unwrap();
         assert_eq!(vol.lookup(NOLXFS_ROOT_INO, "c.txt").unwrap(), f);
