@@ -545,7 +545,9 @@ of returning ENOTSUP; the kernel boot self-test exercises those operations on
 `docs/fs/nolxfs-format.md`: dentry keys are `(parent, name)` without a separate
 name-hash field, and the extent-reference count is stored per physical block
 appended to the 24-byte `phys_ext_val`. The passing CI run for this milestone will
-be recorded here and in NXFS-015 when it lands.
+CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564) on revision `be7730a` passed all six jobs
+(boot-layer, on-disk-format, host-tests, lint, kernel, boot-smoke with the
+`nolxfs-m8 ok` marker asserted).
 
 ## M9 — Devices and drivers
 
