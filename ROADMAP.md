@@ -570,7 +570,11 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   sets up queue 0, and reads sector 0 through the ring, polled. VIO-010 is `tested-T1`; VIO-011
   and VIO-012 are `tested-T2`, with CI attaching a 1 MiB disk whose sector 0 starts with a
   known pattern (run [38404754464](https://github.com/NeXuS4Dev/NOLX/actions/runs/38404754464)).
-  Not yet done: writes, interrupts, and the other storage backends and the block layer.
+- virtio-blk writes: a 2 KiB pattern is written to sectors 8 to 11, read back, and checked by
+  CRC-32; CI checksums the same sectors in the disk image after QEMU exits. VIO-013 is
+  `tested-T1`; VIO-014 and VIO-015 are `tested-T2` (run [38442239670](https://github.com/NeXuS4Dev/NOLX/actions/runs/38442239670)).
+  Not yet done: a file on NOLXFS written through the block layer, interrupts, the other
+  storage backends (AHCI, NVMe), and GPT.
 
 Not yet done: PCIe ECAM, MSI/MSI-X, and every driver below.
 

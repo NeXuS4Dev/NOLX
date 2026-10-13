@@ -12,18 +12,18 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 |---|---|---|
 | `unimplemented` | 0 | 100.0% |
 | `implemented` | 4 | 100.0% |
-| `tested-T1` | 142 | 96.8% |
-| `pending-T2` | 2 | — |
-| `tested-T2` | 38 | 20.4% |
+| `tested-T1` | 142 | 97.8% |
+| `pending-T2` | 0 | — |
+| `tested-T2` | 40 | 21.5% |
 | `tested-T3` | 0 | 0.0% |
 
-**180 of 186 assertions have a passing automated test; 2 are awaiting T2 results.**
+**182 of 186 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
 | Area | Assertions | Implemented | Tested (T1) | Pending (T2) | Tested (T2) | Tested (T3) |
 |---|---|---|---|---|---|---|
-| drv | 20 | 20 | 15 | 2 | 3 | 0 |
+| drv | 20 | 20 | 15 | 0 | 5 | 0 |
 | elf | 3 | 3 | 3 | 0 | 0 | 0 |
 | exec | 12 | 12 | 9 | 0 | 3 | 0 |
 | hal | 25 | 25 | 11 | 0 | 10 | 0 |
@@ -47,12 +47,9 @@ None.
 | HAL-020 | HPET clocksource: 32-bit MMIO reads and wrap extension produce monotonic nanoseconds |
 | HAL-021 | I/O APIC routes: GSI windows and ISA overrides are validated, redirections start masked, and NMI sources use MADT polarity/trigger flags |
 
-## Pending T2 verification (2)
+## Pending T2 verification (0)
 
-| ID | Specification reference | Configured test |
-|---|---|---|
-| VIO-014 | NOLX M9 Round trip through the device: a 2 KiB pattern written to sectors 8 to 11 is read back into a cleared buffer, and the bytes are identical | `.github/workflows/ci.yml` boot-smoke asserts `virtio-blk: wrote 4 sectors at 8, read back, crc32 0x... matches the written data`; kernel/src/hal/virtio_blk.rs round_trip |
-| VIO-015 | NOLX M9 Write persists to the disk: the disk image, after QEMU exits, has the same CRC-32 over sectors 8 to 11 that the kernel computed over the data it wrote | `.github/workflows/ci.yml` step "The written sectors are on the disk image" compares `zlib.crc32` of `build/disk.img` sectors 8 to 11 with the kernel's printed checksum |
+None.
 
 ## All assertions
 
@@ -242,6 +239,6 @@ None.
 | VIO-011 | drv | NOLX M9 Device bring-up: the probe finds the virtio block device, resets it, steps through ACKNOWLEDGE, DRIVER, FEATURES_OK (read back), configures queue 0 with its three ring addresses, sets DRIVER_OK, and reports the capacity | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `virtio-blk: BB:DD.F capacity N sectors (N bytes), queue size N, driver ok`; kernel/src/hal/virtio_blk.rs bring_up; QEMU run with `-drive` and `-device virtio-blk-pci`; workflow [38404754464](https://github.com/NeXuS4Dev/NOLX/actions/runs/38404754464) on the final revision passed all six jobs. |
 | VIO-012 | drv | NOLX M9 Polled block read: sector 0 is read through the queue, the device completes it with status OK, and the data matches the disk image's sector 0 | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `virtio-blk: sector 0 read, status ok, first 16 bytes match the disk image`; kernel/src/hal/virtio_blk.rs read_sector_zero; workflow [38404754464](https://github.com/NeXuS4Dev/NOLX/actions/runs/38404754464) on the final revision passed all six jobs. |
 | VIO-013 | drv | NOLX M9 Write request rules: a write is a three-descriptor chain with the header and data device-readable and the status device-writable; the CRC-32 used to check the round trip matches the standard check value | `tested-T1` | nolx-virtio-core tests::a_write_chain_makes_the_data_device_readable, tests::crc32_matches_the_standard_check_value |
-| VIO-014 | drv | NOLX M9 Round trip through the device: a 2 KiB pattern written to sectors 8 to 11 is read back into a cleared buffer, and the bytes are identical | `pending-T2` | `.github/workflows/ci.yml` boot-smoke asserts `virtio-blk: wrote 4 sectors at 8, read back, crc32 0x... matches the written data`; kernel/src/hal/virtio_blk.rs round_trip |
-| VIO-015 | drv | NOLX M9 Write persists to the disk: the disk image, after QEMU exits, has the same CRC-32 over sectors 8 to 11 that the kernel computed over the data it wrote | `pending-T2` | `.github/workflows/ci.yml` step "The written sectors are on the disk image" compares `zlib.crc32` of `build/disk.img` sectors 8 to 11 with the kernel's printed checksum |
+| VIO-014 | drv | NOLX M9 Round trip through the device: a 2 KiB pattern written to sectors 8 to 11 is read back into a cleared buffer, and the bytes are identical | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `virtio-blk: wrote 4 sectors at 8, read back, crc32 0x... matches the written data`; kernel/src/hal/virtio_blk.rs round_trip; workflow [38442239670](https://github.com/NeXuS4Dev/NOLX/actions/runs/38442239670) on the final revision passed all six jobs. |
+| VIO-015 | drv | NOLX M9 Write persists to the disk: the disk image, after QEMU exits, has the same CRC-32 over sectors 8 to 11 that the kernel computed over the data it wrote | `tested-T2` | `.github/workflows/ci.yml` step "The written sectors are on the disk image" compares `zlib.crc32` of `build/disk.img` sectors 8 to 11 with the kernel's printed checksum; workflow [38442239670](https://github.com/NeXuS4Dev/NOLX/actions/runs/38442239670) on the final revision passed all six jobs. |
 
