@@ -76,6 +76,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nolx-virtio-core"
+version = "0.1.0"
+dependencies = [
+ "nolx-pci-core",
+]
+
+[[package]]
 name = "nolxfs"
 version = "0.1.0"
 dependencies = [
