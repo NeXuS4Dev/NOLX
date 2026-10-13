@@ -203,6 +203,9 @@ jobs:
           # The disk the virtio-blk probe reads: 1 MiB, with a known pattern at the start of
           # sector 0 and a GUID Partition Table with two partitions. See tools/make-test-disk.py.
           python3 tools/make-test-disk.py build/disk.img
+          # The AHCI drive gets its own copy. QEMU locks an image that a drive opens for writing,
+          # so a second drive on the same file would refuse to start.
+          cp build/disk.img build/disk-sata.img
           # 60 seconds: the boot now also probes an AHCI controller, and the markers after the
           # virtio work must still be reached before QEMU is stopped.
           timeout 60 qemu-system-x86_64 \
@@ -210,7 +213,7 @@ jobs:
             -m 512M -nographic -no-reboot \
             -drive file=build/disk.img,if=none,id=vd0,format=raw \
             -device virtio-blk-pci,drive=vd0 \
-            -drive file=build/disk.img,if=none,id=sata0,format=raw,snapshot=on \
+            -drive file=build/disk-sata.img,if=none,id=sata0,format=raw \
             -device ahci,id=ahci -device ide-hd,drive=sata0,bus=ahci.0 \
             | tee build/serial.log || true
           cat build/serial.log >> /tmp/job.log
