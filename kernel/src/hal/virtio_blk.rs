@@ -188,7 +188,10 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     match volume {
         Some((first, last)) => super::virtio_volume::run(disk, first, last - first + 1, console),
         None => {
-            let _ = writeln!(console, "virtio-blk: gpt has no partitions in use; no volume");
+            let _ = writeln!(
+                console,
+                "virtio-blk: gpt has no partitions in use; no volume"
+            );
             Ok(())
         }
     }
