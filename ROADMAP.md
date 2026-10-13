@@ -585,12 +585,12 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   commits, mounts the volume again from the disk, and reads the file back. CI compares the checksum
   with the pattern and runs `fsck.nolxfs` on the partition. BLK-024 and BLK-025 are `tested-T2`
   (run [38456685552](https://github.com/NeXuS4Dev/NOLX/actions/runs/38456685552)).
-- AHCI (`crates/nolx-ahci-core`, `kernel/src/hal/ahci.rs`, in progress): register layout, port
-  state, FIS and command-header encodings, and physical region descriptors, host-tested. The probe
-  finds the controller through BAR 5, starts the first SATA port, and reads sector 0 through
-  command slot 0. AHCI-001 to AHCI-007 are `implemented`; AHCI-008 and AHCI-009 are `pending-T2`,
-  with CI attaching the disk to an AHCI port.
-  Not yet done: interrupts, and the other storage backends (NVMe).
+- AHCI (`crates/nolx-ahci-core`, `kernel/src/hal/ahci.rs`): register layout, port state, FIS and
+  command-header encodings, and physical region descriptors, host-tested (AHCI-001 to AHCI-007 are
+  `tested-T1`). The probe finds the controller through BAR 5, starts the first SATA port, and reads
+  sector 0 through command slot 0. AHCI-008 and AHCI-009 are `tested-T2` (run [38460754722](https://github.com/NeXuS4Dev/NOLX/actions/runs/38460754722)),
+  with CI attaching a copy of the disk image to an AHCI port.
+  Not yet done: interrupts, NVMe, and the other storage paths (request merging, per-device queues).
 
 Not yet done: PCIe ECAM, MSI/MSI-X, and every driver below.
 
