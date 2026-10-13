@@ -2311,7 +2311,9 @@ mod m8_regression_tests {
         assert_eq!(vol.lookup(docs, "a.txt").unwrap(), f);
         vol.link(f, gen::ROOT_INO, "b.txt").unwrap();
         assert_eq!(vol.lookup(gen::ROOT_INO, "b.txt").unwrap(), f);
-        let lnk = vol.symlink(gen::ROOT_INO, "lnk", b"/docs/a.txt", 0, 0).unwrap();
+        let lnk = vol
+            .symlink(gen::ROOT_INO, "lnk", b"/docs/a.txt", 0, 0)
+            .unwrap();
         assert_eq!(vol.readlink(lnk).unwrap(), b"/docs/a.txt");
         assert_eq!(vol.lookup(docs, "a.txt").unwrap(), f);
         vol.rename(docs, "a.txt", gen::ROOT_INO, "c.txt").unwrap();
@@ -2331,7 +2333,9 @@ mod m8_regression_tests {
             },
         )
         .unwrap();
-        let f = vol.create_file(gen::ROOT_INO, "boot.txt", 0o644, 0, 0).unwrap();
+        let f = vol
+            .create_file(gen::ROOT_INO, "boot.txt", 0o644, 0, 0)
+            .unwrap();
         vol.write_data(f, 0, b"nolxfs-v1-ok").unwrap();
         vol.link(f, gen::ROOT_INO, "boot-link.txt").unwrap();
         assert_eq!(vol.read_inode(f).unwrap().nlink, 2);

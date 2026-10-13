@@ -489,3 +489,65 @@ mod tests {
         assert!(live.snapshot_names().is_empty());
     }
 }
+
+#[cfg(test)]
+mod diag_tests {
+    use super::*;
+    use nolxfs::blockdev::MemBlockDevice;
+    use nolxfs::volume::Volume;
+
+    #[test]
+    fn diag_sparse_remount_lookup() {
+        let mut vol = NolxfsVolume::format_and_mount(4096, 96, "root").unwrap();
+        let etc = vol.mkdir(NOLXFS_ROOT_INO, "etc", 0o755, 0, 0).unwrap();
+        assert!(
+            vol.lookup(NOLXFS_ROOT_INO, "etc").is_ok(),
+            "pre-commit lookup failed; readdir={:?}",
+            vol.readdir(NOLXFS_ROOT_INO)
+        );
+        let (f, _) = vol.create_file(etc, "hostname", 0o644, 0, 0, true).unwrap();
+        vol.write(f, 0, b"nolx-host\n").unwrap();
+        vol.sync().unwrap();
+        assert!(
+            vol.lookup(NOLXFS_ROOT_INO, "etc").is_ok(),
+            "post-commit lookup failed; readdir={:?}",
+            vol.readdir(NOLXFS_ROOT_INO)
+        );
+        let dev = vol.into_device();
+        let mut re = NolxfsVolume::mount(dev).unwrap();
+        assert!(
+            re.lookup(NOLXFS_ROOT_INO, "etc").is_ok(),
+            "post-remount lookup failed; xid={} readdir={:?}",
+            re.volume().xid(),
+            re.readdir(NOLXFS_ROOT_INO)
+        );
+    }
+
+    #[test]
+    fn diag_mem_remount_lookup() {
+        let dev = MemBlockDevice::new(4096, 96);
+        let vol = Volume::format(
+            dev,
+            &FormatOptions {
+                volume_name: String::from("root"),
+                ..FormatOptions::default()
+            },
+        )
+        .unwrap();
+        let dev = vol.into_device();
+        let mut vol = NolxfsVolume::mount(dev).unwrap();
+        let etc = vol.mkdir(NOLXFS_ROOT_INO, "etc", 0o755, 0, 0).unwrap();
+        let (f, _) = vol.create_file(etc, "hostname", 0o644, 0, 0, true).unwrap();
+        vol.write(f, 0, b"nolx-host\n").unwrap();
+        vol.sync().unwrap();
+        let dev = vol.into_device();
+        let mut re = NolxfsVolume::mount(dev).unwrap();
+        assert!(
+            re.lookup(NOLXFS_ROOT_INO, "etc").is_ok(),
+            "mem post-remount lookup failed; xid={} readdir={:?}",
+            re.volume().xid(),
+            re.readdir(NOLXFS_ROOT_INO)
+        );
+        let _ = f;
+    }
+}
