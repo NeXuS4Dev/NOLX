@@ -165,7 +165,11 @@ fn main() -> ExitCode {
             }
             let files = report.num_files;
             let dirs = report.num_dirs;
-            let x = if report.has_checkpoint { "checkpointed" } else { "genesis" };
+            let x = if report.has_checkpoint {
+                "checkpointed"
+            } else {
+                "genesis"
+            };
             println!(
                 "fsck.nolxfs: xid {} ({x}), {} blocks checked, {files} files, {dirs} directories, {} issue(s), {} repair(s)",
                 report.xid,
@@ -173,12 +177,18 @@ fn main() -> ExitCode {
                 report.issues.len(),
                 report.repairs.len(),
             );
-            if report.issues.is_empty() || !report.repairs.is_empty() && report.issues.iter().all(|i| {
-                matches!(i, nolxfs::fsck::FsckIssue::TornCheckpoint { .. }
-                    | nolxfs::fsck::FsckIssue::NlinkMismatch { .. }
-                    | nolxfs::fsck::FsckIssue::CounterDrift { .. }
-                    | nolxfs::fsck::FsckIssue::BitmapMismatch { .. })
-            }) {
+            if report.issues.is_empty()
+                || !report.repairs.is_empty()
+                    && report.issues.iter().all(|i| {
+                        matches!(
+                            i,
+                            nolxfs::fsck::FsckIssue::TornCheckpoint { .. }
+                                | nolxfs::fsck::FsckIssue::NlinkMismatch { .. }
+                                | nolxfs::fsck::FsckIssue::CounterDrift { .. }
+                                | nolxfs::fsck::FsckIssue::BitmapMismatch { .. }
+                        )
+                    })
+            {
                 ExitCode::from(0)
             } else {
                 ExitCode::from(1)

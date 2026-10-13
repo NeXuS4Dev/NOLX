@@ -758,7 +758,12 @@ impl<'d, D: BlockDevice, A: BlockAllocator> BTree<'d, D, A> {
     /// concatenating siblings in index order keeps entries sorted, and a separator
     /// left pointing at a key that was deleted is still a valid lower bound for
     /// routing, which is why deletion never has to rewrite ancestors on the way down.
-    fn rebalance_child(&mut self, parent_block: u64, parent: &mut Node, index: usize) -> Result<()> {
+    fn rebalance_child(
+        &mut self,
+        parent_block: u64,
+        parent: &mut Node,
+        index: usize,
+    ) -> Result<()> {
         let block_size = self.dev.block_size();
         let child_block = parent.entries[index].child_block();
         let child = self.read_node(child_block)?;
@@ -838,7 +843,10 @@ pub fn clone_subtree<D: BlockDevice, A: BlockAllocator>(
     subtype: u16,
     xid: u64,
 ) -> Result<u64> {
-    clone_block(dev, alloc, root, root, kind, subtype, xid)
+    // `kind` is accepted for symmetry with `BTree::new`; node kinds are not
+    // re-encoded on clone, the decoded node already carries its layout.
+    let _ = kind;
+    clone_block(dev, alloc, root, root, subtype, xid)
 }
 
 fn clone_block<D: BlockDevice, A: BlockAllocator>(
@@ -846,7 +854,6 @@ fn clone_block<D: BlockDevice, A: BlockAllocator>(
     alloc: &mut A,
     block: u64,
     root: u64,
-    kind: KeyKind,
     subtype: u16,
     xid: u64,
 ) -> Result<u64> {
@@ -865,7 +872,7 @@ fn clone_block<D: BlockDevice, A: BlockAllocator>(
         let children: Vec<u64> = node.entries.iter().map(Entry::child_block).collect();
         let mut cloned_children = Vec::with_capacity(children.len());
         for child in children {
-            cloned_children.push(clone_block(dev, alloc, child, root, kind, subtype, xid)?);
+            cloned_children.push(clone_block(dev, alloc, child, root, subtype, xid)?);
         }
         for (entry, child) in node.entries.iter_mut().zip(cloned_children.iter()) {
             entry.val = child.to_le_bytes().to_vec();
@@ -887,10 +894,10 @@ fn clone_block<D: BlockDevice, A: BlockAllocator>(
 pub mod walk {
     use super::{Entry, Node};
     use crate::blockdev::BlockDevice;
-    use crate::Pod;
     use crate::btree::KeyKind;
     use crate::on_disk::{FsError, Result};
     use crate::on_disk_gen as gen;
+    use crate::Pod;
     use alloc::vec;
     use alloc::vec::Vec;
 

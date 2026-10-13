@@ -132,30 +132,51 @@ impl fmt::Display for FsckIssue {
             Self::TornCheckpoint { block } => {
                 write!(f, "block {block}: torn checkpoint descriptor")
             }
-            Self::DanglingDentry { parent, name, child } => write!(
+            Self::DanglingDentry {
+                parent,
+                name,
+                child,
+            } => write!(
                 f,
                 "directory {parent}: entry {name:?} points at missing inode {child}"
             ),
-            Self::NlinkMismatch { ino, recorded, actual } => write!(
+            Self::NlinkMismatch {
+                ino,
+                recorded,
+                actual,
+            } => write!(
                 f,
                 "inode {ino}: nlink is {recorded}, directory records say {actual}"
             ),
-            Self::ParentMismatch { ino, recorded, actual } => write!(
+            Self::ParentMismatch {
+                ino,
+                recorded,
+                actual,
+            } => write!(
                 f,
                 "inode {ino}: parent_id is {recorded}, held by directory {actual}"
             ),
-            Self::ExtentRefMismatch { block, recorded, actual } => write!(
+            Self::ExtentRefMismatch {
+                block,
+                recorded,
+                actual,
+            } => write!(
                 f,
                 "block {block}: extent refcount is {recorded}, references say {actual}"
             ),
-            Self::BitmapMismatch { block, allocated, reachable } => write!(
+            Self::BitmapMismatch {
+                block,
+                allocated,
+                reachable,
+            } => write!(
                 f,
                 "block {block}: bitmap allocated={allocated}, reachable={reachable}"
             ),
-            Self::CounterDrift { field, recorded, actual } => write!(
-                f,
-                "counter {field}: recorded {recorded}, walked {actual}"
-            ),
+            Self::CounterDrift {
+                field,
+                recorded,
+                actual,
+            } => write!(f, "counter {field}: recorded {recorded}, walked {actual}"),
             Self::TimestampOrder { ino } => {
                 write!(f, "inode {ino}: change_time precedes create_time")
             }
@@ -226,13 +247,13 @@ pub fn check<D: BlockDevice>(dev: &mut D, repair: bool) -> Result<FsckReport> {
     let (fs_root, extentref_root, state) = match &found {
         Some(f) => {
             report.xid = f.state.xid;
-            (f.state.fs_root, f.state.extentref_root, Some(f.state.clone()))
+            (
+                f.state.fs_root,
+                f.state.extentref_root,
+                Some(f.state.clone()),
+            )
         }
-        None => (
-            layout.fs_tree_root,
-            layout.extentref_tree_root,
-            None,
-        ),
+        None => (layout.fs_tree_root, layout.extentref_tree_root, None),
     };
 
     // Torn descriptors: ring blocks that are neither empty nor parseable.
@@ -252,7 +273,9 @@ pub fn check<D: BlockDevice>(dev: &mut D, repair: bool) -> Result<FsckReport> {
     if repair {
         for block in &torn {
             checkpoint::clear_descriptor(dev, *block)?;
-            report.repairs.push(format!("cleared torn checkpoint descriptor at block {block}"));
+            report.repairs.push(format!(
+                "cleared torn checkpoint descriptor at block {block}"
+            ));
         }
     }
 
@@ -286,7 +309,10 @@ pub fn check<D: BlockDevice>(dev: &mut D, repair: bool) -> Result<FsckReport> {
                     let name_len = usize::from(dentry.name_len);
                     let name = entry
                         .val
-                        .get(gen::nolx_direntry_t::DISK_SIZE..gen::nolx_direntry_t::DISK_SIZE + name_len)
+                        .get(
+                            gen::nolx_direntry_t::DISK_SIZE
+                                ..gen::nolx_direntry_t::DISK_SIZE + name_len,
+                        )
                         .and_then(|b| core::str::from_utf8(b).ok())
                         .map_or_else(String::new, String::from);
                     if !inodes.contains_key(&dentry.ino) {
@@ -324,7 +350,9 @@ pub fn check<D: BlockDevice>(dev: &mut D, repair: bool) -> Result<FsckReport> {
                 let name_len = usize::from(dentry.name_len);
                 let name = entry
                     .val
-                    .get(gen::nolx_direntry_t::DISK_SIZE..gen::nolx_direntry_t::DISK_SIZE + name_len)
+                    .get(
+                        gen::nolx_direntry_t::DISK_SIZE..gen::nolx_direntry_t::DISK_SIZE + name_len,
+                    )
                     .and_then(|b| core::str::from_utf8(b).ok())
                     .map_or_else(String::new, String::from);
                 match inodes.get(&dentry.ino) {
@@ -364,7 +392,10 @@ pub fn check<D: BlockDevice>(dev: &mut D, repair: bool) -> Result<FsckReport> {
         } else {
             links
         };
-        if ino != gen::PRIVATE_DIR_INO && ino != gen::SNAPSHOT_DIR_INO && inode.nlink != expected_nlink {
+        if ino != gen::PRIVATE_DIR_INO
+            && ino != gen::SNAPSHOT_DIR_INO
+            && inode.nlink != expected_nlink
+        {
             report.issues.push(FsckIssue::NlinkMismatch {
                 ino,
                 recorded: inode.nlink,
@@ -406,7 +437,10 @@ pub fn check<D: BlockDevice>(dev: &mut D, repair: bool) -> Result<FsckReport> {
                 let block = jkey_oid(raw);
                 let count = entry
                     .val
-                    .get(gen::nolx_phys_ext_val_t::DISK_SIZE..gen::nolx_phys_ext_val_t::DISK_SIZE + 8)
+                    .get(
+                        gen::nolx_phys_ext_val_t::DISK_SIZE
+                            ..gen::nolx_phys_ext_val_t::DISK_SIZE + 8,
+                    )
                     .and_then(|b| <[u8; 8]>::try_from(b).ok())
                     .map_or(0, u64::from_le_bytes);
                 recorded_refs.insert(block, count);
@@ -506,7 +540,7 @@ pub fn check<D: BlockDevice>(dev: &mut D, repair: bool) -> Result<FsckReport> {
 
     let spaceman = SpaceMan::open(dev, &layout);
     if let Ok(spaceman) = &spaceman {
-        let space = spaceman.space_layout().clone();
+        let space = *spaceman.space_layout();
         for block in space.data_start..space.alloc_start {
             reachable.insert(block);
         }
@@ -617,9 +651,9 @@ pub fn check<D: BlockDevice>(dev: &mut D, repair: bool) -> Result<FsckReport> {
                 )?;
                 dev.write_block(block, &buf)?;
             }
-            report.repairs.push(String::from(
-                "rewrote volume counters from the walked tree",
-            ));
+            report
+                .repairs
+                .push(String::from("rewrote volume counters from the walked tree"));
         }
     }
 
@@ -632,7 +666,9 @@ fn is_dir_mode(mode: u32) -> bool {
 }
 
 fn pack_inode_key(ino: u64) -> Vec<u8> {
-    on_disk::pack_jkey(gen::DREC_TYPE_INODE, ino).to_le_bytes().to_vec()
+    on_disk::pack_jkey(gen::DREC_TYPE_INODE, ino)
+        .to_le_bytes()
+        .to_vec()
 }
 
 fn collect_tree_blocks<D: BlockDevice>(
@@ -650,10 +686,9 @@ fn collect_tree_blocks<D: BlockDevice>(
                 out.insert(block);
             }
         }
-        Err(FsError::BadChecksum { oid }) => report.issues.push(FsckIssue::BadChecksum {
-            block: root,
-            oid,
-        }),
+        Err(FsError::BadChecksum { oid }) => report
+            .issues
+            .push(FsckIssue::BadChecksum { block: root, oid }),
         Err(e) => report.issues.push(FsckIssue::InvalidObject {
             block: root,
             reason: format!("cannot walk tree: {e}"),
@@ -693,7 +728,10 @@ mod tests {
         dev.write_block(desc, &junk).unwrap();
         let report = check(&mut dev, false).unwrap();
         assert!(
-            report.issues.iter().any(|i| matches!(i, FsckIssue::TornCheckpoint { .. })),
+            report
+                .issues
+                .iter()
+                .any(|i| matches!(i, FsckIssue::TornCheckpoint { .. })),
             "issues: {:?}",
             report.issues
         );
@@ -714,10 +752,9 @@ mod tests {
             spaceman.flush(&mut dev, info.layout.spaceman, 9).unwrap();
             let report = check(&mut dev, false).unwrap();
             assert!(
-                report
-                    .issues
-                    .iter()
-                    .any(|i| matches!(i, FsckIssue::BitmapMismatch { block, .. } if *block == leaked)),
+                report.issues.iter().any(
+                    |i| matches!(i, FsckIssue::BitmapMismatch { block, .. } if *block == leaked)
+                ),
                 "issues: {:?}",
                 report.issues
             );

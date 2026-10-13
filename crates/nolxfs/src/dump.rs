@@ -48,7 +48,8 @@ pub fn dump_to_string<D: BlockDevice>(dev: &mut D) -> Result<String> {
     ));
     out.push_str(&format!(
         "  first data block: {}, next xid (container): {}\n",
-        layout.first_data_block, csb_next_xid(dev)?,
+        layout.first_data_block,
+        csb_next_xid(dev)?,
     ));
 
     let found = checkpoint::find_latest(dev, &layout)?;
@@ -125,16 +126,26 @@ fn dump_tree<D: BlockDevice>(dev: &D, fs_root: u64, out: &mut String) -> Result<
                     let name_len = usize::from(dentry.name_len);
                     let name = entry
                         .val
-                        .get(gen::nolx_direntry_t::DISK_SIZE..gen::nolx_direntry_t::DISK_SIZE + name_len)
+                        .get(
+                            gen::nolx_direntry_t::DISK_SIZE
+                                ..gen::nolx_direntry_t::DISK_SIZE + name_len,
+                        )
                         .and_then(|b| core::str::from_utf8(b).ok())
                         .map_or_else(String::new, String::from);
-                    children.entry(jkey_oid(raw)).or_default().push((name, dentry.ino));
+                    children
+                        .entry(jkey_oid(raw))
+                        .or_default()
+                        .push((name, dentry.ino));
                 }
             }
             gen::DREC_TYPE_FILE_EXTENT => {
                 if let Some(val) = gen::nolx_file_extent_val_t::read_from(&entry.val) {
                     let logical = u64::from_le_bytes(
-                        entry.key.get(8..16).and_then(|b| <[u8; 8]>::try_from(b).ok()).unwrap_or([0u8; 8]),
+                        entry
+                            .key
+                            .get(8..16)
+                            .and_then(|b| <[u8; 8]>::try_from(b).ok())
+                            .unwrap_or([0u8; 8]),
                     );
                     extents
                         .entry(jkey_oid(raw))
@@ -160,7 +171,16 @@ fn dump_tree<D: BlockDevice>(dev: &D, fs_root: u64, out: &mut String) -> Result<
         }
     }
     let mut visiting = Vec::new();
-    dump_dir(gen::ROOT_INO, "/", &inodes, &children, &extents, &xattrs, out, &mut visiting);
+    dump_dir(
+        gen::ROOT_INO,
+        "/",
+        &inodes,
+        &children,
+        &extents,
+        &xattrs,
+        out,
+        &mut visiting,
+    );
     Ok(())
 }
 
@@ -195,7 +215,7 @@ fn dump_dir(
         out.push_str(&format!(" extents={} ({} bytes)", list.len(), total));
     }
     if let Some(list) = xattrs.get(&ino) {
-        out.push_str(&format!(" xattrs={:?}", list));
+        out.push_str(&format!(" xattrs={list:?}"));
     }
     out.push('\n');
     if mode & 0o170_000 != 0o040_000 || visiting.contains(&ino) {
@@ -211,7 +231,16 @@ fn dump_dir(
             } else {
                 format!("{path}/{name}")
             };
-            dump_dir(*child, &child_path, inodes, children, extents, xattrs, out, visiting);
+            dump_dir(
+                *child,
+                &child_path,
+                inodes,
+                children,
+                extents,
+                xattrs,
+                out,
+                visiting,
+            );
         }
     }
     visiting.pop();

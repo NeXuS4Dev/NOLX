@@ -50,7 +50,9 @@ use crate::btree::{self, BTree, KeyKind};
 use crate::checkpoint::{self, CheckpointState, FoundCheckpoint, SnapshotRecord};
 use crate::mkfs::{self, FormatOptions, VolumeInfo};
 use crate::omap::ObjectMap;
-use crate::on_disk::{extent_len, jkey_oid, jkey_type, pack_jkey, pack_len_and_flags, FsError, Result};
+use crate::on_disk::{
+    extent_len, jkey_oid, jkey_type, pack_jkey, pack_len_and_flags, FsError, Result,
+};
 use crate::on_disk_gen as gen;
 use crate::spaceman::{Reaper, SpaceAllocator, SpaceMan};
 use crate::Pod;
@@ -160,8 +162,19 @@ impl<D: BlockDevice> Volume<D> {
                 gen::SUB_FSTREE as u16,
                 1,
             );
-            for (ino, mode) in [(gen::PRIVATE_DIR_INO, 0o700u16), (gen::SNAPSHOT_DIR_INO, 0o555)] {
-                let inode = new_inode(gen::ROOT_INO, ino, (S_IFDIR | u32::from(mode)) as u16, 2, 0, 0, 1);
+            for (ino, mode) in [
+                (gen::PRIVATE_DIR_INO, 0o700u16),
+                (gen::SNAPSHOT_DIR_INO, 0o555),
+            ] {
+                let inode = new_inode(
+                    gen::ROOT_INO,
+                    ino,
+                    (S_IFDIR | u32::from(mode)) as u16,
+                    2,
+                    0,
+                    0,
+                    1,
+                );
                 tree.insert(&inode_key(ino), inode.as_bytes())?;
             }
             let stats = gen::nolx_dir_stats_val_t {
@@ -227,7 +240,8 @@ impl<D: BlockDevice> Volume<D> {
         let info = mkfs::probe(&mut dev)?;
         let layout = info.layout;
         let csb: gen::nolx_nx_superblock_t = dev.read_object(0)?;
-        let casefold = info.superblock.features_supported & u64::from(gen::NX_FEATURE_SUP_CASEFOLD) != 0;
+        let casefold =
+            info.superblock.features_supported & u64::from(gen::NX_FEATURE_SUP_CASEFOLD) != 0;
         match checkpoint::find_latest(&dev, &layout)? {
             Some(found) => {
                 let spill = checkpoint::spill_blocks(&dev, found.vsb_block)?;
@@ -664,7 +678,11 @@ impl<D: BlockDevice> Volume<D> {
 
     fn tree_insert(&mut self, kind: TreeKind, key: &[u8], val: &[u8]) -> Result<()> {
         let root = self.tree_root(kind);
-        let xid = if self.dirty { self.pending_xid } else { self.state.xid };
+        let xid = if self.dirty {
+            self.pending_xid
+        } else {
+            self.state.xid
+        };
         let spaceman = self.spaceman.as_mut().ok_or(FsError::ReadOnly)?;
         let mut alloc = SpaceAllocator {
             spaceman,
@@ -683,7 +701,11 @@ impl<D: BlockDevice> Volume<D> {
 
     fn tree_remove(&mut self, kind: TreeKind, key: &[u8]) -> Result<bool> {
         let root = self.tree_root(kind);
-        let xid = if self.dirty { self.pending_xid } else { self.state.xid };
+        let xid = if self.dirty {
+            self.pending_xid
+        } else {
+            self.state.xid
+        };
         let spaceman = self.spaceman.as_mut().ok_or(FsError::ReadOnly)?;
         let mut alloc = SpaceAllocator {
             spaceman,
@@ -728,11 +750,19 @@ impl<D: BlockDevice> Volume<D> {
             if entry.key.len() < 16 {
                 continue;
             }
-            let raw = u64::from_le_bytes(entry.key[..8].try_into().map_err(|_| FsError::CorruptNode("extent key truncated"))?);
+            let raw = u64::from_le_bytes(
+                entry.key[..8]
+                    .try_into()
+                    .map_err(|_| FsError::CorruptNode("extent key truncated"))?,
+            );
             if jkey_type(raw) != gen::DREC_TYPE_FILE_EXTENT || jkey_oid(raw) != ino {
                 continue;
             }
-            let logical = u64::from_le_bytes(entry.key[8..16].try_into().map_err(|_| FsError::CorruptNode("extent key truncated"))?);
+            let logical = u64::from_le_bytes(
+                entry.key[8..16]
+                    .try_into()
+                    .map_err(|_| FsError::CorruptNode("extent key truncated"))?,
+            );
             let val = gen::nolx_file_extent_val_t::read_from(&entry.val)
                 .ok_or(FsError::CorruptNode("file extent value truncated"))?;
             out.push(Extent {
@@ -748,7 +778,8 @@ impl<D: BlockDevice> Volume<D> {
     /// Logical size of a file or symlink, from its data-stream record.
     #[must_use]
     pub fn file_size(inode: &gen::nolx_inode_t) -> u64 {
-        gen::nolx_data_stream_t::read_from(&inode.data_stream).map_or(0, |ds| ds.total_bytes_written)
+        gen::nolx_data_stream_t::read_from(&inode.data_stream)
+            .map_or(0, |ds| ds.total_bytes_written)
     }
 
     fn write_inode(&mut self, ino: u64, inode: &gen::nolx_inode_t) -> Result<()> {
@@ -788,7 +819,8 @@ impl<D: BlockDevice> Volume<D> {
             return Err(FsError::NotDirectory);
         }
         if let Some(val) = self.tree_search(TreeKind::Fs, &dentry_key(dir_ino, name))? {
-            let dentry = gen::nolx_direntry_t::read_from(&val).ok_or(FsError::CorruptNode("dentry value truncated"))?;
+            let dentry = gen::nolx_direntry_t::read_from(&val)
+                .ok_or(FsError::CorruptNode("dentry value truncated"))?;
             return Ok(dentry.ino);
         }
         if self.casefold {
@@ -817,7 +849,11 @@ impl<D: BlockDevice> Volume<D> {
             if entry.key.len() < 8 {
                 continue;
             }
-            let raw = u64::from_le_bytes(entry.key[..8].try_into().map_err(|_| FsError::CorruptNode("dentry key truncated"))?);
+            let raw = u64::from_le_bytes(
+                entry.key[..8]
+                    .try_into()
+                    .map_err(|_| FsError::CorruptNode("dentry key truncated"))?,
+            );
             if raw != prefix {
                 continue;
             }
@@ -835,12 +871,30 @@ impl<D: BlockDevice> Volume<D> {
         Ok(out)
     }
 
-    fn add_dentry(&mut self, dir_ino: u64, name: &str, child: u64, inode: &gen::nolx_inode_t) -> Result<()> {
+    fn add_dentry(
+        &mut self,
+        dir_ino: u64,
+        name: &str,
+        child: u64,
+        inode: &gen::nolx_inode_t,
+    ) -> Result<()> {
         let file_type = ((u32::from(inode.mode) & 0o170_000) >> 12) as u16;
-        self.tree_insert(TreeKind::Fs, &dentry_key(dir_ino, name), &dentry_val(child, name, file_type))?;
+        self.tree_insert(
+            TreeKind::Fs,
+            &dentry_key(dir_ino, name),
+            &dentry_val(child, name, file_type),
+        )?;
         // One sibling record per directory entry makes nlink auditable by fsck.
-        self.tree_insert(TreeKind::Fs, &sibling_key(child, dir_ino, name), &sibling_val(dir_ino, name, file_type))?;
-        self.tree_insert(TreeKind::Fs, &sibling_map_key(child, dir_ino), &dir_ino.to_le_bytes())?;
+        self.tree_insert(
+            TreeKind::Fs,
+            &sibling_key(child, dir_ino, name),
+            &sibling_val(dir_ino, name, file_type),
+        )?;
+        self.tree_insert(
+            TreeKind::Fs,
+            &sibling_map_key(child, dir_ino),
+            &dir_ino.to_le_bytes(),
+        )?;
         self.bump_dir_stats(dir_ino, 1)?;
         Ok(())
     }
@@ -879,19 +933,37 @@ impl<D: BlockDevice> Volume<D> {
     ///
     /// [`FsError::AlreadyExists`], [`FsError::NotDirectory`],
     /// [`FsError::NameTooLong`], [`FsError::ReadOnly`], or device errors.
-    pub fn mkdir(&mut self, dir_ino: u64, name: &str, mode: Mode, uid: Uid, gid: Gid) -> Result<u64> {
+    pub fn mkdir(
+        &mut self,
+        dir_ino: u64,
+        name: &str,
+        mode: Mode,
+        uid: Uid,
+        gid: Gid,
+    ) -> Result<u64> {
         validate_name(name)?;
         let mut parent = self.read_inode(dir_ino)?;
         if !is_dir(u32::from(parent.mode)) {
             return Err(FsError::NotDirectory);
         }
-        if self.tree_search(TreeKind::Fs, &dentry_key(dir_ino, name))?.is_some() {
+        if self
+            .tree_search(TreeKind::Fs, &dentry_key(dir_ino, name))?
+            .is_some()
+        {
             return Err(FsError::AlreadyExists);
         }
         self.ensure_txn()?;
         let ino = self.alloc_ino();
         let xid = self.pending_xid;
-        let mut child = new_inode(dir_ino, ino, (S_IFDIR | (mode & 0o7777)) as u16, 2, uid, gid, xid);
+        let mut child = new_inode(
+            dir_ino,
+            ino,
+            (S_IFDIR | (mode & 0o7777)) as u16,
+            2,
+            uid,
+            gid,
+            xid,
+        );
         Self::touch(&mut child, xid, true);
         parent.nlink = parent.nlink.saturating_add(1);
         Self::touch(&mut parent, xid, false);
@@ -908,19 +980,37 @@ impl<D: BlockDevice> Volume<D> {
     /// # Errors
     ///
     /// As [`Volume::mkdir`].
-    pub fn create_file(&mut self, dir_ino: u64, name: &str, mode: Mode, uid: Uid, gid: Gid) -> Result<u64> {
+    pub fn create_file(
+        &mut self,
+        dir_ino: u64,
+        name: &str,
+        mode: Mode,
+        uid: Uid,
+        gid: Gid,
+    ) -> Result<u64> {
         validate_name(name)?;
         let parent = self.read_inode(dir_ino)?;
         if !is_dir(u32::from(parent.mode)) {
             return Err(FsError::NotDirectory);
         }
-        if self.tree_search(TreeKind::Fs, &dentry_key(dir_ino, name))?.is_some() {
+        if self
+            .tree_search(TreeKind::Fs, &dentry_key(dir_ino, name))?
+            .is_some()
+        {
             return Err(FsError::AlreadyExists);
         }
         self.ensure_txn()?;
         let ino = self.alloc_ino();
         let xid = self.pending_xid;
-        let mut inode = new_inode(dir_ino, ino, (S_IFREG | (mode & 0o7777)) as u16, 1, uid, gid, xid);
+        let mut inode = new_inode(
+            dir_ino,
+            ino,
+            (S_IFREG | (mode & 0o7777)) as u16,
+            1,
+            uid,
+            gid,
+            xid,
+        );
         Self::touch(&mut inode, xid, true);
         self.write_inode(ino, &inode)?;
         self.tree_insert(TreeKind::Fs, &dstream_key(ino), &ino.to_le_bytes())?;
@@ -943,7 +1033,14 @@ impl<D: BlockDevice> Volume<D> {
     /// # Errors
     ///
     /// As [`Volume::mkdir`].
-    pub fn symlink(&mut self, dir_ino: u64, name: &str, target: &[u8], uid: Uid, gid: Gid) -> Result<u64> {
+    pub fn symlink(
+        &mut self,
+        dir_ino: u64,
+        name: &str,
+        target: &[u8],
+        uid: Uid,
+        gid: Gid,
+    ) -> Result<u64> {
         validate_name(name)?;
         let parent = self.read_inode(dir_ino)?;
         if !is_dir(u32::from(parent.mode)) {
@@ -952,7 +1049,10 @@ impl<D: BlockDevice> Volume<D> {
         if target.len() > 4096 {
             return Err(FsError::NameTooLong);
         }
-        if self.tree_search(TreeKind::Fs, &dentry_key(dir_ino, name))?.is_some() {
+        if self
+            .tree_search(TreeKind::Fs, &dentry_key(dir_ino, name))?
+            .is_some()
+        {
             return Err(FsError::AlreadyExists);
         }
         self.ensure_txn()?;
@@ -1002,7 +1102,10 @@ impl<D: BlockDevice> Volume<D> {
         if !is_dir(u32::from(parent.mode)) {
             return Err(FsError::NotDirectory);
         }
-        if self.tree_search(TreeKind::Fs, &dentry_key(dir_ino, name))?.is_some() {
+        if self
+            .tree_search(TreeKind::Fs, &dentry_key(dir_ino, name))?
+            .is_some()
+        {
             return Err(FsError::AlreadyExists);
         }
         self.ensure_txn()?;
@@ -1075,7 +1178,13 @@ impl<D: BlockDevice> Volume<D> {
     /// [`FsError::InvalidField`] when a directory would move into its own
     /// descendant, [`FsError::NotEmpty`] for a non-empty directory target, or
     /// device errors.
-    pub fn rename(&mut self, old_dir: u64, old_name: &str, new_dir: u64, new_name: &str) -> Result<()> {
+    pub fn rename(
+        &mut self,
+        old_dir: u64,
+        old_name: &str,
+        new_dir: u64,
+        new_name: &str,
+    ) -> Result<()> {
         validate_name(new_name)?;
         if old_dir == new_dir && old_name == new_name {
             return Ok(());
@@ -1154,7 +1263,11 @@ impl<D: BlockDevice> Volume<D> {
         let mut xattr_keys = Vec::new();
         for entry in self.tree_collect(TreeKind::Fs)? {
             if entry.key.len() >= 8 {
-                let raw = u64::from_le_bytes(entry.key[..8].try_into().map_err(|_| FsError::CorruptNode("xattr key truncated"))?);
+                let raw = u64::from_le_bytes(
+                    entry.key[..8]
+                        .try_into()
+                        .map_err(|_| FsError::CorruptNode("xattr key truncated"))?,
+                );
                 if raw == prefix {
                     xattr_keys.push(entry.key.clone());
                 }
@@ -1169,7 +1282,9 @@ impl<D: BlockDevice> Volume<D> {
         match u32::from(inode.mode) & 0o170_000 {
             x if x == S_IFDIR => self.state.num_dirs = self.state.num_dirs.saturating_sub(1),
             x if x == S_IFREG => self.state.num_files = self.state.num_files.saturating_sub(1),
-            x if x == S_IFLNK => self.state.num_symlinks = self.state.num_symlinks.saturating_sub(1),
+            x if x == S_IFLNK => {
+                self.state.num_symlinks = self.state.num_symlinks.saturating_sub(1)
+            }
             _ => self.state.num_other = self.state.num_other.saturating_sub(1),
         }
         Ok(())
@@ -1211,8 +1326,7 @@ impl<D: BlockDevice> Volume<D> {
                 let start = extent.logical / bs as u64;
                 self.dev
                     .read_block(extent.phys + (block_index - start), &mut block_buf)?;
-                buf[done..done + chunk]
-                    .copy_from_slice(&block_buf[in_block..in_block + chunk]);
+                buf[done..done + chunk].copy_from_slice(&block_buf[in_block..in_block + chunk]);
             }
             done += chunk;
         }
@@ -1243,7 +1357,11 @@ impl<D: BlockDevice> Volume<D> {
         let old_size = Self::file_size(&inode);
         if old_size > range_start {
             let readable = core::cmp::min(old_size, range_end);
-            let n = self.read_data(ino, range_start, &mut window[..(readable - range_start) as usize])?;
+            let n = self.read_data(
+                ino,
+                range_start,
+                &mut window[..(readable - range_start) as usize],
+            )?;
             let _ = n;
         }
         self.ensure_txn()?;
@@ -1293,7 +1411,11 @@ impl<D: BlockDevice> Volume<D> {
         new_extents.sort_by_key(|e| e.logical);
         self.rewrite_extents(ino, &old_extents, &new_extents)?;
         let new_size = core::cmp::max(old_size, offset + data.len() as u64);
-        set_file_size(&mut inode, new_size, new_extents.iter().map(|e| e.len).sum());
+        set_file_size(
+            &mut inode,
+            new_size,
+            new_extents.iter().map(|e| e.len).sum(),
+        );
         Self::touch(&mut inode, self.pending_xid, true);
         self.write_inode(ino, &inode)?;
         Ok(data.len())
@@ -1357,7 +1479,10 @@ impl<D: BlockDevice> Volume<D> {
         if !is_dir(u32::from(parent.mode)) {
             return Err(FsError::NotDirectory);
         }
-        if self.tree_search(TreeKind::Fs, &dentry_key(dir_ino, name))?.is_some() {
+        if self
+            .tree_search(TreeKind::Fs, &dentry_key(dir_ino, name))?
+            .is_some()
+        {
             return Err(FsError::AlreadyExists);
         }
         let extents = self.extents_of(src)?;
@@ -1375,9 +1500,17 @@ impl<D: BlockDevice> Volume<D> {
         self.write_inode(ino, &inode)?;
         self.tree_insert(TreeKind::Fs, &dstream_key(ino), &ino.to_le_bytes())?;
         for extent in &extents {
-            self.tree_insert(TreeKind::Fs, &extent_key(ino, extent.logical), extent_val(extent).as_bytes())?;
+            self.tree_insert(
+                TreeKind::Fs,
+                &extent_key(ino, extent.logical),
+                extent_val(extent).as_bytes(),
+            )?;
             if self.state.fext_root != 0 {
-                self.tree_insert(TreeKind::Fext, &fext_key(ino, extent.logical), fext_val(extent).as_bytes())?;
+                self.tree_insert(
+                    TreeKind::Fext,
+                    &fext_key(ino, extent.logical),
+                    fext_val(extent).as_bytes(),
+                )?;
             }
             let bs = self.dev.block_size() as u64;
             for i in 0..extent.len.div_ceil(bs) {
@@ -1417,9 +1550,17 @@ impl<D: BlockDevice> Volume<D> {
             self.tree_remove(TreeKind::Fext, &fext_key(ino, extent.logical))?;
         }
         for extent in new {
-            self.tree_insert(TreeKind::Fs, &extent_key(ino, extent.logical), extent_val(extent).as_bytes())?;
+            self.tree_insert(
+                TreeKind::Fs,
+                &extent_key(ino, extent.logical),
+                extent_val(extent).as_bytes(),
+            )?;
             if self.state.fext_root != 0 {
-                self.tree_insert(TreeKind::Fext, &fext_key(ino, extent.logical), fext_val(extent).as_bytes())?;
+                self.tree_insert(
+                    TreeKind::Fext,
+                    &fext_key(ino, extent.logical),
+                    fext_val(extent).as_bytes(),
+                )?;
             }
         }
         Ok(())
@@ -1432,7 +1573,11 @@ impl<D: BlockDevice> Volume<D> {
             .tree_search(TreeKind::ExtentRef, &key)?
             .and_then(|v| decode_refcount(&v))
             .unwrap_or(0);
-        self.tree_insert(TreeKind::ExtentRef, &key, &encode_refcount(block, current + 1))?;
+        self.tree_insert(
+            TreeKind::ExtentRef,
+            &key,
+            &encode_refcount(block, current + 1),
+        )?;
         Ok(())
     }
 
@@ -1446,10 +1591,18 @@ impl<D: BlockDevice> Volume<D> {
             .unwrap_or(0);
         if current <= 1 {
             self.tree_remove(TreeKind::ExtentRef, &key)?;
-            let xid = if self.dirty { self.pending_xid } else { self.state.xid };
+            let xid = if self.dirty {
+                self.pending_xid
+            } else {
+                self.state.xid
+            };
             self.reaper.defer(block, 1, xid);
         } else {
-            self.tree_insert(TreeKind::ExtentRef, &key, &encode_refcount(block, current - 1))?;
+            self.tree_insert(
+                TreeKind::ExtentRef,
+                &key,
+                &encode_refcount(block, current - 1),
+            )?;
         }
         Ok(())
     }
@@ -1521,7 +1674,11 @@ impl<D: BlockDevice> Volume<D> {
             if entry.key.len() < 8 {
                 continue;
             }
-            let raw = u64::from_le_bytes(entry.key[..8].try_into().map_err(|_| FsError::CorruptNode("xattr key truncated"))?);
+            let raw = u64::from_le_bytes(
+                entry.key[..8]
+                    .try_into()
+                    .map_err(|_| FsError::CorruptNode("xattr key truncated"))?,
+            );
             if raw != prefix {
                 continue;
             }
@@ -1572,7 +1729,11 @@ impl<D: BlockDevice> Volume<D> {
             if entry.key.len() < 8 {
                 continue;
             }
-            let raw = u64::from_le_bytes(entry.key[..8].try_into().map_err(|_| FsError::CorruptNode("inode key truncated"))?);
+            let raw = u64::from_le_bytes(
+                entry.key[..8]
+                    .try_into()
+                    .map_err(|_| FsError::CorruptNode("inode key truncated"))?,
+            );
             if jkey_type(raw) == gen::DREC_TYPE_INODE {
                 if let Some(inode) = gen::nolx_inode_t::read_from(&entry.val) {
                     match u32::from(inode.mode) & 0o170_000 {
@@ -1644,11 +1805,19 @@ impl<D: BlockDevice> Volume<D> {
                 if entry.key.len() < 16 {
                     continue;
                 }
-                let raw = u64::from_le_bytes(entry.key[..8].try_into().map_err(|_| FsError::CorruptNode("extent key truncated"))?);
+                let raw = u64::from_le_bytes(
+                    entry.key[..8]
+                        .try_into()
+                        .map_err(|_| FsError::CorruptNode("extent key truncated"))?,
+                );
                 if jkey_type(raw) != gen::DREC_TYPE_FILE_EXTENT {
                     continue;
                 }
-                let logical = u64::from_le_bytes(entry.key[8..16].try_into().map_err(|_| FsError::CorruptNode("extent key truncated"))?);
+                let logical = u64::from_le_bytes(
+                    entry.key[8..16]
+                        .try_into()
+                        .map_err(|_| FsError::CorruptNode("extent key truncated"))?,
+                );
                 if let Some(val) = gen::nolx_file_extent_val_t::read_from(&entry.val) {
                     out.push(Extent {
                         logical,
@@ -1746,15 +1915,21 @@ fn inode_key(ino: u64) -> Vec<u8> {
 }
 
 fn dstream_key(ino: u64) -> Vec<u8> {
-    pack_jkey(gen::DREC_TYPE_DSTREAM_ID, ino).to_le_bytes().to_vec()
+    pack_jkey(gen::DREC_TYPE_DSTREAM_ID, ino)
+        .to_le_bytes()
+        .to_vec()
 }
 
 fn file_info_key(ino: u64) -> Vec<u8> {
-    pack_jkey(gen::DREC_TYPE_FILE_INFO, ino).to_le_bytes().to_vec()
+    pack_jkey(gen::DREC_TYPE_FILE_INFO, ino)
+        .to_le_bytes()
+        .to_vec()
 }
 
 fn dir_stats_key(ino: u64) -> Vec<u8> {
-    pack_jkey(gen::DREC_TYPE_DIR_STATS, ino).to_le_bytes().to_vec()
+    pack_jkey(gen::DREC_TYPE_DIR_STATS, ino)
+        .to_le_bytes()
+        .to_vec()
 }
 
 fn dentry_key(parent: u64, name: &str) -> Vec<u8> {
@@ -1805,7 +1980,9 @@ fn sibling_val(parent: u64, name: &str, file_type: u16) -> Vec<u8> {
 }
 
 fn sibling_map_key(child: u64, parent: u64) -> Vec<u8> {
-    let mut key = pack_jkey(gen::DREC_TYPE_SIBLING_MAP, child).to_le_bytes().to_vec();
+    let mut key = pack_jkey(gen::DREC_TYPE_SIBLING_MAP, child)
+        .to_le_bytes()
+        .to_vec();
     key.extend_from_slice(&parent.to_le_bytes());
     key
 }
@@ -1853,7 +2030,9 @@ fn fext_val(extent: &Extent) -> gen::nolx_fext_tree_val_t {
 }
 
 fn phys_ext_key(block: u64) -> Vec<u8> {
-    pack_jkey(gen::DREC_TYPE_PHYS_EXTENT, block).to_le_bytes().to_vec()
+    pack_jkey(gen::DREC_TYPE_PHYS_EXTENT, block)
+        .to_le_bytes()
+        .to_vec()
 }
 
 /// Extent-reference value: a `nolx_phys_ext_val_t` describing one block, with
@@ -1870,7 +2049,8 @@ fn encode_refcount(block: u64, count: u64) -> Vec<u8> {
 }
 
 fn decode_refcount(val: &[u8]) -> Option<u64> {
-    let tail = val.get(gen::nolx_phys_ext_val_t::DISK_SIZE..gen::nolx_phys_ext_val_t::DISK_SIZE + 8)?;
+    let tail =
+        val.get(gen::nolx_phys_ext_val_t::DISK_SIZE..gen::nolx_phys_ext_val_t::DISK_SIZE + 8)?;
     Some(u64::from_le_bytes(tail.try_into().ok()?))
 }
 
@@ -1912,7 +2092,14 @@ mod tests {
 
     fn formatted(blocks: u64) -> Volume<MemBlockDevice> {
         let dev = MemBlockDevice::new(4096, blocks);
-        Volume::format(dev, &mkfs::FormatOptions { volume_name: String::from("test"), ..mkfs::FormatOptions::default() }).unwrap()
+        Volume::format(
+            dev,
+            &mkfs::FormatOptions {
+                volume_name: String::from("test"),
+                ..mkfs::FormatOptions::default()
+            },
+        )
+        .unwrap()
     }
 
     fn remount(vol: Volume<MemBlockDevice>) -> Volume<MemBlockDevice> {
@@ -1943,7 +2130,12 @@ mod tests {
         let file2 = vol.lookup(found, "hello.txt").unwrap();
         assert_eq!(file2, file);
         assert_eq!(read_all(&vol, file2), data);
-        let names: Vec<String> = vol.readdir(gen::ROOT_INO).unwrap().into_iter().map(|(n, _)| n).collect();
+        let names: Vec<String> = vol
+            .readdir(gen::ROOT_INO)
+            .unwrap()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
         assert!(names.iter().any(|n| n == "docs"));
     }
 
@@ -1951,7 +2143,9 @@ mod tests {
     fn crash_at_every_write_boundary_keeps_last_commit() {
         // Build a committed base image.
         let mut vol = formatted(2048);
-        let file = vol.create_file(gen::ROOT_INO, "stable.txt", 0o644, 0, 0).unwrap();
+        let file = vol
+            .create_file(gen::ROOT_INO, "stable.txt", 0o644, 0, 0)
+            .unwrap();
         vol.write_data(file, 0, b"committed").unwrap();
         vol.commit().unwrap();
         let base = vol.into_device();
@@ -1966,7 +2160,8 @@ mod tests {
                 let _ = vol2.commit();
             }
             dev.fail_writes_from(None);
-            let vol3 = Volume::mount(dev).unwrap_or_else(|e| panic!("boundary {boundary}: remount failed: {e}"));
+            let vol3 = Volume::mount(dev)
+                .unwrap_or_else(|e| panic!("boundary {boundary}: remount failed: {e}"));
             assert_eq!(read_all(&vol3, file), b"committed", "boundary {boundary}");
             drop(vol3);
         }
@@ -1976,7 +2171,9 @@ mod tests {
     #[test]
     fn snapshot_is_isolated_from_later_writes() {
         let mut vol = formatted(2048);
-        let file = vol.create_file(gen::ROOT_INO, "data.bin", 0o644, 0, 0).unwrap();
+        let file = vol
+            .create_file(gen::ROOT_INO, "data.bin", 0o644, 0, 0)
+            .unwrap();
         vol.write_data(file, 0, b"version-one").unwrap();
         let snap_xid = vol.create_snapshot("before").unwrap();
         assert!(snap_xid >= 2);
@@ -2023,12 +2220,17 @@ mod tests {
     #[test]
     fn symlinks_xattrs_truncate_and_holes() {
         let mut vol = formatted(2048);
-        let link = vol.symlink(gen::ROOT_INO, "lnk", b"/some/target", 0, 0).unwrap();
+        let link = vol
+            .symlink(gen::ROOT_INO, "lnk", b"/some/target", 0, 0)
+            .unwrap();
         assert_eq!(vol.readlink(link).unwrap(), b"/some/target");
         let file = vol.create_file(gen::ROOT_INO, "f", 0o644, 0, 0).unwrap();
         vol.set_xattr(file, "user.note", b"hello").unwrap();
         assert_eq!(vol.get_xattr(file, "user.note").unwrap(), b"hello");
-        assert_eq!(vol.list_xattrs(file).unwrap(), vec![String::from("user.note")]);
+        assert_eq!(
+            vol.list_xattrs(file).unwrap(),
+            vec![String::from("user.note")]
+        );
         // Sparse write: bytes before the offset read back as zeroes.
         vol.write_data(file, 8192, b"tail").unwrap();
         let all = read_all(&vol, file);

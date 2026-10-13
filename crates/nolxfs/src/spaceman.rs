@@ -193,14 +193,11 @@ impl SpaceMan {
         let mut cib_blocks = Vec::new();
         for i in 0..(cab.0 as usize) {
             cib_blocks.push(
-                read_u64(&cab.1, 36 + i * 8)
-                    .ok_or(FsError::CorruptNode("CAB entry truncated"))?,
+                read_u64(&cab.1, 36 + i * 8).ok_or(FsError::CorruptNode("CAB entry truncated"))?,
             );
         }
         if cib_blocks.len() as u64 != space.cib_count {
-            return Err(FsError::InvalidField(
-                "CAB lists the wrong number of CIBs",
-            ));
+            return Err(FsError::InvalidField("CAB lists the wrong number of CIBs"));
         }
         let bytes_per_chunk = (space.blocks_per_chunk as usize).div_ceil(8);
         let mut sm = Self {
@@ -279,8 +276,7 @@ impl SpaceMan {
     /// count as allocated: they are metadata, never the allocator's to hand out.
     #[must_use]
     pub fn is_allocated(&self, block: u64) -> bool {
-        if block < self.space.data_start
-            || block >= self.space.data_start + self.space.data_blocks
+        if block < self.space.data_start || block >= self.space.data_start + self.space.data_blocks
         {
             return true;
         }
@@ -306,7 +302,10 @@ impl SpaceMan {
             }
         }
         if let Some(start) = run_start {
-            out.push((start, self.space.data_start + self.space.data_blocks - start));
+            out.push((
+                start,
+                self.space.data_start + self.space.data_blocks - start,
+            ));
         }
         out
     }
@@ -354,13 +353,11 @@ impl SpaceMan {
         if count == 0 {
             return Err(FsError::InvalidField("zero-length free"));
         }
-        let end = start.checked_add(count).ok_or(FsError::BlockOutOfRange(start))?;
-        if start < self.space.alloc_start
-            || end > self.space.data_start + self.space.data_blocks
-        {
-            return Err(FsError::InvalidField(
-                "free outside the allocatable region",
-            ));
+        let end = start
+            .checked_add(count)
+            .ok_or(FsError::BlockOutOfRange(start))?;
+        if start < self.space.alloc_start || end > self.space.data_start + self.space.data_blocks {
+            return Err(FsError::InvalidField("free outside the allocatable region"));
         }
         for block in start..end {
             if !self.get_bit(block) {
@@ -381,10 +378,10 @@ impl SpaceMan {
     ///
     /// [`FsError::InvalidField`] outside the data region.
     pub fn mark_allocated(&mut self, start: u64, count: u64) -> Result<()> {
-        let end = start.checked_add(count).ok_or(FsError::BlockOutOfRange(start))?;
-        if start < self.space.data_start
-            || end > self.space.data_start + self.space.data_blocks
-        {
+        let end = start
+            .checked_add(count)
+            .ok_or(FsError::BlockOutOfRange(start))?;
+        if start < self.space.data_start || end > self.space.data_start + self.space.data_blocks {
             return Err(FsError::InvalidField("mark outside the data region"));
         }
         for block in start..end {
@@ -406,8 +403,8 @@ impl SpaceMan {
             self.set_bit(block, true);
         }
         let total_bits = self.space.chunk_count * u64::from(self.space.blocks_per_chunk);
-        for block in (self.space.data_start + self.space.data_blocks)
-            ..(self.space.data_start + total_bits)
+        for block in
+            (self.space.data_start + self.space.data_blocks)..(self.space.data_start + total_bits)
         {
             self.set_bit(block, true);
         }
@@ -430,8 +427,7 @@ impl SpaceMan {
         for chunk in 0..self.space.chunk_count {
             let mut buf = vec![0u8; block_size];
             let src_off = (chunk as usize) * bytes_per_chunk;
-            buf[gen::nolx_obj_phys_t::DISK_SIZE
-                ..gen::nolx_obj_phys_t::DISK_SIZE + bytes_per_chunk]
+            buf[gen::nolx_obj_phys_t::DISK_SIZE..gen::nolx_obj_phys_t::DISK_SIZE + bytes_per_chunk]
                 .copy_from_slice(&self.bits[src_off..src_off + bytes_per_chunk]);
             on_disk::seal(
                 &mut buf,
@@ -442,10 +438,8 @@ impl SpaceMan {
         let infos_per_cib = self.space.infos_per_cib(block_size);
         for cib_index in 0..self.space.cib_count {
             let first_chunk = (cib_index as usize) * infos_per_cib;
-            let last_chunk = core::cmp::min(
-                first_chunk + infos_per_cib,
-                self.space.chunk_count as usize,
-            );
+            let last_chunk =
+                core::cmp::min(first_chunk + infos_per_cib, self.space.chunk_count as usize);
             let mut buf = vec![0u8; block_size];
             buf[32..36].copy_from_slice(&((last_chunk - first_chunk) as u32).to_le_bytes());
             for (slot, chunk) in (first_chunk..last_chunk).enumerate() {
@@ -458,8 +452,7 @@ impl SpaceMan {
                     bitmap_addr: self.space.bitmap_base + chunk as u64,
                 };
                 let off = 32 + 4 + slot * gen::nolx_chunk_info_t::DISK_SIZE;
-                buf[off..off + gen::nolx_chunk_info_t::DISK_SIZE]
-                    .copy_from_slice(info.as_bytes());
+                buf[off..off + gen::nolx_chunk_info_t::DISK_SIZE].copy_from_slice(info.as_bytes());
             }
             on_disk::seal(
                 &mut buf,
@@ -492,7 +485,14 @@ impl SpaceMan {
             phys.free_count = self.free_count;
             phys.cib_addr_offset = self.space.cib_base;
             phys.cab_addr_offset = self.space.cab_block;
-            write_sealed_block(dev, spaceman_block, &phys, oid::SPACEMAN, xid, gen::OBJ_SPACEMAN)?;
+            write_sealed_block(
+                dev,
+                spaceman_block,
+                &phys,
+                oid::SPACEMAN,
+                xid,
+                gen::OBJ_SPACEMAN,
+            )?;
         }
         Ok(())
     }

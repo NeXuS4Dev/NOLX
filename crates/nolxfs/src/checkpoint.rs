@@ -150,9 +150,8 @@ pub struct FoundCheckpoint {
 ///
 /// Never fails for a well-formed state; the result is a byte vector.
 pub fn encode_state(state: &CheckpointState) -> Vec<u8> {
-    let mut out = Vec::with_capacity(
-        STATE_HEADER_LEN + state.snapshots.len() * 96 + state.reap.len() * 24,
-    );
+    let mut out =
+        Vec::with_capacity(STATE_HEADER_LEN + state.snapshots.len() * 96 + state.reap.len() * 24);
     out.extend_from_slice(&STATE_MAGIC.to_le_bytes());
     out.extend_from_slice(&STATE_VERSION.to_le_bytes());
     out.extend_from_slice(&(STATE_HEADER_LEN as u16).to_le_bytes());
@@ -214,21 +213,33 @@ struct Cursor<'a> {
 impl<'a> Cursor<'a> {
     fn u16(&mut self) -> Result<u16> {
         let b = self.take(2)?;
-        Ok(u16::from_le_bytes(b.try_into().map_err(|_| FsError::CorruptNode("state truncated"))?))
+        Ok(u16::from_le_bytes(
+            b.try_into()
+                .map_err(|_| FsError::CorruptNode("state truncated"))?,
+        ))
     }
     fn u32(&mut self) -> Result<u32> {
         let b = self.take(4)?;
-        Ok(u32::from_le_bytes(b.try_into().map_err(|_| FsError::CorruptNode("state truncated"))?))
+        Ok(u32::from_le_bytes(
+            b.try_into()
+                .map_err(|_| FsError::CorruptNode("state truncated"))?,
+        ))
     }
     fn u64(&mut self) -> Result<u64> {
         let b = self.take(8)?;
-        Ok(u64::from_le_bytes(b.try_into().map_err(|_| FsError::CorruptNode("state truncated"))?))
+        Ok(u64::from_le_bytes(
+            b.try_into()
+                .map_err(|_| FsError::CorruptNode("state truncated"))?,
+        ))
     }
     fn i64(&mut self) -> Result<i64> {
         Ok(self.u64()? as i64)
     }
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        let end = self.pos.checked_add(n).ok_or(FsError::CorruptNode("state length overflows"))?;
+        let end = self
+            .pos
+            .checked_add(n)
+            .ok_or(FsError::CorruptNode("state length overflows"))?;
         let slice = self
             .bytes
             .get(self.pos..end)
@@ -275,7 +286,9 @@ pub fn decode_state(bytes: &[u8]) -> Result<CheckpointState> {
     let snap_count = cur.u32()? as usize;
     let reap_count = cur.u32()? as usize;
     if snap_count > 100_000 || reap_count > 1_000_000 {
-        return Err(FsError::CorruptNode("checkpoint state counts are implausible"));
+        return Err(FsError::CorruptNode(
+            "checkpoint state counts are implausible",
+        ));
     }
     let mut snapshots = Vec::with_capacity(snap_count);
     for _ in 0..snap_count {
@@ -437,14 +450,12 @@ pub fn commit<D: BlockDevice>(
     vsb.next_ident = state.next_ino;
     {
         let mut buf = vec![0u8; block_size];
-        buf[..core::mem::size_of::<gen::nolx_fs_superblock_t>()]
-            .copy_from_slice(vsb.as_bytes());
+        buf[..core::mem::size_of::<gen::nolx_fs_superblock_t>()].copy_from_slice(vsb.as_bytes());
         // State header records where the spill chain starts (0 = fully inline).
         let spill_first = spill_blocks.first().copied().unwrap_or(0);
         buf[VSB_RESERVED_OFF..VSB_RESERVED_OFF + 8].copy_from_slice(&spill_first.to_le_bytes());
         let inline_len = core::cmp::min(stream.len(), inline_cap);
-        buf[STATE_OFF..STATE_OFF + inline_len]
-            .copy_from_slice(&stream[..inline_len]);
+        buf[STATE_OFF..STATE_OFF + inline_len].copy_from_slice(&stream[..inline_len]);
         on_disk::seal(
             &mut buf,
             on_disk::ObjHeader::make(oid::VOLUME_SUPERBLOCK, xid, gen::OBJ_VOLUME_SUPERBLOCK, 0),
@@ -460,11 +471,15 @@ pub fn commit<D: BlockDevice>(
     csb.xp_desc_next = (desc_index + 1) % layout.xp_desc_blocks;
     {
         let mut buf = vec![0u8; block_size];
-        buf[..core::mem::size_of::<gen::nolx_nx_superblock_t>()]
-            .copy_from_slice(csb.as_bytes());
+        buf[..core::mem::size_of::<gen::nolx_nx_superblock_t>()].copy_from_slice(csb.as_bytes());
         on_disk::seal(
             &mut buf,
-            on_disk::ObjHeader::make(oid::CONTAINER_SUPERBLOCK, xid, gen::OBJ_CONTAINER_SUPERBLOCK, 0),
+            on_disk::ObjHeader::make(
+                oid::CONTAINER_SUPERBLOCK,
+                xid,
+                gen::OBJ_CONTAINER_SUPERBLOCK,
+                0,
+            ),
         )?;
         dev.write_block(csb_block, &buf)?;
     }
@@ -476,8 +491,7 @@ pub fn commit<D: BlockDevice>(
         reaper.max_record_count = state.reap.len() as u64;
         reaper.xid = xid;
         let mut buf = vec![0u8; block_size];
-        buf[..core::mem::size_of::<gen::nolx_reaper_phys_t>()]
-            .copy_from_slice(reaper.as_bytes());
+        buf[..core::mem::size_of::<gen::nolx_reaper_phys_t>()].copy_from_slice(reaper.as_bytes());
         on_disk::seal(
             &mut buf,
             on_disk::ObjHeader::make(oid::REAPER, xid, gen::OBJ_REAPER, 0),
@@ -497,8 +511,16 @@ pub fn commit<D: BlockDevice>(
         buf[..core::mem::size_of::<gen::nolx_checkpoint_map_phys_t>()]
             .copy_from_slice(map.as_bytes());
         let entries: [(u32, u64, u64); 4] = [
-            (gen::OBJ_CONTAINER_SUPERBLOCK, oid::CONTAINER_SUPERBLOCK, csb_block),
-            (gen::OBJ_VOLUME_SUPERBLOCK, oid::VOLUME_SUPERBLOCK, vsb_block),
+            (
+                gen::OBJ_CONTAINER_SUPERBLOCK,
+                oid::CONTAINER_SUPERBLOCK,
+                csb_block,
+            ),
+            (
+                gen::OBJ_VOLUME_SUPERBLOCK,
+                oid::VOLUME_SUPERBLOCK,
+                vsb_block,
+            ),
             (gen::OBJ_SPACEMAN, oid::SPACEMAN, layout.spaceman),
             (gen::OBJ_REAPER, oid::REAPER, layout.reaper),
         ];
@@ -511,7 +533,8 @@ pub fn commit<D: BlockDevice>(
                 oid: *entry_oid,
                 paddr: *paddr,
             };
-            let off = gen::nolx_checkpoint_map_phys_t::OFF_RESERVED + i * gen::nolx_checkpoint_map_entry_t::DISK_SIZE;
+            let off = gen::nolx_checkpoint_map_phys_t::OFF_RESERVED
+                + i * gen::nolx_checkpoint_map_entry_t::DISK_SIZE;
             buf[off..off + gen::nolx_checkpoint_map_entry_t::DISK_SIZE]
                 .copy_from_slice(entry.as_bytes());
         }
@@ -658,19 +681,25 @@ fn read_state<D: BlockDevice>(dev: &D, vsb_raw: &[u8]) -> Result<CheckpointState
         dev.read_block(next, &mut raw)?;
         on_disk::ObjRef::parse(&raw, gen::OBJ_CHECKPOINT_MAP)?;
         let magic = u32::from_le_bytes(
-            raw[32..36].try_into().map_err(|_| FsError::CorruptNode("spill header truncated"))?,
+            raw[32..36]
+                .try_into()
+                .map_err(|_| FsError::CorruptNode("spill header truncated"))?,
         );
         if magic != STATE_MAGIC {
             return Err(FsError::CorruptNode("spill block magic mismatch"));
         }
         let found_seq = u32::from_le_bytes(
-            raw[36..40].try_into().map_err(|_| FsError::CorruptNode("spill header truncated"))?,
+            raw[36..40]
+                .try_into()
+                .map_err(|_| FsError::CorruptNode("spill header truncated"))?,
         );
         if found_seq != seq {
             return Err(FsError::CorruptNode("spill block out of sequence"));
         }
         let following = u64::from_le_bytes(
-            raw[40..48].try_into().map_err(|_| FsError::CorruptNode("spill header truncated"))?,
+            raw[40..48]
+                .try_into()
+                .map_err(|_| FsError::CorruptNode("spill header truncated"))?,
         );
         stream.extend_from_slice(&raw[48..]);
         if let Ok(state) = decode_state(&stream) {
@@ -784,7 +813,10 @@ mod tests {
         raw[100] ^= 0xFF;
         dev.write_block(newest.desc_block, &raw).unwrap();
         let found = find_latest(&dev, &layout).unwrap().unwrap();
-        assert_eq!(found.state.xid, 2, "recovery must select the previous valid checkpoint");
+        assert_eq!(
+            found.state.xid, 2,
+            "recovery must select the previous valid checkpoint"
+        );
     }
 
     #[test]

@@ -120,9 +120,7 @@ fn open_image(path: &PathBuf) -> Result<FileDevice, String> {
 fn resolve(vol: &Volume<FileDevice>, path: &str) -> Result<u64, String> {
     let mut ino = gen::ROOT_INO;
     for part in path.split('/').filter(|p| !p.is_empty()) {
-        ino = vol
-            .lookup(ino, part)
-            .map_err(|e| format!("{path}: {e}"))?;
+        ino = vol.lookup(ino, part).map_err(|e| format!("{path}: {e}"))?;
     }
     Ok(ino)
 }
@@ -186,9 +184,9 @@ fn main() -> ExitCode {
                     }
                     ExitCode::from(0)
                 }
-                "ls" => match resolve(&vol, target).and_then(|ino| {
-                    vol.readdir(ino).map_err(|e| format!("{target}: {e}"))
-                }) {
+                "ls" => match resolve(&vol, target)
+                    .and_then(|ino| vol.readdir(ino).map_err(|e| format!("{target}: {e}")))
+                {
                     Ok(entries) => {
                         for (name, ino) in entries {
                             println!("{name}  (ino {ino})");
@@ -212,9 +210,12 @@ fn main() -> ExitCode {
                         println!("type:  {}", kind_of(mode));
                         println!("mode:  {mode:o}");
                         println!("nlink: {}", inode.nlink);
-                        println!("uid:   {} gid: {}", inode.uid, inode.gid);
+                        println!("uid:   {} gid: {}", inode.owner, inode.group);
                         println!("size:  {}", Volume::<FileDevice>::file_size(&inode));
-                        println!("create_time: {} change_time: {}", inode.create_time, inode.change_time);
+                        println!(
+                            "create_time: {} change_time: {}",
+                            inode.create_time, inode.change_time
+                        );
                         ExitCode::from(0)
                     }
                     Err(e) => {
