@@ -226,23 +226,36 @@ fn negotiation_requires_version_1_and_accepts_only_it() {
 fn features_ok_readback_is_checked() {
     let ok = status::FEATURES_OK | status::DRIVER;
     assert_eq!(check_features_ok(ok), Ok(()));
-    assert_eq!(check_features_ok(status::DRIVER), Err(VirtioError::FeaturesRejected));
+    assert_eq!(
+        check_features_ok(status::DRIVER),
+        Err(VirtioError::FeaturesRejected)
+    );
     let failed = status::FEATURES_OK | status::FAILED;
     assert_eq!(check_features_ok(failed), Err(VirtioError::DeviceFailed));
-    assert_eq!(check_features_ok(status::DEVICE_NEEDS_RESET), Err(VirtioError::DeviceFailed));
+    assert_eq!(
+        check_features_ok(status::DEVICE_NEEDS_RESET),
+        Err(VirtioError::DeviceFailed)
+    );
 }
 
 #[test]
 fn the_init_sequence_only_adds_bits_and_ends_with_driver_ok() {
     let mut previous = 0u8;
     for step in INIT_STATUS_SEQUENCE {
-        assert_eq!(step & previous, previous, "each step keeps the bits before it");
+        assert_eq!(
+            step & previous,
+            previous,
+            "each step keeps the bits before it"
+        );
         assert_ne!(step, previous, "each step adds a bit");
         previous = step;
     }
     assert_eq!(previous & status::DRIVER_OK, status::DRIVER_OK);
     assert_eq!(INIT_STATUS_SEQUENCE[1] & status::FEATURES_OK, 0);
-    assert_eq!(INIT_STATUS_SEQUENCE[2] & status::FEATURES_OK, status::FEATURES_OK);
+    assert_eq!(
+        INIT_STATUS_SEQUENCE[2] & status::FEATURES_OK,
+        status::FEATURES_OK
+    );
 }
 
 #[test]
@@ -261,7 +274,10 @@ fn split_layout_matches_the_specification_sizes() {
 fn split_layout_refuses_sizes_the_device_cannot_use() {
     assert_eq!(split_layout(0), Err(VirtioError::InvalidQueueSize));
     assert_eq!(split_layout(3), Err(VirtioError::InvalidQueueSize));
-    assert_eq!(split_layout(MAX_QUEUE_SIZE + 1), Err(VirtioError::InvalidQueueSize));
+    assert_eq!(
+        split_layout(MAX_QUEUE_SIZE + 1),
+        Err(VirtioError::InvalidQueueSize)
+    );
     assert!(split_layout(MAX_QUEUE_SIZE).is_ok());
     assert!(split_layout(1).is_ok());
 }
