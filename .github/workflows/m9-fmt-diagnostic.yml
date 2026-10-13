@@ -1,0 +1,27 @@
+name: M9 fmt diagnostic (temporary)
+on:
+  push:
+    branches: ["arena/d71a2d5c-nolx"]
+permissions:
+  contents: read
+jobs:
+  diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.88.0
+          components: rustfmt
+      - name: cargo fmt, capture the diff
+        run: |
+          cargo fmt --all -- --check > fmt-check.txt 2>&1 || true
+          cargo fmt --all
+          git diff > fmt-fix.patch || true
+          wc -l fmt-check.txt fmt-fix.patch
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fmt-diagnostic
+          path: |
+            fmt-check.txt
+            fmt-fix.patch
