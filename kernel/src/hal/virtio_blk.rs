@@ -21,9 +21,9 @@ use alloc::vec;
 use nolx_block_core::{self as gpt, GptError, Header};
 use nolxfs::on_disk::FsError;
 
+use super::dma::Dma;
 use crate::hal::pci::LegacyPorts;
 use crate::mm::mmio::{self, Region};
-use crate::mm::{self, phys, PAGE_SIZE};
 use core::sync::atomic::{fence, Ordering};
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
@@ -169,7 +169,7 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
         queue,
         notify,
         notify_offset,
-        request: Dma::new()?,
+        request: Dma::new().ok_or(Failure::Memory)?,
     };
 
     disk.transfer(virtio::BLK_T_IN, 0, virtio::SECTOR_BYTES as u32)?;
@@ -356,69 +356,6 @@ fn write_u64(common: &Region, offset: u8, value: u64) -> Result<(), Failure> {
     Ok(())
 }
 
-/// Memory one device reads or writes, reached through the direct map. A frame is 4 KiB and is
-/// zeroed when it is taken; every access is checked to stay inside that frame.
-struct Dma {
-    phys: u64,
-}
-
-impl Dma {
-    fn new() -> Result<Self, Failure> {
-        let frame = mm::allocate_frame_zeroed().ok_or(Failure::Memory)?;
-        // The allocator manages only frames inside the direct map, so this address is one the
-        // device can be given and the kernel can reach.
-        Ok(Self {
-            phys: frame as u64 * PAGE_SIZE as u64,
-        })
-    }
-
-    /// The physical address the device uses for `offset` within this page.
-    fn address(&self, offset: u64) -> u64 {
-        self.phys + offset
-    }
-
-    fn pointer(&self, offset: u64, len: usize) -> *mut u8 {
-        assert!(
-            offset + len as u64 <= PAGE_SIZE as u64,
-            "dma access past its page"
-        );
-        phys::direct_ptr::<u8>(self.phys + offset)
-    }
-
-    fn write(&self, offset: u64, bytes: &[u8]) {
-        let base = self.pointer(offset, bytes.len());
-        for (index, byte) in bytes.iter().enumerate() {
-            // SAFETY: `pointer` checked that the range is inside this driver's own frame, which
-            // only this driver touches, and volatile because the device reads it.
-            unsafe { core::ptr::write_volatile(base.add(index), *byte) };
-        }
-    }
-
-    fn read(&self, offset: u64, out: &mut [u8]) {
-        let base = self.pointer(offset, out.len());
-        for (index, byte) in out.iter_mut().enumerate() {
-            // SAFETY: as [`Dma::write`]; volatile because the device writes it.
-            *byte = unsafe { core::ptr::read_volatile(base.add(index)) };
-        }
-    }
-
-    fn read_array<const N: usize>(&self, offset: u64) -> [u8; N] {
-        let mut bytes = [0u8; N];
-        self.read(offset, &mut bytes);
-        bytes
-    }
-
-    fn write16(&self, offset: u64, value: u16) {
-        self.write(offset, &value.to_le_bytes());
-    }
-
-    fn read16(&self, offset: u64) -> u16 {
-        let mut bytes = [0u8; 2];
-        self.read(offset, &mut bytes);
-        u16::from_le_bytes(bytes)
-    }
-}
-
 /// Queue 0, configured and enabled, with its ring memory.
 struct Queue {
     size: u16,
@@ -533,7 +470,7 @@ fn setup_queue(common: &Region) -> Result<Queue, Failure> {
     let size = max.min(QUEUE_SIZE_WANTED);
     let layout = virtio::split_layout(size)?;
     common.write16(at(common::QUEUE_SIZE), size)?;
-    let ring = Dma::new()?;
+    let ring = Dma::new().ok_or(Failure::Memory)?;
     write_u64(common, common::QUEUE_DESC, ring.address(0))?;
     write_u64(
         common,

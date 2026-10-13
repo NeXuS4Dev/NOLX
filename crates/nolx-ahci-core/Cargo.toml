@@ -1,0 +1,12 @@
+[package]
+name = "nolx-ahci-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-testable AHCI (SATA) rules for NOLX: HBA and port register layout, port state, the host-to-device FIS, command headers, and physical region descriptors"
+readme = "../../README.md"
+publish = false
+
+[lib]
+path = "src/lib.rs"

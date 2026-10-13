@@ -10,10 +10,12 @@
 //! in a "safe" wrapper would be worse.
 
 pub mod acpi;
+pub mod ahci;
 pub mod apic;
 pub mod console;
 pub mod context;
 pub mod cpu;
+pub mod dma;
 pub mod hpet;
 pub mod interrupts;
 pub mod ioapic;

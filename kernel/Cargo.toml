@@ -23,6 +23,7 @@ name = "nolx-kernel"
 path = "src/main.rs"
 
 [dependencies]
+nolx-ahci-core = { path = "../crates/nolx-ahci-core" }
 nolx-block-core = { path = "../crates/nolx-block-core" }
 nolx-hal-core = { path = "../crates/nolx-hal-core" }
 # The memory-management algorithms: buddy allocator, frame magazines, page-table

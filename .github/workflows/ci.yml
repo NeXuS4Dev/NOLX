@@ -208,6 +208,8 @@ jobs:
             -m 512M -nographic -no-reboot \
             -drive file=build/disk.img,if=none,id=vd0,format=raw \
             -device virtio-blk-pci,drive=vd0 \
+            -drive file=build/disk.img,if=none,id=sata0,format=raw,snapshot=on \
+            -device ahci,id=ahci -device ide-hd,drive=sata0,bus=ahci.0 \
             | tee build/serial.log || true
           cat build/serial.log >> /tmp/job.log
       # The NOLXFS file, after a remount from the disk, must be the pattern the kernel wrote.
@@ -415,6 +417,16 @@ jobs:
           fi
           if ! grep -Fq 'virtio-blk: sector 0 read, status ok, first 16 bytes match the disk image' build/serial.log; then
             echo "the virtio block read did not return the disk image's sector 0"
+            exit 1
+          fi
+          # AHCI: the same sector 0, read through a command slot on a SATA port the controller
+          # found by its class code, from the same disk image.
+          if ! grep -Eq 'ahci: [0-9a-f]{2}:[0-9a-f]{2}\.[0-9] abar 0x[0-9a-f]+, ports 0x[0-9a-f]+, port [0-9]+ is a SATA disk' build/serial.log; then
+            echo "the AHCI controller and SATA port were not reported"
+            exit 1
+          fi
+          if ! grep -Eq 'ahci: port [0-9]+ sector 0 read, status ok, first 16 bytes match the disk image' build/serial.log; then
+            echo "the AHCI read did not return the disk image's sector 0"
             exit 1
           fi
           # MMIO windows: a device register range is mapped uncached through the window above the

@@ -18,6 +18,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nolx-ahci-core"
+version = "0.1.0"
+
+[[package]]
 name = "nolx-block-core"
 version = "0.1.0"
 
@@ -38,6 +42,7 @@ version = "0.1.0"
 name = "nolx-kernel"
 version = "0.1.0"
 dependencies = [
+ "nolx-ahci-core",
  "nolx-block-core",
  "nolx-exec-core",
  "nolx-hal-core",
