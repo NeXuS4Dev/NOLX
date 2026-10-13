@@ -35,7 +35,7 @@ const EIO: u32 = 5;
 
 /// The disk, presented as the blocks of one partition. Block `n` is sectors
 /// `first_sector + n * 8` to `first_sector + n * 8 + 7`.
-pub struct PartitionDisk {
+pub(crate) struct PartitionDisk {
     // NOLXFS reads through `&self`, and a read needs `&mut` access to the queue. The cell gives
     // that access without changing the trait; the driver is single-threaded, so the borrow never
     // overlaps.
@@ -94,7 +94,7 @@ impl BlockDevice for PartitionDisk {
 
 /// Put a volume on the partition, write the file, commit, mount again, and read the file back.
 /// Prints the checksum of what was read back, which CI compares with the pattern it expects.
-pub fn run(
+pub(crate) fn run(
     disk: Disk,
     first_sector: u64,
     sectors: u64,
