@@ -115,7 +115,9 @@ pub fn init() -> Result<(), Failure> {
     if Entry::from_raw(store.entry(root, mmio::MMIO_SLOT)).is_present() {
         return Err(Failure::Tables(MapError::AlreadyMapped));
     }
-    let table = store.allocate_table().ok_or(Failure::Tables(MapError::OutOfMemory))?;
+    let table = store
+        .allocate_table()
+        .ok_or(Failure::Tables(MapError::OutOfMemory))?;
     let flags = EntryFlags::intermediate(mmio::mmio_flags());
     let entry = Entry::new(table << PAGE_SHIFT, flags);
     let entry = entry.ok_or(Failure::Tables(MapError::Misaligned))?;
@@ -136,7 +138,13 @@ pub fn map(physical: u64, length: u64) -> Result<Region, Failure> {
     let mut walker = PageTables::new(kernel_root());
     let mut store = KernelTableStore::new();
     let flags = mmio::mmio_flags();
-    let mapped = walker.map_range(&mut store, window.virt, window.physical, window.bytes(), flags);
+    let mapped = walker.map_range(
+        &mut store,
+        window.virt,
+        window.physical,
+        window.bytes(),
+        flags,
+    );
     mapped.map_err(Failure::Tables)?;
     Ok(Region {
         base: window.requested_base(),

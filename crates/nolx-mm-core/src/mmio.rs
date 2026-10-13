@@ -170,7 +170,9 @@ mod tests {
     #[test]
     fn the_window_covers_the_requested_range_with_its_offset() {
         let mut arena = MmioArena::new();
-        let window = arena.reserve(0xFEE0_0030, 0x10, DIRECT_MAP).expect("planned");
+        let window = arena
+            .reserve(0xFEE0_0030, 0x10, DIRECT_MAP)
+            .expect("planned");
         assert_eq!(window.virt, MMIO_BASE);
         assert_eq!(window.physical, 0xFEE0_0000);
         assert_eq!(window.pages, 1);
@@ -190,13 +192,19 @@ mod tests {
     #[test]
     fn an_empty_range_is_refused() {
         let mut arena = MmioArena::new();
-        assert_eq!(arena.reserve(0xFE00_0000, 0, DIRECT_MAP), Err(MmioError::Empty));
+        assert_eq!(
+            arena.reserve(0xFE00_0000, 0, DIRECT_MAP),
+            Err(MmioError::Empty)
+        );
     }
 
     #[test]
     fn ranges_past_the_physical_address_space_are_refused() {
         let mut arena = MmioArena::new();
-        assert_eq!(arena.reserve(u64::MAX - 1, 16, DIRECT_MAP), Err(MmioError::OutOfRange));
+        assert_eq!(
+            arena.reserve(u64::MAX - 1, 16, DIRECT_MAP),
+            Err(MmioError::OutOfRange)
+        );
         assert_eq!(
             arena.reserve(MAX_PHYSICAL - PAGE, 2 * PAGE, DIRECT_MAP),
             Err(MmioError::OutOfRange)
@@ -208,7 +216,10 @@ mod tests {
     fn a_range_that_starts_inside_the_direct_map_is_refused() {
         let mut arena = MmioArena::new();
         // The last page of the direct map: it is cacheable RAM already.
-        assert_eq!(arena.reserve(DIRECT_MAP - PAGE, PAGE, DIRECT_MAP), Err(MmioError::Overlaps));
+        assert_eq!(
+            arena.reserve(DIRECT_MAP - PAGE, PAGE, DIRECT_MAP),
+            Err(MmioError::Overlaps)
+        );
         // The first page above it is device space.
         assert!(arena.reserve(DIRECT_MAP, PAGE, DIRECT_MAP).is_ok());
     }
@@ -216,8 +227,12 @@ mod tests {
     #[test]
     fn windows_are_disjoint_and_separated_by_a_guard_page() {
         let mut arena = MmioArena::new();
-        let first = arena.reserve(0xC000_0000, 0x2000, DIRECT_MAP).expect("first");
-        let second = arena.reserve(0xD000_0000, 0x1000, DIRECT_MAP).expect("second");
+        let first = arena
+            .reserve(0xC000_0000, 0x2000, DIRECT_MAP)
+            .expect("first");
+        let second = arena
+            .reserve(0xD000_0000, 0x1000, DIRECT_MAP)
+            .expect("second");
         assert_eq!(second.virt, first.virt + first.bytes() + PAGE);
     }
 
@@ -225,9 +240,14 @@ mod tests {
     fn the_window_runs_out_and_then_refuses() {
         let mut arena = MmioArena::new();
         // Exactly the whole window: it fits, and the guard page after it does not.
-        let all = arena.reserve(0x1_0000_0000, MMIO_BYTES, DIRECT_MAP).expect("whole window");
+        let all = arena
+            .reserve(0x1_0000_0000, MMIO_BYTES, DIRECT_MAP)
+            .expect("whole window");
         assert_eq!(all.bytes(), MMIO_BYTES);
-        assert_eq!(arena.reserve(0x2_0000_0000, PAGE, DIRECT_MAP), Err(MmioError::Exhausted));
+        assert_eq!(
+            arena.reserve(0x2_0000_0000, PAGE, DIRECT_MAP),
+            Err(MmioError::Exhausted)
+        );
     }
 
     #[test]
@@ -251,7 +271,10 @@ mod tests {
             EntryFlags::CACHE_DISABLE,
             EntryFlags::WRITE_THROUGH,
         ] {
-            assert!(flags.contains(EntryFlags::from_bits(bit)), "missing bit {bit:#x}");
+            assert!(
+                flags.contains(EntryFlags::from_bits(bit)),
+                "missing bit {bit:#x}"
+            );
         }
         for bit in [EntryFlags::USER, EntryFlags::GLOBAL, EntryFlags::HUGE] {
             assert_eq!(flags.bits() & bit, 0, "unexpected bit {bit:#x}");
@@ -261,7 +284,10 @@ mod tests {
     #[test]
     fn the_window_slot_is_the_one_above_the_direct_map() {
         assert_eq!(crate::paging::pml4_index(MMIO_BASE), MMIO_SLOT);
-        assert_eq!(crate::paging::pml4_index(crate::paging::DIRECT_MAP_BASE), 256);
+        assert_eq!(
+            crate::paging::pml4_index(crate::paging::DIRECT_MAP_BASE),
+            256
+        );
         assert_eq!(MMIO_BASE + MMIO_BYTES - 1, 0xffff_8080_3fff_ffff);
     }
 
@@ -275,8 +301,14 @@ mod tests {
         assert_eq!(check_access(0x100, 0x102, 2), Err(MmioError::OutOfRange));
         assert_eq!(check_access(0x100, 0x100, 1), Err(MmioError::OutOfRange));
         assert_eq!(check_access(0x100, 0xFF, 1), Ok(()));
-        assert_eq!(check_access(0x100, u64::MAX - 1, 4), Err(MmioError::Misaligned));
-        assert_eq!(check_access(0x100, u64::MAX - 3, 4), Err(MmioError::OutOfRange));
+        assert_eq!(
+            check_access(0x100, u64::MAX - 1, 4),
+            Err(MmioError::Misaligned)
+        );
+        assert_eq!(
+            check_access(0x100, u64::MAX - 3, 4),
+            Err(MmioError::OutOfRange)
+        );
         assert_eq!(check_access(0x100, 0, 8), Err(MmioError::BadWidth));
         assert_eq!(check_access(0x100, 0, 3), Err(MmioError::BadWidth));
     }
