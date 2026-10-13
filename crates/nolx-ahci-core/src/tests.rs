@@ -61,12 +61,23 @@ fn a_command_header_names_its_fis_length_direction_and_table() {
         table: 0x1_0000_0800,
     };
     let bytes = encode_command_header(&read).unwrap();
-    assert_eq!(&bytes[0..4], &[5, 0, 1, 0], "CFL 5, no write bit, one PRDT entry");
+    assert_eq!(
+        &bytes[0..4],
+        &[5, 0, 1, 0],
+        "CFL 5, no write bit, one PRDT entry"
+    );
     assert_eq!(&bytes[8..12], &0x0000_0800u32.to_le_bytes());
     assert_eq!(&bytes[12..16], &1u32.to_le_bytes());
 
-    let write = CommandHeader { write: true, ..read };
-    assert_eq!(encode_command_header(&write).unwrap()[0], 0x45, "bit 6 is the write bit");
+    let write = CommandHeader {
+        write: true,
+        ..read
+    };
+    assert_eq!(
+        encode_command_header(&write).unwrap()[0],
+        0x45,
+        "bit 6 is the write bit"
+    );
 }
 
 #[test]
@@ -77,12 +88,24 @@ fn a_command_header_is_refused_for_a_misaligned_table_or_a_bad_fis_length() {
         prdt_entries: 1,
         table: 0x801,
     };
-    assert_eq!(encode_command_header(&header), None, "table not 128-byte aligned");
+    assert_eq!(
+        encode_command_header(&header),
+        None,
+        "table not 128-byte aligned"
+    );
     header.table = 0x800;
     header.fis_dwords = 1;
-    assert_eq!(encode_command_header(&header), None, "FIS shorter than two dwords");
+    assert_eq!(
+        encode_command_header(&header),
+        None,
+        "FIS shorter than two dwords"
+    );
     header.fis_dwords = 17;
-    assert_eq!(encode_command_header(&header), None, "FIS longer than the field allows");
+    assert_eq!(
+        encode_command_header(&header),
+        None,
+        "FIS longer than the field allows"
+    );
 }
 
 #[test]
@@ -99,5 +122,8 @@ fn a_region_descriptor_refuses_empty_odd_misaligned_and_oversized_regions() {
     assert_eq!(prdt_entry(0x1000, 3), None);
     assert_eq!(prdt_entry(0x1001, 512), None);
     assert_eq!(prdt_entry(0x1000, PRDT_MAX_BYTES + 2), None);
-    assert!(prdt_entry(0x1000, PRDT_MAX_BYTES).is_some(), "4 MiB exactly is allowed");
+    assert!(
+        prdt_entry(0x1000, PRDT_MAX_BYTES).is_some(),
+        "4 MiB exactly is allowed"
+    );
 }

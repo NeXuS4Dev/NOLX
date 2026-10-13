@@ -205,7 +205,11 @@ pub fn encode_command_header(header: &CommandHeader) -> Option<[u8; COMMAND_HEAD
 /// an empty or odd-length region, an address that is not word aligned, or a region over 4 MiB.
 #[must_use]
 pub fn prdt_entry(address: u64, bytes: u32) -> Option<[u8; PRDT_ENTRY_LEN]> {
-    if bytes == 0 || bytes > PRDT_MAX_BYTES || !bytes.is_multiple_of(2) || !address.is_multiple_of(2) {
+    if bytes == 0
+        || bytes > PRDT_MAX_BYTES
+        || !bytes.is_multiple_of(2)
+        || !address.is_multiple_of(2)
+    {
         return None;
     }
     let mut out = [0u8; PRDT_ENTRY_LEN];
