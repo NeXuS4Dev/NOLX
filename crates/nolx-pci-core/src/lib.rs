@@ -281,11 +281,7 @@ const fn size_from_mask(mask: u64, width: u32) -> Option<u64> {
     } else {
         size
     };
-    if size == 0 {
-        None
-    } else {
-        Some(size)
-    }
+    if size == 0 { None } else { Some(size) }
 }
 
 /// The decoded BARs of a type-0 function.
@@ -531,7 +527,9 @@ fn record<C: ConfigSpace>(
     bus: u8,
 ) {
     let _ = inventory.push(info);
-    if info.class == CLASS_BRIDGE && info.subclass == SUBCLASS_PCI_BRIDGE && info.header_type == 1
+    if info.class == CLASS_BRIDGE
+        && info.subclass == SUBCLASS_PCI_BRIDGE
+        && info.header_type == 1
     {
         let secondary = (cfg.read_u32(info.bdf, OFF_SECONDARY_BUS) >> 8) as u8;
         if secondary > bus && !reached[secondary as usize] {

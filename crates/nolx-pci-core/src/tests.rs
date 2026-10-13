@@ -40,7 +40,7 @@ impl Regs {
 /// A machine: a set of functions at fixed addresses. Anything else reads as "no device".
 struct Machine {
     functions: Vec<(Bdf, Regs)>,
-    /// Writes that landed, so restore-after-probe can be checked.
+    /// Every write that reached configuration space, so restore-after-probe can be checked.
     writes: Vec<(Bdf, u8, u32)>,
 }
 
@@ -86,6 +86,10 @@ fn bdf(bus: u8, device: u8, function: u8) -> Bdf {
     Bdf::new(bus, device, function).expect("valid test address")
 }
 
+fn cap(offset: u8, id: u8) -> Capability {
+    Capability { offset, id }
+}
+
 #[test]
 fn config_address_packs_bus_device_function_and_dword() {
     // enable | bus 1 << 16 | device 2 << 11 | function 3 << 8 | dword 0x0C
@@ -118,7 +122,7 @@ fn a_present_function_reports_its_identity_and_multifunction_bit() {
     assert_eq!(info.device_id, 0x1237);
     assert_eq!(
         (info.class, info.subclass, info.prog_if, info.revision),
-        (6, 0, 2, 7)
+        (6, 0, 2, 7),
     );
     assert_eq!(info.header_type, 0);
     assert!(info.multifunction);
@@ -137,23 +141,23 @@ fn memory_bars_decode_width_and_prefetch() {
         decode_bar(0xFEBC_0008, 0),
         Bar::Memory32 {
             base: 0xFEBC_0000,
-            prefetchable: true
-        }
+            prefetchable: true,
+        },
     );
     assert_eq!(
         decode_bar(0xFEBC_0000, 0),
         Bar::Memory32 {
             base: 0xFEBC_0000,
-            prefetchable: false
-        }
+            prefetchable: false,
+        },
     );
     // Type 0b10 is a 64-bit window: the high dword supplies bits 63:32.
     assert_eq!(
         decode_bar(0x0010_0004, 0x0000_0002),
         Bar::Memory64 {
             base: 0x2_0010_0000,
-            prefetchable: false
-        }
+            prefetchable: false,
+        },
     );
     // Type 0b01 is the legacy below-1-MiB window, reserved in PCI 3.0; refused, not misread.
     assert_eq!(decode_bar(0x0000_0002, 0), Bar::Reserved);
@@ -205,8 +209,8 @@ fn bars_are_sized_decoded_and_restored() {
         set.slots[0],
         Bar::Memory64 {
             base: 0x2_0010_0000,
-            prefetchable: true
-        }
+            prefetchable: true,
+        },
     );
     assert_eq!(set.slots[1], Bar::Unused);
     assert_eq!(set.sizes[0], Some(0x10_0000));
@@ -214,8 +218,8 @@ fn bars_are_sized_decoded_and_restored() {
         set.slots[2],
         Bar::Memory32 {
             base: 0xFEBC_0000,
-            prefetchable: false
-        }
+            prefetchable: false,
+        },
     );
     assert_eq!(set.sizes[2], Some(0x4000));
     assert_eq!(set.slots[3], Bar::Unused);
@@ -249,30 +253,14 @@ fn the_capability_list_is_walked_in_link_order() {
     let mut regs = Regs::endpoint(0x8086, 0x2, 0x02, 0x00, false);
     regs.values[1] = STATUS_CAP_LIST; // status bit 4
     regs.values[13] = 0x50; // capability pointer at 0x34
-    regs.values[0x50 / 4] = 0x0000_6001 | 0x0000_0000; // id 0x01 (power), next 0x60
+    regs.values[0x50 / 4] = 0x0000_6001; // id 0x01 (power), next 0x60
     regs.values[0x60 / 4] = 0x0000_7005; // id 0x05 (MSI), next 0x70
     regs.values[0x70 / 4] = 0x0000_0011; // id 0x11 (MSI-X), end of list
     machine.add(bdf(0, 1, 0), regs);
     let list = capabilities(&mut machine, bdf(0, 1, 0));
     assert!(!list.truncated);
-    assert_eq!(
-        list.as_slice(),
-        &[
-            Capability {
-                offset: 0x50,
-                id: 0x01,
-            },
-            Capability {
-                offset: 0x60,
-                id: 0x05,
-            },
-            Capability {
-                offset: 0x70,
-                id: 0x11,
-            },
-        ]
-    );
-    assert_eq!(list.find(0x05).map(|cap| cap.offset), Some(0x60));
+    assert_eq!(list.as_slice(), &[cap(0x50, 0x01), cap(0x60, 0x05), cap(0x70, 0x11)]);
+    assert_eq!(list.find(0x05).map(|entry| entry.offset), Some(0x60));
     assert_eq!(list.find(0x10), None);
 }
 
@@ -307,22 +295,15 @@ fn enumeration_follows_multifunction_devices_and_secondary_buses() {
     machine.add(bdf(0, 2, 0), Regs::bridge(0x8086, 0x2448, 1));
     // Bus 1 holds an endpoint at 1:0.0.
     machine.add(bdf(1, 0, 0), Regs::endpoint(0x10EC, 0x8168, 0x02, 0x00, false));
-    let inventory = enumerate(&mut machine);
 
+    let inventory = enumerate(&mut machine);
     let found: Vec<Bdf> = inventory.as_slice().iter().map(|info| info.bdf).collect();
-    assert_eq!(
-        found,
-        vec![
-            bdf(0, 0, 0),
-            bdf(0, 1, 0),
-            bdf(0, 1, 2),
-            bdf(0, 2, 0),
-            bdf(1, 0, 0),
-        ]
-    );
+    assert_eq!(found, vec![bdf(0, 0, 0), bdf(0, 1, 0), bdf(0, 1, 2), bdf(0, 2, 0), bdf(1, 0, 0)]);
     assert_eq!(inventory.refused_bridges, 0);
     assert!(!inventory.overflowed);
-    let nic = inventory.find_class(0x02, 0x00).expect("network controller on bus 1 is found");
+    let nic = inventory
+        .find_class(0x02, 0x00)
+        .expect("network controller on bus 1 is found");
     assert_eq!(nic.bdf, bdf(0, 1, 0));
 }
 

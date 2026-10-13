@@ -158,6 +158,9 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         exec::init(&mut console);
         psx::init(&mut console);
         io::init(&mut console);
+        // Device discovery: enumerate PCI configuration space before the timer starts, so the
+        // paired address/data port accesses have no competing interrupt-time users.
+        hal::pci::init(&mut console);
 
         hal::init_wall_clock(&mut console);
         let _ = writeln!(

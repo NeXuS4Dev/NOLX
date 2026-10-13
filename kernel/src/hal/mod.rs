@@ -18,6 +18,7 @@ pub mod hpet;
 pub mod interrupts;
 pub mod ioapic;
 pub mod multiboot;
+pub mod pci;
 pub mod pic;
 pub mod rtc;
 pub mod syscall;
@@ -247,6 +248,36 @@ pub unsafe fn outb(port: u16, value: u8) {
     //
     // SAFETY: the caller asserts the port is valid and accepts the write.
     unsafe { core::arch::asm!("out dx, al", in("dx") port, in("al") value, options(nostack)) };
+}
+
+/// Read a 32-bit value from an I/O port.
+///
+/// # Safety
+///
+/// As [`inb`]. A 32-bit port access is one instruction, so it is atomic with respect to
+/// other CPUs' accesses to the same port; a *pair* of accesses (the PCI configuration address
+/// and data ports) is not, and the caller must serialize that pair itself.
+#[inline]
+pub unsafe fn inl(port: u16) -> u32 {
+    let value: u32;
+    // The same reasoning as [`inb`] applies: a port read is a side effect, so neither `nomem`
+    // nor `preserves_flags` is claimed.
+    //
+    // SAFETY: the caller asserts the port is valid, and `out("eax")` ties the result to the
+    // register the instruction writes.
+    unsafe { core::arch::asm!("in eax, dx", out("eax") value, in("dx") port, options(nostack)) };
+    value
+}
+
+/// Write a 32-bit value to an I/O port.
+///
+/// # Safety
+///
+/// As [`outb`], and the same pairing caveat as [`inl`].
+#[inline]
+pub unsafe fn outl(port: u16, value: u32) {
+    // SAFETY: the caller asserts the port is valid and accepts the write.
+    unsafe { core::arch::asm!("out dx, eax", in("dx") port, in("eax") value, options(nostack)) };
 }
 
 /// Read a 32-bit model-specific register.
