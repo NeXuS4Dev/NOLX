@@ -551,15 +551,21 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
 
 ## M9 — Devices and drivers
 
-**Status: started.** First slice landed on branch `arena/d71a2d5c-nolx`: `crates/nolx-pci-core`
-holds the host-testable PCI configuration-space logic -- `0xCF8` address encoding, function
-identity, BAR decoding and sizing with restore-after-probe, capability-list walking with a
-bounded loop guard, and bridge-aware bus enumeration -- behind a `ConfigSpace` trait. Assertions
-PCI-001 to PCI-008 are `tested-T1` and PCI-009 is `tested-T2` in `docs/testing/assertions/pci.md`;
-the kernel binds the logic to ports `0xCF8`/`0xCFC` and prints the inventory during boot (CI run
-[38370090989](https://github.com/NeXuS4Dev/NOLX/actions/runs/38370090989)). Not yet done: BAR
-sizing at boot, PCIe ECAM, MSI/MSI-X, and every driver below.
+**Status: started.** Slices landed on branch `arena/d71a2d5c-nolx`:
 
+- PCI (`crates/nolx-pci-core`): configuration-space logic (`0xCF8` addressing, function identity,
+  BAR decoding and sizing with restore-after-probe, capability walking with a loop guard,
+  bridge-aware enumeration), bound to ports `0xCF8`/`0xCFC` and reported at boot. BAR sizing runs
+  for type-0 functions. PCI-001 to PCI-008 are `tested-T1`; PCI-009 and PCI-010 are `tested-T2`
+  (CI runs [38370090989](https://github.com/NeXuS4Dev/NOLX/actions/runs/38370090989) and
+  [38371460597](https://github.com/NeXuS4Dev/NOLX/actions/runs/38371460597)).
+- virtio (`crates/nolx-virtio-core`, in progress): host-tested transport rules (capability
+  discovery, notify address, feature negotiation, status sequence, split virtqueue layout,
+  block request format). VIO-001 to VIO-009 are `tested-T1` in `docs/testing/assertions/drv.md`.
+  Not yet done: the kernel MMIO mapping facility (virtio BARs sit above the 2 GiB direct map),
+  the virtio-blk probe, and the CI QEMU disk.
+
+Not yet done: PCIe ECAM, MSI/MSI-X, and every driver below.
 
 - PCI/PCIe enumeration, BAR assignment, MSI/MSI-X, capability walking.
 - Storage: AHCI (SATA), NVMe, virtio-blk; block layer with partitions (GPT), request
