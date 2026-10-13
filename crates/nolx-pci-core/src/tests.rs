@@ -120,10 +120,7 @@ fn a_present_function_reports_its_identity_and_multifunction_bit() {
     let info = read_function(&mut machine, bdf(0, 1, 0)).expect("present");
     assert_eq!(info.vendor_id, 0x8086);
     assert_eq!(info.device_id, 0x1237);
-    assert_eq!(
-        (info.class, info.subclass, info.prog_if, info.revision),
-        (6, 0, 2, 7),
-    );
+    assert_eq!((info.class, info.subclass, info.prog_if, info.revision), (6, 0, 2, 7));
     assert_eq!(info.header_type, 0);
     assert!(info.multifunction);
 }
