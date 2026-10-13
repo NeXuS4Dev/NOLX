@@ -4,7 +4,7 @@ Source: NOLX M9 -- `ROADMAP.md` (Devices and drivers, block layer with partition
 `crates/nolx-block-core`. The rules are taken from the UEFI specification's GUID Partition Table
 chapter (header layout, header and table CRC-32, entry layout, usable area). Cited from the
 specification's published structure, not from a fetched copy. The crate is host-tested only; no
-kernel path reads a GPT yet. All rows are `tested-T1` pending the CI host-test job.
+kernel path reads a GPT yet. All rows are `tested-T1`: the host tests passed in CI (run [38444462222](https://github.com/NeXuS4Dev/NOLX/actions/runs/38444462222), host-test job).
 
 Rows are pipe-delimited: `ID | specification reference | status | test`.
 
