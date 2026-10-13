@@ -572,18 +572,19 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   known pattern (run [38404754464](https://github.com/NeXuS4Dev/NOLX/actions/runs/38404754464)).
 - virtio-blk writes: a 2 KiB pattern is written to sectors 1600 to 1603, read back, and checked by
   CRC-32; CI checksums the same sectors in the disk image after QEMU exits. VIO-013 is
-  `tested-T1`. VIO-014 and VIO-015 were `tested-T2` at run
-  [38442239670](https://github.com/NeXuS4Dev/NOLX/actions/runs/38442239670), when the pattern was
-  at sectors 8 to 11. They are `pending-T2` again because the round trip moved to 1600 to 1603.
+  `tested-T1`. VIO-014 and VIO-015 are `tested-T2` (run [38456685552](https://github.com/NeXuS4Dev/NOLX/actions/runs/38456685552)). They were first
+  `tested-T2` at run [38442239670](https://github.com/NeXuS4Dev/NOLX/actions/runs/38442239670),
+  when the pattern was at sectors 8 to 11.
 - GPT rules (`crates/nolx-block-core`): header signature, revision, header and table CRC-32,
   the own-LBA and reserved-field checks, entry size, usable area, partition range, and overlap.
   BLK-001 to BLK-021 are `tested-T1`.
 - GPT on the virtio disk: CI attaches an image from `tools/make-test-disk.py` with two partitions.
   The probe reads the header and table through the queue, checks them, and prints the partitions.
-  BLK-022 and BLK-023 are `pending-T2` until a CI run asserts their new lines.
+  BLK-022 and BLK-023 are `tested-T2` (run [38456685552](https://github.com/NeXuS4Dev/NOLX/actions/runs/38456685552)).
 - NOLXFS on the first partition: the kernel formats it when it holds no volume, writes an 8 KiB file,
   commits, mounts the volume again from the disk, and reads the file back. CI compares the checksum
-  with the pattern and runs `fsck.nolxfs` on the partition. BLK-024 and BLK-025 are `pending-T2`.
+  with the pattern and runs `fsck.nolxfs` on the partition. BLK-024 and BLK-025 are `tested-T2`
+  (run [38456685552](https://github.com/NeXuS4Dev/NOLX/actions/runs/38456685552)).
   Not yet done: interrupts, and the other storage backends (AHCI, NVMe).
 
 Not yet done: PCIe ECAM, MSI/MSI-X, and every driver below.

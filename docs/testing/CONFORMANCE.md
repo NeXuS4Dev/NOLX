@@ -12,19 +12,19 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 |---|---|---|
 | `unimplemented` | 0 | 100.0% |
 | `implemented` | 4 | 100.0% |
-| `tested-T1` | 163 | 95.3% |
-| `pending-T2` | 6 | — |
-| `tested-T2` | 38 | 18.0% |
+| `tested-T1` | 163 | 98.1% |
+| `pending-T2` | 0 | — |
+| `tested-T2` | 44 | 20.9% |
 | `tested-T3` | 0 | 0.0% |
 
-**201 of 211 assertions have a passing automated test; 6 are awaiting T2 results.**
+**207 of 211 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
 | Area | Assertions | Implemented | Tested (T1) | Pending (T2) | Tested (T2) | Tested (T3) |
 |---|---|---|---|---|---|---|
-| blk | 25 | 25 | 21 | 4 | 0 | 0 |
-| drv | 20 | 20 | 15 | 2 | 3 | 0 |
+| blk | 25 | 25 | 21 | 0 | 4 | 0 |
+| drv | 20 | 20 | 15 | 0 | 5 | 0 |
 | elf | 3 | 3 | 3 | 0 | 0 | 0 |
 | exec | 12 | 12 | 9 | 0 | 3 | 0 |
 | hal | 25 | 25 | 11 | 0 | 10 | 0 |
@@ -48,16 +48,9 @@ None.
 | HAL-020 | HPET clocksource: 32-bit MMIO reads and wrap extension produce monotonic nanoseconds |
 | HAL-021 | I/O APIC routes: GSI windows and ISA overrides are validated, redirections start masked, and NMI sources use MADT polarity/trigger flags |
 
-## Pending T2 verification (6)
+## Pending T2 verification (0)
 
-| ID | Specification reference | Configured test |
-|---|---|---|
-| BLK-022 | NOLX M9 GPT on a real disk: the probe reads LBA 1 through the queue, checks the header with the GPT rules, reads the table it names in requests of 2 KiB, verifies the table CRC-32, and reports the partitions in use | `.github/workflows/ci.yml` boot-smoke asserts `virtio-blk: gpt: header and table verified, 2 partitions in use`; kernel/src/hal/virtio_blk.rs read_partitions |
-| BLK-023 | NOLX M9 GPT partitions: each used entry is printed with its LBA range, sector count, and name as `tools/make-test-disk.py` wrote them | `.github/workflows/ci.yml` boot-smoke asserts the lines `virtio-blk: gpt partition 0: LBA 40-1039 (1000 sectors), name nolx-data` and `... 1: LBA 1200-1299 (100 sectors), name nolx-log` |
-| BLK-024 | NOLX M9 NOLXFS on a partition: the kernel mounts the first partition in use as a NOLXFS volume, formatting it first when it holds none; writes an 8 KiB file; commits; mounts the volume again from the same device; and reads back identical bytes | `.github/workflows/ci.yml` boot-smoke asserts `virtio-blk: nolxfs file checksum.bin: 8192 bytes written, committed, mounted again, read back, crc32 0x... matches the written data`; kernel/src/hal/virtio_volume.rs run |
-| BLK-025 | NOLX M9 Volume on disk after QEMU: the checksum the kernel read back equals the checksum of the pattern it wrote, and `fsck.nolxfs` reports the partition's volume clean | `.github/workflows/ci.yml` step "The NOLXFS volume holds the file and checks clean" compares the printed checksum with the expected pattern, then runs `fsck.nolxfs` on the partition extracted from `build/disk.img` |
-| VIO-014 | NOLX M9 Round trip through the device: a 2 KiB pattern written to sectors 1600 to 1603 is read back into a cleared buffer, and the bytes are identical | `.github/workflows/ci.yml` boot-smoke asserts `virtio-blk: wrote 4 sectors at 1600, read back, crc32 0x... matches the written data`; kernel/src/hal/virtio_blk.rs round_trip |
-| VIO-015 | NOLX M9 Write persists to the disk: the disk image, after QEMU exits, has the same CRC-32 over sectors 1600 to 1603 that the kernel computed over the data it wrote | `.github/workflows/ci.yml` step "The written sectors are on the disk image" compares `zlib.crc32` of `build/disk.img` sectors 1600 to 1603 with the kernel's printed checksum |
+None.
 
 ## All assertions
 
@@ -84,10 +77,10 @@ None.
 | BLK-019 | blk | NOLX M9 GPT: Two used partitions that share a block are refused | `tested-T1` | nolx-block-core tests::two_partitions_sharing_a_block_are_refused |
 | BLK-020 | blk | NOLX M9 GPT: Partitions that touch without sharing a block are accepted | `tested-T1` | nolx-block-core tests::adjacent_partitions_do_not_overlap |
 | BLK-021 | blk | NOLX M9 GPT: An unused entry is not range-checked, whatever its bounds hold | `tested-T1` | nolx-block-core tests::an_unused_entry_is_not_checked_at_all |
-| BLK-022 | blk | NOLX M9 GPT on a real disk: the probe reads LBA 1 through the queue, checks the header with the GPT rules, reads the table it names in requests of 2 KiB, verifies the table CRC-32, and reports the partitions in use | `pending-T2` | `.github/workflows/ci.yml` boot-smoke asserts `virtio-blk: gpt: header and table verified, 2 partitions in use`; kernel/src/hal/virtio_blk.rs read_partitions |
-| BLK-023 | blk | NOLX M9 GPT partitions: each used entry is printed with its LBA range, sector count, and name as `tools/make-test-disk.py` wrote them | `pending-T2` | `.github/workflows/ci.yml` boot-smoke asserts the lines `virtio-blk: gpt partition 0: LBA 40-1039 (1000 sectors), name nolx-data` and `... 1: LBA 1200-1299 (100 sectors), name nolx-log` |
-| BLK-024 | blk | NOLX M9 NOLXFS on a partition: the kernel mounts the first partition in use as a NOLXFS volume, formatting it first when it holds none; writes an 8 KiB file; commits; mounts the volume again from the same device; and reads back identical bytes | `pending-T2` | `.github/workflows/ci.yml` boot-smoke asserts `virtio-blk: nolxfs file checksum.bin: 8192 bytes written, committed, mounted again, read back, crc32 0x... matches the written data`; kernel/src/hal/virtio_volume.rs run |
-| BLK-025 | blk | NOLX M9 Volume on disk after QEMU: the checksum the kernel read back equals the checksum of the pattern it wrote, and `fsck.nolxfs` reports the partition's volume clean | `pending-T2` | `.github/workflows/ci.yml` step "The NOLXFS volume holds the file and checks clean" compares the printed checksum with the expected pattern, then runs `fsck.nolxfs` on the partition extracted from `build/disk.img` |
+| BLK-022 | blk | NOLX M9 GPT on a real disk: the probe reads LBA 1 through the queue, checks the header with the GPT rules, reads the table it names in requests of 2 KiB, verifies the table CRC-32, and reports the partitions in use | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `virtio-blk: gpt: header and table verified, 2 partitions in use`; kernel/src/hal/virtio_blk.rs read_partitions Passed in CI run [38456685552](https://github.com/NeXuS4Dev/NOLX/actions/runs/38456685552). |
+| BLK-023 | blk | NOLX M9 GPT partitions: each used entry is printed with its LBA range, sector count, and name as `tools/make-test-disk.py` wrote them | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts the lines `virtio-blk: gpt partition 0: LBA 40-1039 (1000 sectors), name nolx-data` and `... 1: LBA 1200-1299 (100 sectors), name nolx-log` Passed in CI run [38456685552](https://github.com/NeXuS4Dev/NOLX/actions/runs/38456685552). |
+| BLK-024 | blk | NOLX M9 NOLXFS on a partition: the kernel mounts the first partition in use as a NOLXFS volume, formatting it first when it holds none; writes an 8 KiB file; commits; mounts the volume again from the same device; and reads back identical bytes | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `virtio-blk: nolxfs file checksum.bin: 8192 bytes written, committed, mounted again, read back, crc32 0x... matches the written data`; kernel/src/hal/virtio_volume.rs run Passed in CI run [38456685552](https://github.com/NeXuS4Dev/NOLX/actions/runs/38456685552). |
+| BLK-025 | blk | NOLX M9 Volume on disk after QEMU: the checksum the kernel read back equals the checksum of the pattern it wrote, and `fsck.nolxfs` reports the partition's volume clean | `tested-T2` | `.github/workflows/ci.yml` step "The NOLXFS volume holds the file and checks clean" compares the printed checksum with the expected pattern, then runs `fsck.nolxfs` on the partition extracted from `build/disk.img` Passed in CI run [38456685552](https://github.com/NeXuS4Dev/NOLX/actions/runs/38456685552). |
 | ELF-001 | elf | An x86-64 ELF64 executable yields only a bounded load plan whose file ranges, user virtual ranges, alignment, non-overlapping PT_LOAD segments, executable entry point, PT_INTERP path, PT_TLS template, and PT_GNU_STACK permission metadata have been validated | `tested-T1` | `crates/nolx-exec-core/src/elf.rs` tests `plans_nonoverlapping_executable_and_data_segments`, `rejects_short_bad_magic_and_unsupported_images`, `rejects_program_header_table_outside_the_file`, `rejects_missing_or_unbounded_program_header_tables`, `rejects_more_load_segments_than_the_fixed_plan_holds`, `rejects_inconsistent_sizes_and_writable_executable_segments`, `rejects_out_of_user_range_overlapping_and_non_executable_entry`, `records_interpreter_tls_and_executable_stack_metadata`, `rejects_malformed_interpreter_path`, and `rejects_tls_not_backed_by_a_load_segment`; host tests passed in [workflow 38163939179](https://github.com/NeXuS4Dev/NOLX/actions/runs/38163939179). |
 | ELF-002 | elf | The second loader stage turns an accepted plan into page-fill operations (zero every touched page, then copy file bytes, so shared pages and bss tails come out byte-exact), an `ET_DYN` bias bounded to the user interval and sensitive to entropy, validated `R_X86_64_RELATIVE` relocations, and a SysV-shaped initial stack (argc/argv/envp/auxv/AT_RANDOM/AT_EXECFN, 16-byte-aligned `%rsp`) | `tested-T1` | `crates/nolx-exec-core/src/image.rs` tests `page_fills_zero_every_touched_page_then_copy_file_bytes`, `page_fills_apply_the_bias_to_every_address`, `dyn_bias_is_entropy_sensitive_bounded_and_zero_for_exec`, `relative_relocations_are_collected_biased_and_bounded`, `unsupported_and_unmapped_relocations_are_refused`, `static_images_carry_no_relocations`, `stack_image_carries_argc_argv_envp_auxv_and_entropy`, `stack_image_rejects_bad_strings_and_oversized_requests`, and `empty_images_still_build_a_zero_argument_stack`. |
 | ELF-003 | elf | The embedded `hello` and `init` ring-3 programs are byte-deterministic static x86-64 ET_EXEC images that parse through the kernel's own load plan, place their entry bytes at their entry addresses when the page plan is applied, and carry exactly the lines the boot test waits for | `tested-T1` | `crates/nolx-exec-core/src/image.rs` tests `the_embedded_programs_plan_like_the_kernel_will_load_them` and `the_embedded_programs_carry_the_lines_the_boot_test_waits_for`; generated by `tools/user-elf/gen.py`, checked by `make usercheck`. |
@@ -272,6 +265,6 @@ None.
 | VIO-011 | drv | NOLX M9 Device bring-up: the probe finds the virtio block device, resets it, steps through ACKNOWLEDGE, DRIVER, FEATURES_OK (read back), configures queue 0 with its three ring addresses, sets DRIVER_OK, and reports the capacity | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `virtio-blk: BB:DD.F capacity N sectors (N bytes), queue size N, driver ok`; kernel/src/hal/virtio_blk.rs bring_up; QEMU run with `-drive` and `-device virtio-blk-pci`; workflow [38404754464](https://github.com/NeXuS4Dev/NOLX/actions/runs/38404754464) on the final revision passed all six jobs. |
 | VIO-012 | drv | NOLX M9 Polled block read: sector 0 is read through the queue, the device completes it with status OK, and the data matches the disk image's sector 0 | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `virtio-blk: sector 0 read, status ok, first 16 bytes match the disk image`; kernel/src/hal/virtio_blk.rs read_sector_zero; workflow [38404754464](https://github.com/NeXuS4Dev/NOLX/actions/runs/38404754464) on the final revision passed all six jobs. |
 | VIO-013 | drv | NOLX M9 Write request rules: a write is a three-descriptor chain with the header and data device-readable and the status device-writable; the CRC-32 used to check the round trip matches the standard check value | `tested-T1` | nolx-virtio-core tests::a_write_chain_makes_the_data_device_readable, tests::crc32_matches_the_standard_check_value |
-| VIO-014 | drv | NOLX M9 Round trip through the device: a 2 KiB pattern written to sectors 1600 to 1603 is read back into a cleared buffer, and the bytes are identical | `pending-T2` | `.github/workflows/ci.yml` boot-smoke asserts `virtio-blk: wrote 4 sectors at 1600, read back, crc32 0x... matches the written data`; kernel/src/hal/virtio_blk.rs round_trip |
-| VIO-015 | drv | NOLX M9 Write persists to the disk: the disk image, after QEMU exits, has the same CRC-32 over sectors 1600 to 1603 that the kernel computed over the data it wrote | `pending-T2` | `.github/workflows/ci.yml` step "The written sectors are on the disk image" compares `zlib.crc32` of `build/disk.img` sectors 1600 to 1603 with the kernel's printed checksum |
+| VIO-014 | drv | NOLX M9 Round trip through the device: a 2 KiB pattern written to sectors 1600 to 1603 is read back into a cleared buffer, and the bytes are identical | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `virtio-blk: wrote 4 sectors at 1600, read back, crc32 0x... matches the written data`; kernel/src/hal/virtio_blk.rs round_trip Passed in CI run [38456685552](https://github.com/NeXuS4Dev/NOLX/actions/runs/38456685552). |
+| VIO-015 | drv | NOLX M9 Write persists to the disk: the disk image, after QEMU exits, has the same CRC-32 over sectors 1600 to 1603 that the kernel computed over the data it wrote | `tested-T2` | `.github/workflows/ci.yml` step "The written sectors are on the disk image" compares `zlib.crc32` of `build/disk.img` sectors 1600 to 1603 with the kernel's printed checksum Passed in CI run [38456685552](https://github.com/NeXuS4Dev/NOLX/actions/runs/38456685552). |
 
