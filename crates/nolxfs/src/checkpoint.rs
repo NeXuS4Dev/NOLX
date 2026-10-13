@@ -726,6 +726,43 @@ pub fn clear_descriptor<D: BlockDevice>(dev: &mut D, block: u64) -> Result<()> {
     Ok(())
 }
 
+/// Collect the spill blocks carrying the checkpoint whose volume superblock
+/// copy lives at `vsb_block`, in chain order (empty when the state fit inline).
+///
+/// # Errors
+///
+/// Device or corruption errors in the spill chain.
+pub fn spill_blocks<D: BlockDevice>(dev: &D, vsb_block: u64) -> Result<Vec<u64>> {
+    let block_size = dev.block_size();
+    let mut vsb_raw = vec![0u8; block_size];
+    dev.read_block(vsb_block, &mut vsb_raw)?;
+    on_disk::ObjRef::parse(&vsb_raw, gen::OBJ_VOLUME_SUPERBLOCK)?;
+    let mut next = u64::from_le_bytes(
+        vsb_raw[VSB_RESERVED_OFF..VSB_RESERVED_OFF + 8]
+            .try_into()
+            .map_err(|_| FsError::CorruptNode("state spill pointer truncated"))?,
+    );
+    let mut out = Vec::new();
+    while next != 0 {
+        if next >= dev.block_count() {
+            return Err(FsError::BlockOutOfRange(next));
+        }
+        let mut raw = vec![0u8; block_size];
+        dev.read_block(next, &mut raw)?;
+        on_disk::ObjRef::parse(&raw, gen::OBJ_CHECKPOINT_MAP)?;
+        out.push(next);
+        next = u64::from_le_bytes(
+            raw[40..48]
+                .try_into()
+                .map_err(|_| FsError::CorruptNode("spill header truncated"))?,
+        );
+        if out.len() > 1_000_000 {
+            return Err(FsError::CorruptNode("spill chain does not terminate"));
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -827,39 +864,3 @@ mod tests {
     }
 }
 
-/// Collect the spill blocks carrying the checkpoint whose volume superblock
-/// copy lives at `vsb_block`, in chain order (empty when the state fit inline).
-///
-/// # Errors
-///
-/// Device or corruption errors in the spill chain.
-pub fn spill_blocks<D: BlockDevice>(dev: &D, vsb_block: u64) -> Result<Vec<u64>> {
-    let block_size = dev.block_size();
-    let mut vsb_raw = vec![0u8; block_size];
-    dev.read_block(vsb_block, &mut vsb_raw)?;
-    on_disk::ObjRef::parse(&vsb_raw, gen::OBJ_VOLUME_SUPERBLOCK)?;
-    let mut next = u64::from_le_bytes(
-        vsb_raw[VSB_RESERVED_OFF..VSB_RESERVED_OFF + 8]
-            .try_into()
-            .map_err(|_| FsError::CorruptNode("state spill pointer truncated"))?,
-    );
-    let mut out = Vec::new();
-    while next != 0 {
-        if next >= dev.block_count() {
-            return Err(FsError::BlockOutOfRange(next));
-        }
-        let mut raw = vec![0u8; block_size];
-        dev.read_block(next, &mut raw)?;
-        on_disk::ObjRef::parse(&raw, gen::OBJ_CHECKPOINT_MAP)?;
-        out.push(next);
-        next = u64::from_le_bytes(
-            raw[40..48]
-                .try_into()
-                .map_err(|_| FsError::CorruptNode("spill header truncated"))?,
-        );
-        if out.len() > 1_000_000 {
-            return Err(FsError::CorruptNode("spill chain does not terminate"));
-        }
-    }
-    Ok(out)
-}

@@ -1842,13 +1842,31 @@ impl<D: BlockDevice> Volume<D> {
         };
         self.ensure_txn()?;
         let bs = self.dev.block_size() as u64;
+        // Extent blocks the snapshot references are protected by the reaper
+        // horizon, not by the live refcount: leave every block the live tree
+        // still references alone, and never defer a block twice (the space
+        // manager rejects double frees). The snapshot's tree blocks were
+        // already deferred when the snapshot was created; they simply become
+        // reapable now that the horizon can advance past them.
+        let mut backlogged: alloc::collections::BTreeSet<u64> = self
+            .reaper
+            .entries()
+            .iter()
+            .flat_map(|e| (e.block..e.block + e.len))
+            .collect();
         for extent in &snap_extents {
             for i in 0..extent.len.div_ceil(bs) {
-                self.release_extent_block(extent.phys + i)?;
+                let block = extent.phys + i;
+                if self.extent_refcount(block)? == 0
+                    && block >= self.layout.first_data_block
+                    && backlogged.insert(block)
+                {
+                    self.reaper.defer(block, 1, self.pending_xid);
+                }
             }
         }
         for block in snap_tree_blocks {
-            if block >= self.layout.first_data_block {
+            if block >= self.layout.first_data_block && backlogged.insert(block) {
                 self.reaper.defer(block, 1, self.pending_xid);
             }
         }

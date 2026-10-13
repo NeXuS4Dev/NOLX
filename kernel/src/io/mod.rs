@@ -408,6 +408,9 @@ fn run_vfs_selftest(console: &mut dyn HalConsole) -> Result<(), &'static str> {
 
     // 5. Exercise the M8 NOLXFS operations through the VFS: hard links,
     // symlinks, rename, mkdir/rmdir and unlink, all COW-persisted.
+    if vfs.stat(&ctx, b"/mnt/nolxfs/boot.txt", Final::Follow).is_err() {
+        return Err("vfs selftest: nolxfs stat before link failed");
+    }
     vfs.link(&ctx, b"/mnt/nolxfs/boot.txt", b"/mnt/nolxfs/boot-link.txt")
         .map_err(|e| match e {
             errno::ENOENT => "vfs selftest: nolxfs link failed (ENOENT)",

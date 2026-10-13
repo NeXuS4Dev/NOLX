@@ -746,7 +746,7 @@ mod tests {
         let mut dev = healthy_device();
         let info = mkfs::probe(&mut dev).unwrap();
         {
-            let mut spaceman = SpaceMan::open(&mut dev, &info.layout).unwrap();
+            let mut spaceman = SpaceMan::open(&dev, &info.layout).unwrap();
             // Allocate a block nothing references: a leak.
             let leaked = spaceman.alloc_block().unwrap();
             spaceman.flush(&mut dev, info.layout.spaceman, 9).unwrap();
