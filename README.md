@@ -42,6 +42,8 @@ resolved in one place only: `kernel/src/psx/` (see
 | `crates/nolxfs/` | NOLXFS on-disk format, Fletcher-64, B-tree, mkfs/fsck logic |
 | `crates/nolx-vfs/` | I/O Manager (IORB, driver/device stacks, completion ports, cancellation), Cache Manager, VFS (`namei`, mount propagation, `pivot_root`, `fcntl`, `umask`, `chroot`), and filesystems (`devfs`, `tmpfs`, `initrd` cpio/tar, `NOLXFS` VFS) |
 | `tools/mkfs-nolxfs/` | `mkfs.nolxfs` host tool |
+| `tools/fsck-nolxfs/` | `fsck.nolxfs` host tool (check + safe repair) |
+| `tools/nolxfs-dump/` | `nolxfs-dump` host tool (read-only dump/ls/cat/stat, the FUSE-less mounter) |
 | `tools/nolxfs-codegen/` | Single-source-of-truth generator for NOLXFS on-disk layouts |
 | `userspace/` | libc, shell, coreutils, window server (later milestones) |
 | `docs/` | Architecture, on-disk formats, conformance strategy, build guide |
@@ -76,7 +78,8 @@ Milestone tracking lives in [ROADMAP.md](ROADMAP.md). Current state:
 | M5 — Executive core: processes, threads, dispatcher | **done** — host-tested process/thread, scheduler, dispatcher, DPC, and lock contracts; QEMU process/thread self-tests and the preemptive `ABCABCABCABC` trace pass in CI (see [run 38162486568](https://github.com/NeXuS4Dev/NOLX/actions/runs/38162486568)) |
 | M6 — User mode, ELF, and syscall ABI | **done** — ring-3 `syscall`/`sysret` with TSS.RSP0 and per-thread GS discipline; ELF64 loader (`ET_EXEC`/`ET_DYN`, ASLR, `R_X86_64_RELATIVE`, auxv/initial stack); `nxposix_spawn`/`waitid`/`write`/`exit`/`getpid`; T2 ring-3 `hello world` exits 42 with a parent-observed status in CI; T1 syscall-table uniqueness and ABI round-trip (see [ROADMAP.md](ROADMAP.md)) |
 | M7 — I/O Manager, VFS, and the first filesystems | **done** — IORB with 8-deep stack locations, completion routines, async completion ports, cancellation, and reference-tracked driver unload; Cache Manager (`SharedCacheMap`, read-ahead, lazy writer, `MmFlushSection`); VFS (`FileObject`, `namei`, `pathconf`, mount propagation classes, `pivot_root`, `fcntl`, `umask`, `chroot`); `devfs`, `tmpfs`, `initrd` (cpio/tar), and `NOLXFS` VFS driver; T1 pathname/VFS/I/O/filesystem suites (102 tests in `nolx-vfs`) and T2 boot self-tests + ring-3 `tmpfs` read/write round-trip in CI (see [run 38240528081](https://github.com/NeXuS4Dev/NOLX/actions/runs/38240528081) and [ROADMAP.md](ROADMAP.md)) |
-| M8+ | planned |
+| M8 — NOLXFS | **implemented** — COW container with checkpoint ring and atomic descriptor-last commits, omap, split/merge B-trees, space manager + snapshot-horizon reaper, snapshots with read-only mount-at-snapshot, xattrs, hard links, clone_file; `mkfs.nolxfs`/`fsck.nolxfs`/`nolxfs-dump` host tools; VFS dispatch for rmdir/link/symlink/readlink/unlink/rename/truncate; assertions in `docs/testing/assertions/nxfs.md` (NXFS-001…015). CI verification run to be recorded here once green. |
+| M9+ | planned |
 
 ### What has actually been verified
 

@@ -75,6 +75,12 @@ impl fmt::Display for FsError {
             Self::UnsupportedFeature(bits) => write!(f, "unsupported feature bits {bits:#x}"),
             Self::CorruptNode(what) => write!(f, "corrupt B-tree node: {what}"),
             Self::ReadOnly => write!(f, "volume is mounted read-only"),
+            Self::NotFound => write!(f, "no such file or directory"),
+            Self::AlreadyExists => write!(f, "file exists"),
+            Self::NotDirectory => write!(f, "not a directory"),
+            Self::IsDirectory => write!(f, "is a directory"),
+            Self::NotEmpty => write!(f, "directory not empty"),
+            Self::NameTooLong => write!(f, "file name too long"),
             Self::Device(e) => write!(f, "device error: {e:?}"),
         }
     }

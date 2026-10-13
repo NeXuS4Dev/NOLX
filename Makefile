@@ -8,7 +8,7 @@
 #   make report     regenerate docs/testing/CONFORMANCE.md
 #   make iso        build/nolx.iso, bootable with GRUB
 #   make run        boot under QEMU with the serial console on stdio
-#   make mkfs       build tools/mkfs-nolxfs for the host
+#   make mkfs       build the host FS tools (mkfs/fsck/dump) into build/
 #   make fmt lint   formatting and lints
 #
 # `bootcheck` and `fscheck` are the checks that run anywhere -- a container with binutils
@@ -91,8 +91,10 @@ kernel: | $(BUILD)
 	@echo "built: $$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $(BUILD)/buildinfo.txt
 
 mkfs: | $(BUILD)
-	cargo build --release -p mkfs-nolxfs
+	cargo build --release -p mkfs-nolxfs -p fsck-nolxfs -p nolxfs-dump
 	cp target/release/mkfs-nolxfs $(BUILD)/mkfs.nolxfs
+	cp target/release/fsck-nolxfs $(BUILD)/fsck.nolxfs
+	cp target/release/nolxfs-dump $(BUILD)/nolxfs-dump
 
 iso: kernel | $(BUILD)
 	mkdir -p $(BUILD)/iso/boot/grub

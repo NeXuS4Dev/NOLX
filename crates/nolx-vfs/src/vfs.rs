@@ -343,8 +343,9 @@ impl VirtualFileSystem {
             .ok_or(errno::ENOENT)?;
         match fs {
             FsInstance::Tmpfs(t) => t.rmdir(parent.ino, name),
+            FsInstance::Nolxfs(n) => n.rmdir(parent.ino, name),
             FsInstance::Initrd(_) => Err(errno::EROFS),
-            FsInstance::Devfs(_) | FsInstance::Nolxfs(_) => Err(errno::ENOTSUP),
+            FsInstance::Devfs(_) => Err(errno::ENOTSUP),
         }
     }
 
@@ -366,8 +367,9 @@ impl VirtualFileSystem {
             .ok_or(errno::ENOENT)?;
         match fs {
             FsInstance::Tmpfs(t) => t.link(target.ino, new_dir.ino, new_name),
+            FsInstance::Nolxfs(n) => n.link(target.ino, new_dir.ino, new_name),
             FsInstance::Initrd(_) => Err(errno::EROFS),
-            FsInstance::Devfs(_) | FsInstance::Nolxfs(_) => Err(errno::ENOTSUP),
+            FsInstance::Devfs(_) => Err(errno::ENOTSUP),
         }
     }
 
@@ -382,8 +384,9 @@ impl VirtualFileSystem {
         let fs = self.filesystems.get_mut(&dir.mount).ok_or(errno::ENOENT)?;
         let ino = match fs {
             FsInstance::Tmpfs(t) => t.symlink(dir.ino, name, target, ctx.uid, ctx.gid)?,
+            FsInstance::Nolxfs(n) => n.symlink(dir.ino, name, target, ctx.uid, ctx.gid)?,
             FsInstance::Initrd(_) => return Err(errno::EROFS),
-            FsInstance::Devfs(_) | FsInstance::Nolxfs(_) => return Err(errno::ENOTSUP),
+            FsInstance::Devfs(_) => return Err(errno::ENOTSUP),
         };
         Ok(NodeId::new(dir.mount, ino))
     }
@@ -406,8 +409,9 @@ impl VirtualFileSystem {
                 t.unlink(dir.ino, name)?;
                 Ok(())
             }
+            FsInstance::Nolxfs(n) => n.unlink(dir.ino, name),
             FsInstance::Initrd(_) => Err(errno::EROFS),
-            FsInstance::Devfs(_) | FsInstance::Nolxfs(_) => Err(errno::ENOTSUP),
+            FsInstance::Devfs(_) => Err(errno::ENOTSUP),
         }
     }
 
@@ -429,8 +433,9 @@ impl VirtualFileSystem {
             .ok_or(errno::ENOENT)?;
         match fs {
             FsInstance::Tmpfs(t) => t.rename(old_dir.ino, old_name, new_dir.ino, new_name),
+            FsInstance::Nolxfs(n) => n.rename(old_dir.ino, old_name, new_dir.ino, new_name),
             FsInstance::Initrd(_) => Err(errno::EROFS),
-            FsInstance::Devfs(_) | FsInstance::Nolxfs(_) => Err(errno::ENOTSUP),
+            FsInstance::Devfs(_) => Err(errno::ENOTSUP),
         }
     }
 
@@ -504,8 +509,9 @@ impl VirtualFileSystem {
             if is_reg(st.st_mode) {
                 match self.filesystems.get_mut(&node.mount).ok_or(errno::ENOENT)? {
                     FsInstance::Tmpfs(t) => t.truncate(node.ino, 0)?,
+                    FsInstance::Nolxfs(n) => n.truncate(node.ino, 0)?,
                     FsInstance::Initrd(_) => return Err(errno::EROFS),
-                    FsInstance::Devfs(_) | FsInstance::Nolxfs(_) => {}
+                    FsInstance::Devfs(_) => {}
                 }
             }
         }
@@ -795,7 +801,8 @@ impl VirtualFileSystem {
         match fs {
             FsInstance::Tmpfs(t) => t.readlink(node.ino),
             FsInstance::Initrd(i) => i.readlink(node.ino),
-            FsInstance::Devfs(_) | FsInstance::Nolxfs(_) => Err(errno::EINVAL),
+            FsInstance::Nolxfs(n) => n.readlink(node.ino),
+            FsInstance::Devfs(_) => Err(errno::EINVAL),
         }
     }
 

@@ -1,0 +1,16 @@
+[package]
+name = "fsck-nolxfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "fsck.nolxfs: check and repair a NOLXFS container"
+readme = "../../README.md"
+default-run = "fsck-nolxfs"
+
+[[bin]]
+name = "fsck-nolxfs"
+path = "src/main.rs"
+
+[dependencies]
+nolxfs = { path = "../../crates/nolxfs" }

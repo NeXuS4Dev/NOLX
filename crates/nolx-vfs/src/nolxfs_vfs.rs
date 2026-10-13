@@ -1,38 +1,32 @@
 //! VFS driver for **NOLXFS** (`crates/nolxfs`).
 //!
-//! Bridges the on-disk NOLXFS v1 container, object map, and `fs-tree` B-tree (`KeyKind::JKey`)
-//! to the VFS layer:
+//! This is a thin adapter: the filesystem itself — checkpoint ring, copy-on-write
+//! B-trees, space manager, snapshots — lives in [`nolxfs::volume::Volume`], and
+//! this module translates its typed [`FsError`] results into the VFS layer's
+//! kernel-errno convention and presents the exact method set `vfs.rs` dispatches
+//! on (`mkdir`/`create_file`/`read`/`write`/`stat` plus the M8 additions
+//! `rmdir`/`link`/`symlink`/`readlink`/`unlink`/`rename`/`truncate`/`sync`).
 //!
-//! * **Mount ([`NolxfsVolume::mount`])**: runs [`nolxfs::mkfs::probe`] and
-//!   [`nolxfs::mkfs::read_root_inode`] to validate the container superblock, container object
-//!   map, volume superblock, volume object map, and root directory inode (`ROOT_INO = 2`),
-//!   checking every Fletcher-64 checksum before trusting any pointer.
-//! * **B-tree records (`nolx_j_key_t`)**: reads and writes `DREC_TYPE_INODE` (`nolx_inode_t`),
-//!   `DREC_TYPE_DIR_REC` (`nolx_dentry_key_t` -> `nolx_direntry_t`), and
-//!   `DREC_TYPE_FILE_EXTENT` (`nolx_file_extent_key_t` -> `nolx_file_extent_val_t`) records in
-//!   the volume's `fs-tree` via [`nolxfs::btree::BTree`].
-//! * **Physical extents**: stores regular file payloads in physical data blocks allocated from
-//!   the container's data region (`first_data_block..block_count`).
+//! Consistency with the host tools is structural: `mkfs.nolxfs`, `fsck.nolxfs`,
+//! `nolxfs-dump`, this driver and the kernel selftest all sit on the same
+//! `nolxfs` crate, so an image written by one is read identically by the others.
 
 use core::fmt;
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
-use alloc::vec;
 use alloc::vec::Vec;
 
 use nolx_types::errno;
-use nolx_types::scalars::{
-    is_dir, is_reg, Gid, Mode, Stat, Uid, NAME_MAX, S_IFDIR, S_IFMT, S_IFREG,
-};
+use nolx_types::scalars::{is_dir, is_reg, Gid, Mode, Stat, Uid, NAME_MAX};
 use nolxfs::blockdev::{BlockDevice, DevError};
-use nolxfs::btree::{BTree, BlockAllocator, KeyKind, Node};
 use nolxfs::mkfs::{self, FormatOptions, VolumeInfo};
-use nolxfs::on_disk::{extent_len, jkey_oid, jkey_type, pack_jkey, pack_len_and_flags, FsError};
-use nolxfs::{on_disk_gen as gen, Pod};
+use nolxfs::on_disk::FsError;
+use nolxfs::volume::Volume;
+use nolxfs::on_disk_gen as gen;
 
-/// Root directory inode number in NOLXFS (`gen::ROOT_INO == 2`).
+/// Root directory inode number in NOLXFS (`gen::ROOT_INO`).
 pub const NOLXFS_ROOT_INO: u64 = gen::ROOT_INO;
 
 /// Sparse in-memory [`BlockDevice`] that allocates storage only for blocks that have been
@@ -111,36 +105,23 @@ impl BlockDevice for SparseBlockDevice {
     }
 }
 
-struct LinearBlockAlloc {
-    next_block: u64,
-    block_count: u64,
-}
-
-impl BlockAllocator for LinearBlockAlloc {
-    fn alloc(&mut self) -> nolxfs::on_disk::Result<u64> {
-        if self.next_block >= self.block_count {
-            return Err(FsError::BlockOutOfRange(self.next_block));
-        }
-        let b = self.next_block;
-        self.next_block += 1;
-        Ok(b)
-    }
-}
-
 /// A mounted NOLXFS volume backed by a [`BlockDevice`].
+///
+/// Wraps [`nolxfs::volume::Volume`]; most operations are one-line translations.
+/// Mutations are buffered by the volume until [`NolxfsVolume::sync`] commits
+/// them as one checkpoint, which is how the VFS gets atomic multi-operation
+/// transactions without knowing about xids.
 pub struct NolxfsVolume<D: BlockDevice = SparseBlockDevice> {
-    dev: D,
+    inner: Volume<D>,
     info: Box<VolumeInfo>,
-    next_ino: u64,
-    alloc: LinearBlockAlloc,
 }
 
 impl<D: BlockDevice> fmt::Debug for NolxfsVolume<D> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NolxfsVolume")
             .field("name", &self.info.name)
-            .field("fs_tree_root", &self.info.layout.fs_tree_root)
-            .field("next_ino", &self.next_ino)
+            .field("fs_tree_root", &self.inner.fs_root())
+            .field("xid", &self.inner.xid())
             .finish()
     }
 }
@@ -149,76 +130,51 @@ impl NolxfsVolume<SparseBlockDevice> {
     /// Format a fresh sparse in-memory NOLXFS container of `block_count` blocks of
     /// `block_size` bytes and mount it immediately.
     pub fn format_and_mount(block_size: usize, block_count: u64, label: &str) -> Result<Self, i32> {
-        let mut dev = SparseBlockDevice::new(block_size, block_count);
+        let dev = SparseBlockDevice::new(block_size, block_count);
         let opts = FormatOptions {
             block_size: block_size as u32,
             volume_name: String::from(label),
             ..FormatOptions::default()
         };
-        mkfs::format(&mut dev, &opts).map_err(fs_err_to_errno)?;
-        Self::mount(dev)
+        let inner = Volume::format(dev, &opts).map_err(fs_err_to_errno)?;
+        let info = Box::new(VolumeInfo {
+            name: String::from(inner.name()),
+            layout: *inner.layout(),
+            superblock: inner.volume_superblock(),
+        });
+        Ok(Self { inner, info })
     }
 }
 
 impl<D: BlockDevice> NolxfsVolume<D> {
     /// Probe and mount an existing NOLXFS container on `dev`.
+    ///
+    /// Resumes from the newest valid checkpoint; a torn newest checkpoint falls
+    /// back to the previous one rather than failing the mount.
     pub fn mount(mut dev: D) -> Result<Self, i32> {
         let info = mkfs::probe(&mut dev).map_err(fs_err_to_errno)?;
-        let _root_inode = mkfs::read_root_inode(&mut dev, &info).map_err(fs_err_to_errno)?;
-
-        let mut max_ino = NOLXFS_ROOT_INO;
-        let mut next_block = info.layout.first_data_block;
-        let mut temp_alloc = LinearBlockAlloc {
-            next_block,
-            block_count: info.layout.block_count,
-        };
-        let entries = {
-            let mut tree = BTree::new(
-                &mut dev,
-                &mut temp_alloc,
-                info.layout.fs_tree_root,
-                KeyKind::JKey,
-                gen::SUB_FSTREE as u16,
-                1,
-            );
-            tree.collect().map_err(fs_err_to_errno)?
-        };
-        for entry in &entries {
-            if entry.key.len() >= 8 {
-                let raw_jkey = u64::from_le_bytes(entry.key[..8].try_into().unwrap());
-                let oid = jkey_oid(raw_jkey);
-                if oid > max_ino {
-                    max_ino = oid;
-                }
-                if jkey_type(raw_jkey) == gen::DREC_TYPE_FILE_EXTENT {
-                    if let Some(ext) = gen::nolx_file_extent_val_t::read_from(&entry.val) {
-                        let byte_len = extent_len(ext.len_and_flags);
-                        let blocks = byte_len.div_ceil(info.layout.block_size as u64);
-                        let end_blk = ext.phys_block_num + blocks;
-                        if end_blk > next_block {
-                            next_block = end_blk;
-                        }
-                    }
-                }
-            }
-        }
-
-        let block_count = info.layout.block_count;
+        let inner = Volume::mount(dev).map_err(fs_err_to_errno)?;
         Ok(Self {
-            dev,
+            inner,
             info: Box::new(info),
-            next_ino: max_ino + 1,
-            alloc: LinearBlockAlloc {
-                next_block,
-                block_count,
-            },
+        })
+    }
+
+    /// Mount the named snapshot of the container on `dev` as a read-only volume.
+    pub fn mount_snapshot(dev: D, name: &str) -> Result<Self, i32> {
+        let mut probe_dev = dev;
+        let info = mkfs::probe(&mut probe_dev).map_err(fs_err_to_errno)?;
+        let inner = Volume::mount_snapshot(probe_dev, name).map_err(fs_err_to_errno)?;
+        Ok(Self {
+            inner,
+            info: Box::new(info),
         })
     }
 
     /// Consume the mounted volume and return the underlying [`BlockDevice`].
     #[must_use]
     pub fn into_device(self) -> D {
-        self.dev
+        self.inner.into_device()
     }
 
     /// Volume metadata read at mount time.
@@ -227,67 +183,48 @@ impl<D: BlockDevice> NolxfsVolume<D> {
         &self.info
     }
 
+    /// The underlying filesystem volume (snapshot creation, xattrs, cloning).
+    #[must_use]
+    pub const fn volume(&self) -> &Volume<D> {
+        &self.inner
+    }
+
+    /// Mutable access to the underlying filesystem volume.
+    pub fn volume_mut(&mut self) -> &mut Volume<D> {
+        &mut self.inner
+    }
+
+    /// Commit every pending mutation as one checkpoint (`fsync`/`sync`).
+    pub fn sync(&mut self) -> Result<(), i32> {
+        self.inner.commit().map_err(fs_err_to_errno)
+    }
+
     /// Read and decode `nolx_inode_t` for `ino`.
     pub fn read_inode(&self, ino: u64) -> Result<gen::nolx_inode_t, i32> {
-        let key = inode_key(ino);
-        let bytes = self.btree_search(&key)?.ok_or(errno::ENOENT)?;
-        gen::nolx_inode_t::read_from(&bytes).ok_or(errno::EIO)
+        self.inner.read_inode(ino).map_err(fs_err_to_errno)
     }
 
     /// Parent directory inode for `ino`.
     #[must_use]
     pub fn parent_of(&self, ino: u64) -> Option<u64> {
-        let inode = self.read_inode(ino).ok()?;
         if ino == NOLXFS_ROOT_INO {
-            Some(NOLXFS_ROOT_INO)
-        } else {
-            Some(inode.parent_id)
+            return Some(NOLXFS_ROOT_INO);
         }
+        let inode = self.read_inode(ino).ok()?;
+        Some(inode.parent_id)
     }
 
     /// Look up `name` inside directory `dir_ino`.
     pub fn lookup(&self, dir_ino: u64, name: &str) -> Result<u64, i32> {
-        let dir_inode = self.read_inode(dir_ino)?;
-        if !is_dir(u32::from(dir_inode.mode)) {
-            return Err(errno::ENOTDIR);
-        }
-        let key = dentry_key(dir_ino, name);
-        let val = self.btree_search(&key)?.ok_or(errno::ENOENT)?;
-        let dentry = gen::nolx_direntry_t::read_from(&val).ok_or(errno::EIO)?;
-        Ok(dentry.ino)
+        self.inner.lookup(dir_ino, name).map_err(fs_err_to_errno)
     }
 
     /// Enumerate `(name, child_ino)` entries in `dir_ino`.
     pub fn readdir(&mut self, dir_ino: u64) -> Result<Vec<(String, u64)>, i32> {
-        let dir_inode = self.read_inode(dir_ino)?;
-        if !is_dir(u32::from(dir_inode.mode)) {
-            return Err(errno::ENOTDIR);
-        }
-        let prefix = pack_jkey(gen::DREC_TYPE_DIR_REC, dir_ino);
-        let entries = self.fs_tree().collect().map_err(fs_err_to_errno)?;
-        let mut out = Vec::new();
-        for e in entries {
-            if e.key.len() < 8 {
-                continue;
-            }
-            let hdr = u64::from_le_bytes(e.key[..8].try_into().unwrap());
-            if hdr != prefix {
-                continue;
-            }
-            let dentry = gen::nolx_direntry_t::read_from(&e.val).ok_or(errno::EIO)?;
-            let name_len = usize::from(dentry.name_len);
-            let hdr_size = gen::nolx_direntry_t::DISK_SIZE;
-            if e.val.len() < hdr_size + name_len {
-                return Err(errno::EIO);
-            }
-            let name_str = core::str::from_utf8(&e.val[hdr_size..hdr_size + name_len])
-                .map_err(|_| errno::EIO)?;
-            out.push((String::from(name_str), dentry.ino));
-        }
-        Ok(out)
+        self.inner.readdir(dir_ino).map_err(fs_err_to_errno)
     }
 
-    /// Create a subdirectory named `name` inside `dir_ino` and persist it in the `fs-tree`.
+    /// Create a subdirectory named `name` inside `dir_ino`.
     pub fn mkdir(
         &mut self,
         dir_ino: u64,
@@ -297,50 +234,21 @@ impl<D: BlockDevice> NolxfsVolume<D> {
         gid: Gid,
     ) -> Result<u64, i32> {
         validate_name(name)?;
-        let mut parent = self.read_inode(dir_ino)?;
-        if !is_dir(u32::from(parent.mode)) {
-            return Err(errno::ENOTDIR);
-        }
-        let dkey = dentry_key(dir_ino, name);
-        if self.btree_search(&dkey)?.is_some() {
-            return Err(errno::EEXIST);
-        }
+        self.inner
+            .mkdir(dir_ino, name, mode, uid, gid)
+            .map_err(fs_err_to_errno)
+    }
 
-        let ino = self.next_ino;
-        self.next_ino += 1;
-        let child_inode = gen::nolx_inode_t {
-            parent_id: dir_ino,
-            private_id: ino,
-            create_time: 0,
-            modify_time: 0,
-            change_time: 0,
-            access_time: 0,
-            internal_flags: 0,
-            nlink: 2,
-            mode: ((S_IFDIR | (mode & 0o7777)) & 0xFFFF) as u16,
-            pad: 0,
-            owner: uid,
-            group: gid,
-            generation: 1,
-            pad2: 0,
-            data_stream: [0; 48],
-        };
-
-        parent.nlink = parent.nlink.saturating_add(1);
-        let dval = dentry_val(ino, name, (S_IFDIR >> 12) as u16);
-        self.fs_tree()
-            .insert(&inode_key(dir_ino), parent.as_bytes())
-            .map_err(fs_err_to_errno)?;
-        self.fs_tree()
-            .insert(&inode_key(ino), child_inode.as_bytes())
-            .map_err(fs_err_to_errno)?;
-        self.fs_tree()
-            .insert(&dkey, &dval)
-            .map_err(fs_err_to_errno)?;
-        Ok(ino)
+    /// Remove the empty directory `name` inside `dir_ino` (`rmdir(2)`).
+    pub fn rmdir(&mut self, dir_ino: u64, name: &str) -> Result<(), i32> {
+        validate_name(name)?;
+        self.inner.rmdir(dir_ino, name).map_err(fs_err_to_errno)
     }
 
     /// Create or look up a regular file named `name` inside `dir_ino`.
+    ///
+    /// Returns `(ino, created)`; with `exclusive = true` an existing name is
+    /// `EEXIST`, exactly like `O_CREAT|O_EXCL`.
     pub fn create_file(
         &mut self,
         dir_ino: u64,
@@ -351,129 +259,97 @@ impl<D: BlockDevice> NolxfsVolume<D> {
         exclusive: bool,
     ) -> Result<(u64, bool), i32> {
         validate_name(name)?;
-        let parent = self.read_inode(dir_ino)?;
-        if !is_dir(u32::from(parent.mode)) {
-            return Err(errno::ENOTDIR);
-        }
-        let dkey = dentry_key(dir_ino, name);
-        if let Some(existing_val) = self.btree_search(&dkey)? {
-            if exclusive {
-                return Err(errno::EEXIST);
+        match self.inner.lookup(dir_ino, name) {
+            Ok(existing) => {
+                if exclusive {
+                    return Err(errno::EEXIST);
+                }
+                let target = self.read_inode(existing)?;
+                if is_dir(u32::from(target.mode)) {
+                    return Err(errno::EISDIR);
+                }
+                Ok((existing, false))
             }
-            let dentry = gen::nolx_direntry_t::read_from(&existing_val).ok_or(errno::EIO)?;
-            let target = self.read_inode(dentry.ino)?;
-            if is_dir(u32::from(target.mode)) {
-                return Err(errno::EISDIR);
+            Err(FsError::NotFound) => {
+                let ino = self
+                    .inner
+                    .create_file(dir_ino, name, mode, uid, gid)
+                    .map_err(fs_err_to_errno)?;
+                Ok((ino, true))
             }
-            return Ok((dentry.ino, false));
+            Err(e) => Err(fs_err_to_errno(e)),
         }
-
-        let ino = self.next_ino;
-        self.next_ino += 1;
-        let file_inode = gen::nolx_inode_t {
-            parent_id: dir_ino,
-            private_id: ino,
-            create_time: 0,
-            modify_time: 0,
-            change_time: 0,
-            access_time: 0,
-            internal_flags: 0,
-            nlink: 1,
-            mode: ((S_IFREG | (mode & 0o7777)) & 0xFFFF) as u16,
-            pad: 0,
-            owner: uid,
-            group: gid,
-            generation: 1,
-            pad2: 0,
-            data_stream: [0; 48],
-        };
-
-        let dval = dentry_val(ino, name, (S_IFREG >> 12) as u16);
-        self.fs_tree()
-            .insert(&inode_key(ino), file_inode.as_bytes())
-            .map_err(fs_err_to_errno)?;
-        self.fs_tree()
-            .insert(&dkey, &dval)
-            .map_err(fs_err_to_errno)?;
-        Ok((ino, true))
     }
 
-    /// Write `data` to regular file `ino` starting at `offset`, allocating physical data blocks
-    /// and updating its `FILE_EXTENT` + `INODE` records in the `fs-tree`.
+    /// Create a hard link to `target_ino` as `name` inside `dir_ino` (`link(2)`).
+    pub fn link(&mut self, target_ino: u64, dir_ino: u64, name: &str) -> Result<(), i32> {
+        validate_name(name)?;
+        self.inner
+            .link(target_ino, dir_ino, name)
+            .map_err(fs_err_to_errno)
+    }
+
+    /// Create a symbolic link `name` inside `dir_ino` holding `target` (`symlink(2)`).
+    pub fn symlink(
+        &mut self,
+        dir_ino: u64,
+        name: &str,
+        target: &[u8],
+        uid: Uid,
+        gid: Gid,
+    ) -> Result<u64, i32> {
+        validate_name(name)?;
+        self.inner
+            .symlink(dir_ino, name, target, uid, gid)
+            .map_err(fs_err_to_errno)
+    }
+
+    /// Read the target stored in symlink `ino` (`readlink(2)`).
+    pub fn readlink(&self, ino: u64) -> Result<Vec<u8>, i32> {
+        self.inner.readlink(ino).map_err(fs_err_to_errno)
+    }
+
+    /// Remove the non-directory entry `name` from `dir_ino` (`unlink(2)`).
+    pub fn unlink(&mut self, dir_ino: u64, name: &str) -> Result<(), i32> {
+        validate_name(name)?;
+        self.inner.unlink(dir_ino, name).map_err(fs_err_to_errno)
+    }
+
+    /// Rename `old_name` in `old_dir` to `new_name` in `new_dir` (`rename(2)`).
+    pub fn rename(
+        &mut self,
+        old_dir: u64,
+        old_name: &str,
+        new_dir: u64,
+        new_name: &str,
+    ) -> Result<(), i32> {
+        validate_name(old_name)?;
+        validate_name(new_name)?;
+        self.inner
+            .rename(old_dir, old_name, new_dir, new_name)
+            .map_err(fs_err_to_errno)
+    }
+
+    /// Truncate or extend regular file `ino` to `new_size` bytes.
+    pub fn truncate(&mut self, ino: u64, new_size: u64) -> Result<(), i32> {
+        self.inner.truncate(ino, new_size).map_err(fs_err_to_errno)
+    }
+
+    /// Write `data` to regular file `ino` starting at `offset`.
     pub fn write(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<usize, i32> {
-        let mut inode = self.read_inode(ino)?;
+        let inode = self.read_inode(ino)?;
         if is_dir(u32::from(inode.mode)) {
             return Err(errno::EISDIR);
         }
         if !is_reg(u32::from(inode.mode)) {
             return Err(errno::EINVAL);
         }
-
-        let current_size =
-            usize::try_from(inode_file_size(&inode)).map_err(|_| errno::EOVERFLOW)?;
-        let off = usize::try_from(offset).map_err(|_| errno::EINVAL)?;
-        let new_end = off.checked_add(data.len()).ok_or(errno::EOVERFLOW)?;
-        let mut full_bytes = vec![0u8; current_size.max(new_end)];
-        if current_size > 0 {
-            let _ = self.read(ino, 0, &mut full_bytes[..current_size])?;
-        }
-        full_bytes[off..new_end].copy_from_slice(data);
-
-        let bs = self.dev.block_size();
-        let blocks_needed = full_bytes.len().div_ceil(bs) as u64;
-        let ext_key = extent_key(ino, 0);
-        let existing_ext = self
-            .btree_search(&ext_key)?
-            .and_then(|v| gen::nolx_file_extent_val_t::read_from(&v));
-
-        let phys_start = if let Some(ext) = existing_ext {
-            let old_blocks = extent_len(ext.len_and_flags).div_ceil(bs as u64);
-            if blocks_needed <= old_blocks
-                && ext.phys_block_num >= self.info.layout.first_data_block
-            {
-                ext.phys_block_num
-            } else {
-                self.alloc_contiguous_blocks(blocks_needed)?
-            }
-        } else if blocks_needed > 0 {
-            self.alloc_contiguous_blocks(blocks_needed)?
-        } else {
-            0
-        };
-
-        let mut block_buf = vec![0u8; bs];
-        for blk_idx in 0..blocks_needed {
-            block_buf.fill(0);
-            let start = (blk_idx as usize) * bs;
-            let end = (start + bs).min(full_bytes.len());
-            block_buf[..end - start].copy_from_slice(&full_bytes[start..end]);
-            self.dev
-                .write_block(phys_start + blk_idx, &block_buf)
-                .map_err(|_| errno::EIO)?;
-        }
-
-        let aligned_len = blocks_needed * (bs as u64);
-        if !full_bytes.is_empty() {
-            let ext_val = gen::nolx_file_extent_val_t {
-                len_and_flags: pack_len_and_flags(aligned_len, 0),
-                phys_block_num: phys_start,
-                crypto_id: 0,
-            };
-            self.fs_tree()
-                .insert(&ext_key, ext_val.as_bytes())
-                .map_err(fs_err_to_errno)?;
-        }
-
-        set_inode_file_size(&mut inode, full_bytes.len() as u64, aligned_len);
-        inode.generation = inode.generation.wrapping_add(1);
-        self.fs_tree()
-            .insert(&inode_key(ino), inode.as_bytes())
-            .map_err(fs_err_to_errno)?;
-        Ok(data.len())
+        self.inner
+            .write_data(ino, offset, data)
+            .map_err(fs_err_to_errno)
     }
 
-    /// Read up to `buf.len()` bytes from regular file `ino` starting at `offset` via its
-    /// `FILE_EXTENT` physical block mapping.
+    /// Read up to `buf.len()` bytes from regular file `ino` starting at `offset`.
     pub fn read(&self, ino: u64, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
         let inode = self.read_inode(ino)?;
         if is_dir(u32::from(inode.mode)) {
@@ -482,40 +358,16 @@ impl<D: BlockDevice> NolxfsVolume<D> {
         if !is_reg(u32::from(inode.mode)) {
             return Err(errno::EINVAL);
         }
-        let file_size = inode_file_size(&inode);
-        if offset >= file_size || buf.is_empty() {
-            return Ok(0);
-        }
-        let avail = ((file_size - offset) as usize).min(buf.len());
-        let ext_key = extent_key(ino, 0);
-        let Some(ext_bytes) = self.btree_search(&ext_key)? else {
-            buf[..avail].fill(0);
-            return Ok(avail);
-        };
-        let ext = gen::nolx_file_extent_val_t::read_from(&ext_bytes).ok_or(errno::EIO)?;
-
-        let bs = self.dev.block_size();
-        let mut block_buf = vec![0u8; bs];
-        let mut copied = 0usize;
-        while copied < avail {
-            let cur_off = offset as usize + copied;
-            let blk_idx = (cur_off / bs) as u64;
-            let blk_off = cur_off % bs;
-            let chunk = (bs - blk_off).min(avail - copied);
-            self.dev
-                .read_block(ext.phys_block_num + blk_idx, &mut block_buf)
-                .map_err(|_| errno::EIO)?;
-            buf[copied..copied + chunk].copy_from_slice(&block_buf[blk_off..blk_off + chunk]);
-            copied += chunk;
-        }
-        Ok(copied)
+        self.inner
+            .read_data(ino, offset, buf)
+            .map_err(fs_err_to_errno)
     }
 
     /// Query POSIX [`Stat`] metadata for `ino`.
     pub fn stat(&self, dev_id: u64, ino: u64) -> Result<Stat, i32> {
         let inode = self.read_inode(ino)?;
         let mode = u32::from(inode.mode);
-        let size = inode_file_size(&inode) as i64;
+        let size = Volume::<D>::file_size(&inode) as i64;
         Ok(Stat {
             st_dev: dev_id,
             st_ino: ino,
@@ -530,109 +382,25 @@ impl<D: BlockDevice> NolxfsVolume<D> {
         })
     }
 
-    fn btree_search(&self, key: &[u8]) -> Result<Option<Vec<u8>>, i32> {
-        let root = self.info.layout.fs_tree_root;
-        let mut block = root;
-        let mut buf = vec![0u8; self.dev.block_size()];
-        loop {
-            self.dev
-                .read_block(block, &mut buf)
-                .map_err(|_| errno::EIO)?;
-            let expected = if block == root {
-                gen::OBJ_BTREE_ROOT
-            } else {
-                gen::OBJ_BTREE_NODE
-            };
-            let node = Node::decode(&buf, expected).map_err(fs_err_to_errno)?;
-            let index = match node.find(KeyKind::JKey, key) {
-                Ok(i) => i,
-                Err(_) if node.is_leaf() => return Ok(None),
-                Err(0) => return Ok(None),
-                Err(i) => i - 1,
-            };
-            if node.is_leaf() {
-                return Ok(Some(node.entries[index].val.clone()));
-            }
-            block = node.entries[index].child_block();
-        }
+    /// Names of the volume's snapshots, oldest first.
+    #[must_use]
+    pub fn snapshot_names(&self) -> Vec<String> {
+        self.inner
+            .snapshots()
+            .iter()
+            .map(|s| String::from(s.name.as_str()))
+            .collect()
     }
 
-    fn alloc_contiguous_blocks(&mut self, count: u64) -> Result<u64, i32> {
-        let start = self.alloc.next_block;
-        let end = start.checked_add(count).ok_or(errno::ENOSPC)?;
-        if end > self.alloc.block_count {
-            return Err(errno::ENOSPC);
-        }
-        self.alloc.next_block = end;
-        Ok(start)
+    /// Create a snapshot of the volume's current committed state.
+    pub fn create_snapshot(&mut self, name: &str) -> Result<u64, i32> {
+        self.inner.create_snapshot(name).map_err(fs_err_to_errno)
     }
 
-    fn fs_tree(&mut self) -> BTree<'_, D, LinearBlockAlloc> {
-        BTree::new(
-            &mut self.dev,
-            &mut self.alloc,
-            self.info.layout.fs_tree_root,
-            KeyKind::JKey,
-            gen::SUB_FSTREE as u16,
-            1,
-        )
+    /// Delete a snapshot, releasing the blocks only it referenced.
+    pub fn delete_snapshot(&mut self, name: &str) -> Result<(), i32> {
+        self.inner.delete_snapshot(name).map_err(fs_err_to_errno)
     }
-}
-
-fn inode_file_size(inode: &gen::nolx_inode_t) -> u64 {
-    gen::nolx_data_stream_t::read_from(&inode.data_stream).map_or(0, |ds| ds.total_bytes_written)
-}
-
-fn set_inode_file_size(inode: &mut gen::nolx_inode_t, logical_size: u64, alloced_size: u64) {
-    let ds = gen::nolx_data_stream_t {
-        xattr_jhdr: [0; 16],
-        alloced_size,
-        default_crypto_id: 0,
-        total_bytes_written: logical_size,
-        total_bytes_read: 0,
-    };
-    inode.data_stream.copy_from_slice(ds.as_bytes());
-}
-
-fn inode_key(ino: u64) -> Vec<u8> {
-    let k = gen::nolx_j_key_t {
-        obj_id_and_type: pack_jkey(gen::DREC_TYPE_INODE, ino),
-    };
-    k.as_bytes().to_vec()
-}
-
-fn dentry_key(parent_ino: u64, name: &str) -> Vec<u8> {
-    let hdr = gen::nolx_dentry_key_t {
-        obj_id_and_type: pack_jkey(gen::DREC_TYPE_DIR_REC, parent_ino),
-        name_len: name.len() as u16,
-        pad: 0,
-    };
-    let mut bytes = Vec::with_capacity(gen::nolx_dentry_key_t::DISK_SIZE + name.len());
-    bytes.extend_from_slice(hdr.as_bytes());
-    bytes.extend_from_slice(name.as_bytes());
-    bytes
-}
-
-fn dentry_val(child_ino: u64, name: &str, dt_flags: u16) -> Vec<u8> {
-    let val = gen::nolx_direntry_t {
-        ino: child_ino,
-        name_len: name.len() as u16,
-        flags: dt_flags,
-        nlen: name.len() as u16,
-        pad: 0,
-    };
-    let mut bytes = Vec::with_capacity(gen::nolx_direntry_t::DISK_SIZE + name.len());
-    bytes.extend_from_slice(val.as_bytes());
-    bytes.extend_from_slice(name.as_bytes());
-    bytes
-}
-
-fn extent_key(ino: u64, logical_addr: u64) -> Vec<u8> {
-    let k = gen::nolx_file_extent_key_t {
-        obj_id_and_type: pack_jkey(gen::DREC_TYPE_FILE_EXTENT, ino),
-        logical_addr,
-    };
-    k.as_bytes().to_vec()
 }
 
 fn validate_name(name: &str) -> Result<(), i32> {
@@ -645,15 +413,21 @@ fn validate_name(name: &str) -> Result<(), i32> {
     Ok(())
 }
 
-const fn fs_err_to_errno(err: FsError) -> i32 {
+/// Translate a filesystem error into the kernel's internal errno convention.
+pub const fn fs_err_to_errno(err: FsError) -> i32 {
     match err {
-        FsError::BlockOutOfRange(_) => errno::ENOSPC,
+        FsError::NotFound => errno::ENOENT,
+        FsError::AlreadyExists => errno::EEXIST,
+        FsError::NotDirectory => errno::ENOTDIR,
+        FsError::IsDirectory => errno::EISDIR,
+        FsError::NotEmpty => errno::ENOTEMPTY,
+        FsError::NameTooLong => errno::ENAMETOOLONG,
+        FsError::ReadOnly => errno::EROFS,
         FsError::InvalidField(_) => errno::EINVAL,
+        FsError::BlockOutOfRange(_) => errno::ENOSPC,
         _ => errno::EIO,
     }
 }
-
-const _: Mode = S_IFMT;
 
 #[cfg(test)]
 mod tests {
@@ -666,8 +440,9 @@ mod tests {
         let (f_ino, created) = vol.create_file(etc, "hostname", 0o644, 0, 0, true).unwrap();
         assert!(created);
         assert_eq!(vol.write(f_ino, 0, b"nolx-host\n"), Ok(10));
+        vol.sync().unwrap();
 
-        // Unmount back to raw block device, then mount fresh and verify Fletcher-64 + contents.
+        // Unmount back to raw block device, then mount fresh and verify contents.
         let dev = vol.into_device();
         let remounted = NolxfsVolume::mount(dev).unwrap();
         let etc2 = remounted.lookup(NOLXFS_ROOT_INO, "etc").unwrap();
@@ -677,5 +452,35 @@ mod tests {
         let mut buf = [0u8; 16];
         let n = remounted.read(f2, 0, &mut buf).unwrap();
         assert_eq!(&buf[..n], b"nolx-host\n");
+    }
+
+    #[test]
+    fn links_symlinks_rename_and_snapshots_through_the_adapter() {
+        let mut vol = NolxfsVolume::format_and_mount(4096, 256, "root").unwrap();
+        let docs = vol.mkdir(NOLXFS_ROOT_INO, "docs", 0o755, 0, 0).unwrap();
+        let (f, _) = vol.create_file(docs, "a.txt", 0o644, 0, 0, true).unwrap();
+        vol.write(f, 0, b"adapter-data").unwrap();
+        vol.link(f, NOLXFS_ROOT_INO, "b.txt").unwrap();
+        let lnk = vol.symlink(NOLXFS_ROOT_INO, "lnk", b"/docs/a.txt", 0, 0).unwrap();
+        assert_eq!(vol.readlink(lnk).unwrap(), b"/docs/a.txt");
+        vol.rename(docs, "a.txt", NOLXFS_ROOT_INO, "c.txt").unwrap();
+        assert_eq!(vol.lookup(NOLXFS_ROOT_INO, "c.txt").unwrap(), f);
+        vol.sync().unwrap();
+        vol.create_snapshot("adapter-snap").unwrap();
+        assert_eq!(vol.snapshot_names(), vec![String::from("adapter-snap")]);
+        vol.unlink(NOLXFS_ROOT_INO, "b.txt").unwrap();
+        vol.sync().unwrap();
+
+        let dev = vol.into_device();
+        let snap = NolxfsVolume::mount_snapshot(dev.clone(), "adapter-snap").unwrap();
+        let sf = snap.lookup(NOLXFS_ROOT_INO, "b.txt").unwrap();
+        let mut buf = [0u8; 16];
+        let n = snap.read(sf, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"adapter-data");
+
+        let mut live = NolxfsVolume::mount(dev).unwrap();
+        assert!(live.lookup(NOLXFS_ROOT_INO, "b.txt").is_err());
+        live.delete_snapshot("adapter-snap").unwrap();
+        assert!(live.snapshot_names().is_empty());
     }
 }

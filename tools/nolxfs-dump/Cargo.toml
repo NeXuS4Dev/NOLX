@@ -1,0 +1,16 @@
+[package]
+name = "nolxfs-dump"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "nolxfs-dump: inspect a NOLXFS container without mounting it"
+readme = "../../README.md"
+default-run = "nolxfs-dump"
+
+[[bin]]
+name = "nolxfs-dump"
+path = "src/main.rs"
+
+[dependencies]
+nolxfs = { path = "../../crates/nolxfs" }
