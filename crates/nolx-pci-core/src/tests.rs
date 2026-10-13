@@ -120,7 +120,10 @@ fn a_present_function_reports_its_identity_and_multifunction_bit() {
     let info = read_function(&mut machine, bdf(0, 1, 0)).expect("present");
     assert_eq!(info.vendor_id, 0x8086);
     assert_eq!(info.device_id, 0x1237);
-    assert_eq!((info.class, info.subclass, info.prog_if, info.revision), (6, 0, 2, 7));
+    assert_eq!(
+        (info.class, info.subclass, info.prog_if, info.revision),
+        (6, 0, 2, 7),
+    );
     assert_eq!(info.header_type, 0);
     assert!(info.multifunction);
 }
@@ -231,7 +234,8 @@ fn bars_are_sized_decoded_and_restored() {
     let probed = machine
         .writes
         .iter()
-        .any(|(_, offset, value)| *offset == 0x10 && *value == 0xFFFF_FFFF);
+        .filter(|write| write.1 == 0x10)
+        .any(|write| write.2 == 0xFFFF_FFFF);
     assert!(probed);
 }
 
@@ -256,7 +260,10 @@ fn the_capability_list_is_walked_in_link_order() {
     machine.add(bdf(0, 1, 0), regs);
     let list = capabilities(&mut machine, bdf(0, 1, 0));
     assert!(!list.truncated);
-    assert_eq!(list.as_slice(), &[cap(0x50, 0x01), cap(0x60, 0x05), cap(0x70, 0x11)]);
+    assert_eq!(
+        list.as_slice(),
+        &[cap(0x50, 0x01), cap(0x60, 0x05), cap(0x70, 0x11)],
+    );
     assert_eq!(list.find(0x05).map(|entry| entry.offset), Some(0x60));
     assert_eq!(list.find(0x10), None);
 }
@@ -284,18 +291,39 @@ fn a_pointer_into_the_header_is_refused_and_a_loop_is_bounded() {
 fn enumeration_follows_multifunction_devices_and_secondary_buses() {
     let mut machine = Machine::new();
     // Host bridge at 0:0.0 (class 06/00, not a PCI-to-PCI bridge, so not followed).
-    machine.add(bdf(0, 0, 0), Regs::endpoint(0x8086, 0x1237, 0x06, 0x00, false));
+    machine.add(
+        bdf(0, 0, 0),
+        Regs::endpoint(0x8086, 0x1237, 0x06, 0x00, false),
+    );
     // 0:1 is multifunction: functions 0 and 2 present, function 1 absent.
-    machine.add(bdf(0, 1, 0), Regs::endpoint(0x1AF4, 0x1000, 0x02, 0x00, true));
-    machine.add(bdf(0, 1, 2), Regs::endpoint(0x1AF4, 0x1001, 0x01, 0x00, false));
+    machine.add(
+        bdf(0, 1, 0),
+        Regs::endpoint(0x1AF4, 0x1000, 0x02, 0x00, true),
+    );
+    machine.add(
+        bdf(0, 1, 2),
+        Regs::endpoint(0x1AF4, 0x1001, 0x01, 0x00, false),
+    );
     // 0:2 is a PCI-to-PCI bridge whose secondary bus is 1.
     machine.add(bdf(0, 2, 0), Regs::bridge(0x8086, 0x2448, 1));
     // Bus 1 holds an endpoint at 1:0.0.
-    machine.add(bdf(1, 0, 0), Regs::endpoint(0x10EC, 0x8168, 0x02, 0x00, false));
+    machine.add(
+        bdf(1, 0, 0),
+        Regs::endpoint(0x10EC, 0x8168, 0x02, 0x00, false),
+    );
 
     let inventory = enumerate(&mut machine);
     let found: Vec<Bdf> = inventory.as_slice().iter().map(|info| info.bdf).collect();
-    assert_eq!(found, vec![bdf(0, 0, 0), bdf(0, 1, 0), bdf(0, 1, 2), bdf(0, 2, 0), bdf(1, 0, 0)]);
+    assert_eq!(
+        found,
+        vec![
+            bdf(0, 0, 0),
+            bdf(0, 1, 0),
+            bdf(0, 1, 2),
+            bdf(0, 2, 0),
+            bdf(1, 0, 0),
+        ],
+    );
     assert_eq!(inventory.refused_bridges, 0);
     assert!(!inventory.overflowed);
     let nic = inventory
