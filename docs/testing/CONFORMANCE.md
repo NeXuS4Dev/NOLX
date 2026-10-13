@@ -11,19 +11,19 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | Status | Assertions | Cumulative verified at or above status |
 |---|---|---|
 | `unimplemented` | 0 | 100.0% |
-| `implemented` | 11 | 100.0% |
-| `tested-T1` | 163 | 94.1% |
-| `pending-T2` | 2 | — |
-| `tested-T2` | 44 | 20.0% |
+| `implemented` | 4 | 100.0% |
+| `tested-T1` | 170 | 98.2% |
+| `pending-T2` | 0 | — |
+| `tested-T2` | 46 | 20.9% |
 | `tested-T3` | 0 | 0.0% |
 
-**207 of 220 assertions have a passing automated test; 2 are awaiting T2 results.**
+**216 of 220 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
 | Area | Assertions | Implemented | Tested (T1) | Pending (T2) | Tested (T2) | Tested (T3) |
 |---|---|---|---|---|---|---|
-| ahci | 9 | 9 | 0 | 2 | 0 | 0 |
+| ahci | 9 | 9 | 7 | 0 | 2 | 0 |
 | blk | 25 | 25 | 21 | 0 | 4 | 0 |
 | drv | 20 | 20 | 15 | 0 | 5 | 0 |
 | elf | 3 | 3 | 3 | 0 | 0 | 0 |
@@ -40,42 +40,32 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 
 None.
 
-## Implemented but untested (11)
+## Implemented but untested (4)
 
 | ID | Specification reference |
 |---|---|
-| AHCI-001 | NOLX M9 HBA and port registers: the HBA registers sit at their specified offsets, port registers repeat every 0x80 bytes from 0x100, and port 32 is refused |
-| AHCI-002 | NOLX M9 Command slots: the slot count is the capability field's 5-bit value plus one |
-| AHCI-003 | NOLX M9 Port implementation and device type: only the ports named by the implemented bitmap are used, and a port is a SATA disk only when its link is present and its signature is SATA |
-| AHCI-004 | NOLX M9 Task file status: the error bit and the busy and data-request bits are read separately |
-| AHCI-005 | NOLX M9 Read command FIS: a host-to-device FIS for READ DMA EXT carries the 48-bit sector address and sector count in its specified bytes |
-| AHCI-006 | NOLX M9 Command header: the FIS length, write direction, descriptor count, and 128-byte-aligned table address are encoded in their fields, and a misaligned table or a FIS length outside 2 to 16 dwords is refused |
-| AHCI-007 | NOLX M9 Physical region descriptor: the address is split into its low and high words, the byte count is stored one less than the bytes, and an empty, odd, misaligned, or over-4-MiB region is refused |
 | HAL-018 | ACPI MADT: legacy/x2APIC processor entries, local NMI routes, I/O APIC routes, ISA overrides, and I/O APIC NMI sources decode from length-checked records |
 | HAL-019 | APIC arithmetic: x2APIC MSRs, compressed TPR priority classes, timer divisors, and HPET-based counter calibration are checked |
 | HAL-020 | HPET clocksource: 32-bit MMIO reads and wrap extension produce monotonic nanoseconds |
 | HAL-021 | I/O APIC routes: GSI windows and ISA overrides are validated, redirections start masked, and NMI sources use MADT polarity/trigger flags |
 
-## Pending T2 verification (2)
+## Pending T2 verification (0)
 
-| ID | Specification reference | Configured test |
-|---|---|---|
-| AHCI-008 | NOLX M9 Controller and port discovery: the probe finds the AHCI class device, reads the HBA through BAR 5, enables AHCI mode, and reports the first port with a SATA disk | `.github/workflows/ci.yml` boot-smoke asserts `ahci: BB:DD.F abar 0x..., ports 0x..., port N is a SATA disk`; kernel/src/hal/ahci.rs bring_up; QEMU run with `-device ahci` and `-device ide-hd` |
-| AHCI-009 | NOLX M9 Polled sector read: sector 0 is read through command slot 0 with a READ DMA EXT, the port completes it without a task-file error, and the data matches the disk image's sector 0 | `.github/workflows/ci.yml` boot-smoke asserts `ahci: port N sector 0 read, status ok, first 16 bytes match the disk image`; kernel/src/hal/ahci.rs read_sector_zero |
+None.
 
 ## All assertions
 
 | ID | Area | Specification reference | Status | Test |
 |---|---|---|---|---|
-| AHCI-001 | ahci | NOLX M9 HBA and port registers: the HBA registers sit at their specified offsets, port registers repeat every 0x80 bytes from 0x100, and port 32 is refused | `implemented` | nolx-ahci-core tests::a_port_register_sits_in_its_own_block |
-| AHCI-002 | ahci | NOLX M9 Command slots: the slot count is the capability field's 5-bit value plus one | `implemented` | nolx-ahci-core tests::the_capability_field_gives_one_more_than_its_zero_based_value |
-| AHCI-003 | ahci | NOLX M9 Port implementation and device type: only the ports named by the implemented bitmap are used, and a port is a SATA disk only when its link is present and its signature is SATA | `implemented` | nolx-ahci-core tests::only_the_ports_the_bitmap_names_are_implemented, tests::a_sata_disk_needs_a_present_link_and_a_sata_signature |
-| AHCI-004 | ahci | NOLX M9 Task file status: the error bit and the busy and data-request bits are read separately | `implemented` | nolx-ahci-core tests::the_task_file_reports_errors_and_busy_separately |
-| AHCI-005 | ahci | NOLX M9 Read command FIS: a host-to-device FIS for READ DMA EXT carries the 48-bit sector address and sector count in its specified bytes | `implemented` | nolx-ahci-core tests::read_dma_ext_fis_carries_the_48_bit_address_and_count |
-| AHCI-006 | ahci | NOLX M9 Command header: the FIS length, write direction, descriptor count, and 128-byte-aligned table address are encoded in their fields, and a misaligned table or a FIS length outside 2 to 16 dwords is refused | `implemented` | nolx-ahci-core tests::a_command_header_names_its_fis_length_direction_and_table, tests::a_command_header_is_refused_for_a_misaligned_table_or_a_bad_fis_length |
-| AHCI-007 | ahci | NOLX M9 Physical region descriptor: the address is split into its low and high words, the byte count is stored one less than the bytes, and an empty, odd, misaligned, or over-4-MiB region is refused | `implemented` | nolx-ahci-core tests::a_region_descriptor_stores_its_count_one_less_than_the_bytes, tests::a_region_descriptor_refuses_empty_odd_misaligned_and_oversized_regions |
-| AHCI-008 | ahci | NOLX M9 Controller and port discovery: the probe finds the AHCI class device, reads the HBA through BAR 5, enables AHCI mode, and reports the first port with a SATA disk | `pending-T2` | `.github/workflows/ci.yml` boot-smoke asserts `ahci: BB:DD.F abar 0x..., ports 0x..., port N is a SATA disk`; kernel/src/hal/ahci.rs bring_up; QEMU run with `-device ahci` and `-device ide-hd` |
-| AHCI-009 | ahci | NOLX M9 Polled sector read: sector 0 is read through command slot 0 with a READ DMA EXT, the port completes it without a task-file error, and the data matches the disk image's sector 0 | `pending-T2` | `.github/workflows/ci.yml` boot-smoke asserts `ahci: port N sector 0 read, status ok, first 16 bytes match the disk image`; kernel/src/hal/ahci.rs read_sector_zero |
+| AHCI-001 | ahci | NOLX M9 HBA and port registers: the HBA registers sit at their specified offsets, port registers repeat every 0x80 bytes from 0x100, and port 32 is refused | `tested-T1` | nolx-ahci-core tests::a_port_register_sits_in_its_own_block |
+| AHCI-002 | ahci | NOLX M9 Command slots: the slot count is the capability field's 5-bit value plus one | `tested-T1` | nolx-ahci-core tests::the_capability_field_gives_one_more_than_its_zero_based_value |
+| AHCI-003 | ahci | NOLX M9 Port implementation and device type: only the ports named by the implemented bitmap are used, and a port is a SATA disk only when its link is present and its signature is SATA | `tested-T1` | nolx-ahci-core tests::only_the_ports_the_bitmap_names_are_implemented, tests::a_sata_disk_needs_a_present_link_and_a_sata_signature |
+| AHCI-004 | ahci | NOLX M9 Task file status: the error bit and the busy and data-request bits are read separately | `tested-T1` | nolx-ahci-core tests::the_task_file_reports_errors_and_busy_separately |
+| AHCI-005 | ahci | NOLX M9 Read command FIS: a host-to-device FIS for READ DMA EXT carries the 48-bit sector address and sector count in its specified bytes | `tested-T1` | nolx-ahci-core tests::read_dma_ext_fis_carries_the_48_bit_address_and_count |
+| AHCI-006 | ahci | NOLX M9 Command header: the FIS length, write direction, descriptor count, and 128-byte-aligned table address are encoded in their fields, and a misaligned table or a FIS length outside 2 to 16 dwords is refused | `tested-T1` | nolx-ahci-core tests::a_command_header_names_its_fis_length_direction_and_table, tests::a_command_header_is_refused_for_a_misaligned_table_or_a_bad_fis_length |
+| AHCI-007 | ahci | NOLX M9 Physical region descriptor: the address is split into its low and high words, the byte count is stored one less than the bytes, and an empty, odd, misaligned, or over-4-MiB region is refused | `tested-T1` | nolx-ahci-core tests::a_region_descriptor_stores_its_count_one_less_than_the_bytes, tests::a_region_descriptor_refuses_empty_odd_misaligned_and_oversized_regions |
+| AHCI-008 | ahci | NOLX M9 Controller and port discovery: the probe finds the AHCI class device, reads the HBA through BAR 5, enables AHCI mode, and reports the first port with a SATA disk | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `ahci: BB:DD.F abar 0x..., ports 0x..., port N is a SATA disk`; kernel/src/hal/ahci.rs bring_up; QEMU run with `-device ahci` and `-device ide-hd` on a copy of the disk image; workflow [38460754722](https://github.com/NeXuS4Dev/NOLX/actions/runs/38460754722) passed all six jobs. |
+| AHCI-009 | ahci | NOLX M9 Polled sector read: sector 0 is read through command slot 0 with a READ DMA EXT, the port completes it without a task-file error, and the data matches the disk image's sector 0 | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `ahci: port N sector 0 read, status ok, first 16 bytes match the disk image`; kernel/src/hal/ahci.rs read_sector_zero; workflow [38460754722](https://github.com/NeXuS4Dev/NOLX/actions/runs/38460754722) passed all six jobs. |
 | BLK-001 | blk | NOLX M9 GPT: CRC-32 is the IEEE form whose check value for `123456789` is `0xCBF43926` | `tested-T1` | nolx-block-core tests::crc32_matches_the_standard_check_value |
 | BLK-002 | blk | NOLX M9 GPT: A primary header in LBA 1 with the signature `EFI PART`, revision 1.0, a valid header CRC over its bytes with the CRC field zeroed, and a matching own-LBA field is read, and its fields are reported as stored | `tested-T1` | nolx-block-core tests::a_valid_primary_header_is_read |
 | BLK-003 | blk | NOLX M9 GPT: The backup header at the last LBA is read against its own LBA, and the table it names passes its CRC | `tested-T1` | nolx-block-core tests::the_backup_header_is_read_at_its_own_lba_and_its_table_verifies |
