@@ -161,7 +161,11 @@ fn round_trip(disk: &mut Disk, console: &mut dyn HalConsole) -> Result<(), Failu
     let mut written = [0u8; ROUND_TRIP_BYTES];
     fill_pattern(&mut written);
     disk.request.write(REQUEST_DATA, &written);
-    disk.transfer(virtio::BLK_T_OUT, ROUND_TRIP_SECTOR, ROUND_TRIP_BYTES as u32)?;
+    disk.transfer(
+        virtio::BLK_T_OUT,
+        ROUND_TRIP_SECTOR,
+        ROUND_TRIP_BYTES as u32,
+    )?;
 
     // Clear the buffer first, so that bytes which match only because they were never replaced
     // cannot pass the comparison.
@@ -184,9 +188,7 @@ fn round_trip(disk: &mut Disk, console: &mut dyn HalConsole) -> Result<(), Failu
 /// does not match it by accident.
 fn fill_pattern(out: &mut [u8]) {
     for (index, byte) in out.iter_mut().enumerate() {
-        *byte = (index as u8).wrapping_mul(7)
-            ^ ((index >> 8) as u8).wrapping_mul(131)
-            ^ 0xA5;
+        *byte = (index as u8).wrapping_mul(7) ^ ((index >> 8) as u8).wrapping_mul(131) ^ 0xA5;
     }
 }
 
@@ -354,7 +356,9 @@ impl Disk {
             virtio::block_read_chain(header, data, status, len)
         };
         for (index, descriptor) in chain.iter().enumerate() {
-            self.queue.ring.write(index as u64 * 16, &descriptor.to_bytes());
+            self.queue
+                .ring
+                .write(index as u64 * 16, &descriptor.to_bytes());
         }
 
         // Publish the chain: the head goes in the available ring at this request's slot, then

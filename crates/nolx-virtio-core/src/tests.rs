@@ -383,8 +383,14 @@ fn a_write_chain_makes_the_data_device_readable() {
     assert_eq!(chain[0].flags, DESC_NEXT, "the header is device-readable");
     assert_eq!(chain[1].addr, 0x2000);
     assert_eq!(chain[1].len, 2048);
-    assert_eq!(chain[1].flags, DESC_NEXT, "a write's data is read by the device, not written");
-    assert_eq!(chain[2].flags, DESC_WRITE, "the status byte is still device-writable");
+    assert_eq!(
+        chain[1].flags, DESC_NEXT,
+        "a write's data is read by the device, not written"
+    );
+    assert_eq!(
+        chain[2].flags, DESC_WRITE,
+        "the status byte is still device-writable"
+    );
     assert_eq!(block_write_chain(0, 0, 0, 512)[0].next, 1);
 }
 
