@@ -38,6 +38,7 @@ version = "0.1.0"
 name = "nolx-kernel"
 version = "0.1.0"
 dependencies = [
+ "nolx-block-core",
  "nolx-exec-core",
  "nolx-hal-core",
  "nolx-mm-core",

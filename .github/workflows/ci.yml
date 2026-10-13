@@ -201,9 +201,8 @@ jobs:
         run: |
           set -o pipefail
           # The disk the virtio-blk probe reads: 1 MiB, with a known pattern at the start of
-          # sector 0 that the probe checks against what the device returns.
-          truncate -s 1M build/disk.img
-          printf 'NOLX-BLK-SECTOR0' | dd of=build/disk.img conv=notrunc status=none
+          # sector 0 and a GUID Partition Table with two partitions. See tools/make-test-disk.py.
+          python3 tools/make-test-disk.py build/disk.img
           timeout 30 qemu-system-x86_64 \
             -kernel build/nolx.elf \
             -m 512M -nographic -no-reboot \
@@ -211,20 +210,20 @@ jobs:
             -device virtio-blk-pci,drive=vd0 \
             | tee build/serial.log || true
           cat build/serial.log >> /tmp/job.log
-      # The round trip wrote sectors 8 to 11 and the kernel printed their checksum. Here the
+      # The round trip wrote sectors 300 to 303 and the kernel printed their checksum. Here the
       # image file, as QEMU left it, is checksummed over the same sectors: a match means the
       # write reached the disk and was not only held in the device's cache.
       - name: The written sectors are on the disk image
         run: |
           set -e
-          line=$(grep -Eo 'wrote 4 sectors at 8, read back, crc32 0x[0-9a-f]{8} matches' build/serial.log | head -1 || true)
+          line=$(grep -Eo 'wrote 4 sectors at 300, read back, crc32 0x[0-9a-f]{8} matches' build/serial.log | head -1 || true)
           if [ -z "$line" ]; then
             echo "the virtio round trip did not report a checksum"
             exit 1
           fi
           want=$(echo "$line" | grep -Eo '0x[0-9a-f]{8}')
-          got=$(python3 -c "import zlib; d=open('build/disk.img','rb').read()[8*512:12*512]; print('0x%08x' % (zlib.crc32(d) & 0xffffffff))")
-          echo "the kernel wrote crc32 $want; the disk image's sectors 8 to 11 have crc32 $got"
+          got=$(python3 -c "import zlib; d=open('build/disk.img','rb').read()[300*512:304*512]; print('0x%08x' % (zlib.crc32(d) & 0xffffffff))")
+          echo "the kernel wrote crc32 $want; the disk image's sectors 300 to 303 have crc32 $got"
           if [ "$want" != "$got" ]; then
             echo "the disk image does not hold the data the kernel wrote"
             exit 1
@@ -368,8 +367,22 @@ jobs:
             echo "the virtio block device did not reach driver ok"
             exit 1
           fi
-          if ! grep -Eq 'virtio-blk: wrote 4 sectors at 8, read back, crc32 0x[0-9a-f]{8} matches the written data' build/serial.log; then
+          if ! grep -Eq 'virtio-blk: wrote 4 sectors at 300, read back, crc32 0x[0-9a-f]{8} matches the written data' build/serial.log; then
             echo "the virtio round trip did not verify"
+            exit 1
+          fi
+          # GPT: the header and its table pass the rules, and the two partitions the disk tool
+          # wrote are printed with their LBA ranges and names.
+          if ! grep -Fq 'virtio-blk: gpt: header and table verified, 2 partitions in use' build/serial.log; then
+            echo "the GPT header and table did not verify"
+            exit 1
+          fi
+          if ! grep -Fq 'virtio-blk: gpt partition 0: LBA 40-79 (40 sectors), name nolx-data' build/serial.log; then
+            echo "the first GPT partition was not reported as the disk tool wrote it"
+            exit 1
+          fi
+          if ! grep -Fq 'virtio-blk: gpt partition 1: LBA 128-255 (128 sectors), name nolx-log' build/serial.log; then
+            echo "the second GPT partition was not reported as the disk tool wrote it"
             exit 1
           fi
           if ! grep -Fq 'virtio-blk: sector 0 read, status ok, first 16 bytes match the disk image' build/serial.log; then

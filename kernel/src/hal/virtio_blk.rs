@@ -10,10 +10,15 @@
 //! the used ring to move before its result is read. Every wait is bounded, so a device that
 //! never answers is reported as a timeout instead of hanging boot.
 //!
-//! After the sector-0 read, the probe writes a 2 KiB pattern to sectors 8 to 11, reads it back,
-//! and compares CRC-32 checksums. Those sectors are not part of the image's known content; CI
-//! computes the same checksum over the image file after QEMU exits, so the write has to have
-//! reached the disk and not only the device's cache.
+//! After the sector-0 read, the probe reads the GUID Partition Table: the primary header in LBA 1
+//! and the table it names, checked with the `nolx-block-core` rules, then prints the partitions in
+//! use. Then it writes a 2 KiB pattern to sectors 300 to 303, which lie in the usable area between
+//! the partitions, reads it back, and compares CRC-32 checksums. CI computes the same checksum over
+//! the image file after QEMU exits, so the write has to have reached the disk and not only the
+//! device's cache.
+
+use alloc::vec;
+use nolx_block_core::{self as gpt, GptError, Header};
 
 use crate::hal::pci::LegacyPorts;
 use crate::mm::mmio::{self, Region};
@@ -35,9 +40,14 @@ const REQUEST_DATA: u64 = 512;
 /// The first bytes of sector 0 of the disk image, which CI writes before the boot. The probe
 /// checks them so that it proves the bytes came from the disk, not from memory it zeroed.
 const SECTOR_PATTERN: &[u8] = b"NOLX-BLK-SECTOR0";
-/// The first sector of the round-trip area, and how many sectors it spans.
-const ROUND_TRIP_SECTOR: u64 = 8;
+/// The first sector of the round-trip area, and how many sectors it spans. The area is in the
+/// usable part of the disk and between the partitions the CI image defines, so the write does not
+/// touch the partition table or a partition's data.
+const ROUND_TRIP_SECTOR: u64 = 300;
 const ROUND_TRIP_SECTORS: u32 = 4;
+/// The most bytes one request carries. The request page has room for more, but a bounded size
+/// keeps every transfer the same shape.
+const READ_CHUNK_BYTES: usize = 2048;
 /// Bytes in the round-trip area. The request page holds it after the header and status.
 const ROUND_TRIP_BYTES: usize = ROUND_TRIP_SECTORS as usize * virtio::SECTOR_BYTES as usize;
 
@@ -68,6 +78,10 @@ pub enum Failure {
     Pattern,
     /// The round trip read back different bytes from the ones written.
     RoundTrip,
+    /// The partition table did not pass the GPT rules.
+    Gpt(GptError),
+    /// A read was asked for a length that is not a whole number of sectors.
+    Unaligned,
 }
 
 impl From<MmioError> for Failure {
@@ -85,6 +99,12 @@ impl From<VirtioError> for Failure {
 impl From<mmio::Failure> for Failure {
     fn from(error: mmio::Failure) -> Self {
         Self::Window(error)
+    }
+}
+
+impl From<GptError> for Failure {
+    fn from(error: GptError) -> Self {
+        Self::Gpt(error)
     }
 }
 
@@ -152,7 +172,61 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
         SECTOR_PATTERN.len()
     );
 
+    read_partitions(&mut disk, sectors, console)?;
     round_trip(&mut disk, console)
+}
+
+/// Read the primary GPT header from LBA 1 and the table it names, check both against the
+/// `nolx-block-core` rules, and print each partition in use. The table is read in requests of
+/// [`READ_CHUNK_BYTES`]; the header and table are checked before any entry is trusted.
+fn read_partitions(
+    disk: &mut Disk,
+    capacity: u64,
+    console: &mut dyn HalConsole,
+) -> Result<(), Failure> {
+    let mut sector = [0u8; gpt::SECTOR_SIZE];
+    disk.read_sectors(1, &mut sector)?;
+    let header = Header::parse(&sector, 1, capacity)?;
+
+    let table_sectors = header.table_bytes().div_ceil(gpt::SECTOR_SIZE);
+    let mut table = vec![0u8; table_sectors * gpt::SECTOR_SIZE];
+    disk.read_sectors(header.entries_lba, &mut table)?;
+    gpt::verify_table(&header, &table)?;
+    let used = gpt::check_partitions(&header, &table)?;
+    let _ = writeln!(
+        console,
+        "virtio-blk: gpt: header and table verified, {used} partitions in use, usable LBA {}-{}",
+        header.first_usable, header.last_usable
+    );
+
+    for index in 0..header.entry_count {
+        let Some(part) = gpt::entry(&header, &table, index) else {
+            break;
+        };
+        if part.is_unused() {
+            continue;
+        }
+        let _ = write!(
+            console,
+            "virtio-blk: gpt partition {index}: LBA {}-{} ({} sectors), name ",
+            part.first_lba,
+            part.last_lba,
+            part.sectors()
+        );
+        print_name(console, &part.name);
+        let _ = writeln!(console);
+    }
+    Ok(())
+}
+
+/// Print a UTF-16 partition name, stopping at the first zero unit. An unpaired surrogate prints as
+/// the replacement character.
+fn print_name(console: &mut dyn HalConsole, name: &[u16]) {
+    let units = name.iter().copied().take_while(|&unit| unit != 0);
+    for decoded in core::char::decode_utf16(units) {
+        let ch = decoded.unwrap_or(char::REPLACEMENT_CHARACTER);
+        let _ = write!(console, "{ch}");
+    }
 }
 
 /// Write the round-trip pattern, read it back into a cleared buffer, and compare. Prints the
@@ -338,6 +412,23 @@ struct Disk {
 }
 
 impl Disk {
+    /// Read whole sectors starting at `sector` into `out`, one request of at most
+    /// [`READ_CHUNK_BYTES`] at a time.
+    fn read_sectors(&mut self, sector: u64, out: &mut [u8]) -> Result<(), Failure> {
+        if out.len() % gpt::SECTOR_SIZE != 0 {
+            return Err(Failure::Unaligned);
+        }
+        let mut done = 0;
+        while done < out.len() {
+            let len = (out.len() - done).min(READ_CHUNK_BYTES);
+            let first = sector + (done / gpt::SECTOR_SIZE) as u64;
+            self.transfer(virtio::BLK_T_IN, first, len as u32)?;
+            self.request.read(REQUEST_DATA, &mut out[done..done + len]);
+            done += len;
+        }
+        Ok(())
+    }
+
     /// Run one request of `len` bytes at `sector` and wait for the device to complete it. For a
     /// write, the data must already be in the request page; for a read, it is there afterwards.
     fn transfer(&mut self, kind: u32, sector: u64, len: u32) -> Result<(), Failure> {
