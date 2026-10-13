@@ -172,8 +172,14 @@ impl Header {
         let first_usable = le64(sector, 40);
         let last_usable = le64(sector, 48);
         let alternate_lba = le64(sector, 32);
+        // A primary table lies before the usable area and a backup table after it. Either way
+        // the table must be on the disk, and the usable area must be non-empty and on the disk.
+        let table_end = entries_lba.saturating_add(table_sectors);
+        let before_usable = table_end <= first_usable;
+        let after_usable = entries_lba > last_usable;
         if entries_lba < FIRST_TABLE_LBA
-            || entries_lba.saturating_add(table_sectors) > first_usable
+            || !(before_usable || after_usable)
+            || table_end > disk_sectors
             || first_usable > last_usable
             || last_usable >= disk_sectors
             || alternate_lba >= disk_sectors
