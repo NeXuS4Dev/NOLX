@@ -562,8 +562,11 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
 - virtio (`crates/nolx-virtio-core`, in progress): host-tested transport rules (capability
   discovery, notify address, feature negotiation, status sequence, split virtqueue layout,
   block request format). VIO-001 to VIO-009 are `tested-T1` in `docs/testing/assertions/drv.md`.
-  Not yet done: the kernel MMIO mapping facility (virtio BARs sit above the 2 GiB direct map),
-  the virtio-blk probe, and the CI QEMU disk.
+- MMIO windows (`crates/nolx-mm-core/src/mmio.rs`, `kernel/src/mm/mmio.rs`): device registers
+  outside the direct map are mapped uncached in PML4 slot 257. MMIO-001 to MMIO-004 are
+  `tested-T1`; MMIO-005 is `tested-T2` (the boot maps the local APIC through the window and
+  checks it against the direct map).
+  Not yet done: the virtio-blk probe and the CI QEMU disk.
 
 Not yet done: PCIe ECAM, MSI/MSI-X, and every driver below.
 
