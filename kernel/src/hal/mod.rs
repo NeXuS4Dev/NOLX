@@ -19,12 +19,12 @@ pub mod interrupts;
 pub mod ioapic;
 pub mod multiboot;
 pub mod pci;
-pub mod virtio_blk;
 pub mod pic;
 pub mod rtc;
 pub mod syscall;
 pub mod tables;
 pub mod timer;
+pub mod virtio_blk;
 
 use nolx_hal_core::console::HalConsole;
 

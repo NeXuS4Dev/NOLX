@@ -317,8 +317,14 @@ fn capacity_is_sectors_times_512_and_overflow_is_reported() {
 fn only_the_block_device_ids_are_accepted() {
     assert!(is_block_device(VENDOR_VIRTIO, DEVICE_BLOCK_TRANSITIONAL));
     assert!(is_block_device(VENDOR_VIRTIO, DEVICE_BLOCK_MODERN));
-    assert!(!is_block_device(VENDOR_VIRTIO, 0x1041), "the network device is not a block device");
-    assert!(!is_block_device(0x8086, DEVICE_BLOCK_MODERN), "the vendor must be virtio");
+    assert!(
+        !is_block_device(VENDOR_VIRTIO, 0x1041),
+        "the network device is not a block device"
+    );
+    assert!(
+        !is_block_device(0x8086, DEVICE_BLOCK_MODERN),
+        "the vendor must be virtio"
+    );
 }
 
 #[test]
@@ -330,18 +336,31 @@ fn a_read_chain_has_the_request_data_and_status_in_order() {
     assert_eq!(chain[0].next, 1);
     assert_eq!(chain[1].addr, 0x2000);
     assert_eq!(chain[1].len, 512);
-    assert_eq!(chain[1].flags, DESC_NEXT | DESC_WRITE, "the data is device-writable");
+    assert_eq!(
+        chain[1].flags,
+        DESC_NEXT | DESC_WRITE,
+        "the data is device-writable"
+    );
     assert_eq!(chain[1].next, 2);
     assert_eq!(chain[2].addr, 0x3000);
     assert_eq!(chain[2].len, 1);
-    assert_eq!(chain[2].flags, DESC_WRITE, "the status byte is device-writable and ends the chain");
+    assert_eq!(
+        chain[2].flags, DESC_WRITE,
+        "the status byte is device-writable and ends the chain"
+    );
 }
 
 #[test]
 fn a_block_status_is_ok_only_for_ok() {
     assert_eq!(block_status(BLK_S_OK), Ok(()));
-    assert_eq!(block_status(BLK_S_IOERR), Err(VirtioError::RequestFailed(BLK_S_IOERR)));
-    assert_eq!(block_status(BLK_S_UNSUPP), Err(VirtioError::RequestFailed(BLK_S_UNSUPP)));
+    assert_eq!(
+        block_status(BLK_S_IOERR),
+        Err(VirtioError::RequestFailed(BLK_S_IOERR))
+    );
+    assert_eq!(
+        block_status(BLK_S_UNSUPP),
+        Err(VirtioError::RequestFailed(BLK_S_UNSUPP))
+    );
 }
 
 #[test]

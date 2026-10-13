@@ -97,7 +97,10 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
 
     // Reset, then the status steps in the order the rules give.
     common.write8(at(common::DEVICE_STATUS), 0)?;
-    poll(|| Ok(common.read8(at(common::DEVICE_STATUS))? == 0), "reset")?;
+    poll(
+        || Ok(common.read8(at(common::DEVICE_STATUS))? == 0),
+        "reset",
+    )?;
     common.write8(at(common::DEVICE_STATUS), virtio::INIT_STATUS_SEQUENCE[0])?;
     common.write8(at(common::DEVICE_STATUS), virtio::INIT_STATUS_SEQUENCE[1])?;
     let accepted = virtio::negotiate(read_features(&common)?)?;
@@ -117,8 +120,8 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
         bdf.bus, bdf.device, bdf.function, queue.size
     );
 
-    let notify_offset = virtio::notify_address(&notify_cap, queue.notify_offset)
-        - u64::from(notify_cap.offset);
+    let notify_offset =
+        virtio::notify_address(&notify_cap, queue.notify_offset) - u64::from(notify_cap.offset);
     read_sector_zero(&queue, &notify, notify_offset)?;
     let _ = writeln!(
         console,
@@ -214,7 +217,10 @@ impl Dma {
     }
 
     fn pointer(&self, offset: u64, len: usize) -> *mut u8 {
-        assert!(offset + len as u64 <= PAGE_SIZE as u64, "dma access past its page");
+        assert!(
+            offset + len as u64 <= PAGE_SIZE as u64,
+            "dma access past its page"
+        );
         phys::direct_ptr::<u8>(self.phys + offset)
     }
 
@@ -266,8 +272,16 @@ fn setup_queue(common: &Region) -> Result<Queue, Failure> {
     common.write16(at(common::QUEUE_SIZE), size)?;
     let ring = Dma::new()?;
     write_u64(common, common::QUEUE_DESC, ring.address(0))?;
-    write_u64(common, common::QUEUE_DRIVER, ring.address(layout.avail_offset))?;
-    write_u64(common, common::QUEUE_DEVICE, ring.address(layout.used_offset))?;
+    write_u64(
+        common,
+        common::QUEUE_DRIVER,
+        ring.address(layout.avail_offset),
+    )?;
+    write_u64(
+        common,
+        common::QUEUE_DEVICE,
+        ring.address(layout.used_offset),
+    )?;
     let notify_offset = common.read16(at(common::QUEUE_NOTIFY_OFF))?;
     common.write16(at(common::QUEUE_ENABLE), 1)?;
     Ok(Queue {
@@ -281,7 +295,10 @@ fn setup_queue(common: &Region) -> Result<Queue, Failure> {
 /// Read sector 0 into the request page's data buffer, then check the status and the bytes.
 fn read_sector_zero(queue: &Queue, notify: &Region, notify_offset: u64) -> Result<(), Failure> {
     let request = Dma::new()?;
-    request.write(REQUEST_HEADER, &virtio::block_request_header(virtio::BLK_T_IN, 0));
+    request.write(
+        REQUEST_HEADER,
+        &virtio::block_request_header(virtio::BLK_T_IN, 0),
+    );
     // A status byte the device never writes stays at this value, which is not `BLK_S_OK`.
     request.write(REQUEST_STATUS, &[0xFF]);
 
