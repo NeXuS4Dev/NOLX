@@ -17,6 +17,12 @@
 //! * [`btree`] -- the B-tree every index in the filesystem is built from.
 //! * [`omap`] -- the object map: `(oid, xid)` to physical block.
 //! * [`mkfs`] -- formatting a device, shared by the kernel and `mkfs.nolxfs`.
+//! * [`spaceman`] -- the space manager (chunk-info blocks, bitmaps, reaper).
+//! * [`checkpoint`] -- the checkpoint ring: atomic commit of volume state.
+//! * [`volume`] -- the mounted filesystem itself: files, directories, links,
+//!   xattrs, snapshots.
+//! * [`fsck`] / [`dump`] -- the offline checker and the read-only dumper behind
+//!   `fsck.nolxfs` and `nolxfs-dump`.
 //!
 //! # Testing
 //!
@@ -32,10 +38,15 @@ extern crate alloc;
 
 pub mod blockdev;
 pub mod btree;
+pub mod checkpoint;
+pub mod dump;
 pub mod fletcher;
+pub mod fsck;
 pub mod mkfs;
 pub mod omap;
 pub mod on_disk;
+pub mod spaceman;
+pub mod volume;
 
 pub mod on_disk_gen;
 

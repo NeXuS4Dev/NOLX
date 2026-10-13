@@ -529,6 +529,26 @@ space manager. Full spec in `docs/fs/nolxfs-format.md`.
   crash injection at every write boundary with recovery asserted; fsck finds and repairs
   injected corruption; snapshot isolation property tests.
 
+**Status: implemented.** `crates/nolxfs` now carries the full stack —
+`spaceman.rs` (chunk-info blocks, allocation bitmaps, snapshot-horizon reaper),
+`checkpoint.rs` (checkpoint-ring commits with the descriptor block written last as
+the atomic commit point; recovery selects the newest valid checkpoint, tolerating a
+torn newest descriptor), `volume.rs` (the mounted filesystem: COW fs-tree,
+per-block extent reference counts, xattrs, hard links via sibling records,
+clone_file, snapshots with read-only mount-at-snapshot, and the fast-extent tree),
+`fsck.rs` and `dump.rs`. The host tools `fsck.nolxfs` and `nolxfs-dump`
+(check/repair; dump/ls/cat/stat as a FUSE-less mounter) join `mkfs.nolxfs`, and the
+VFS dispatches rmdir/link/symlink/readlink/unlink/rename/truncate to NOLXFS instead
+of returning ENOTSUP; the kernel boot self-test exercises those operations on
+`/mnt/nolxfs` (`nolxfs-m8 ok`). Assertions: `docs/testing/assertions/nxfs.md`
+(NXFS-001…015). Deliberate deviations from the letter of the spec, recorded in
+`docs/fs/nolxfs-format.md`: dentry keys are `(parent, name)` without a separate
+name-hash field, and the extent-reference count is stored per physical block
+appended to the 24-byte `phys_ext_val`. The passing CI run for this milestone will
+CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564) on revision `be7730a` passed all six jobs
+(boot-layer, on-disk-format, host-tests, lint, kernel, boot-smoke with the
+`nolxfs-m8 ok` marker asserted).
+
 ## M9 — Devices and drivers
 
 - PCI/PCIe enumeration, BAR assignment, MSI/MSI-X, capability walking.

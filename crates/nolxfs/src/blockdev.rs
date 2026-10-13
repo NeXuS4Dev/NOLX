@@ -153,6 +153,7 @@ pub trait BlockDevice {
 ///
 /// It can be told to start failing after N writes, which is how the crash-recovery tests
 /// simulate a power cut at an arbitrary point in a transaction.
+#[derive(Clone)]
 pub struct MemBlockDevice {
     data: Vec<u8>,
     block_size: usize,

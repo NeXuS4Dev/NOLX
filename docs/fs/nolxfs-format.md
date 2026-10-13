@@ -363,3 +363,28 @@ never sees a volume it cannot handle. The on-disk format version is in the conta
 superblock's `xid`-independent `features_*` set plus the magic; a v2 format gets a new
 magic, not a version field, so misinterpretation is impossible rather than merely
 detectable.
+
+## 12. Implementation notes (M8, as built)
+
+Two places where the implementation deliberately differs from the letter of
+the sections above; both are internal to the fs-tree encoding and invisible to
+readers that walk records generically:
+
+* **Dentry keys.** The generated `nolx_dentry_key_t` orders directory entries
+  by `(parent inode, name)` directly. There is no separate name-hash field in
+  the on-disk key; the "hash" the ordering was meant to provide is the record
+  order itself plus exact-name comparison on lookup. (Case-folded volumes do a
+  linear fallback scan when the exact lookup misses.)
+* **Extent reference counts.** The generated `nolx_phys_ext_val_t` is 24 bytes
+  and carries no count. The extent-reference tree stores the per-physical-block
+  reference count as an extra little-endian `u64` appended immediately after
+  those 24 bytes in the record value. References are tracked per 4 KiB block,
+  not per run, so partial overwrites of a shared run adjust counts exactly.
+
+Mounts are transactional: mutations accumulate against copy-on-write clones of
+the trees and become visible to a later mount only at `commit`, which writes
+the new checkpoint descriptor last. A volume dropped without committing must
+simply be remounted — the uncommitted clone blocks are unreachable garbage
+that the reaper (below the oldest snapshot's xid horizon) eventually returns
+to the space manager. Snapshot metadata itself lives in the checkpoint state
+stream, mirrored into the snapshot-metadata B-tree on every commit.

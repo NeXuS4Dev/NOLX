@@ -406,10 +406,55 @@ fn run_vfs_selftest(console: &mut dyn HalConsole) -> Result<(), &'static str> {
     vfs.close(&mut ctx, fd_nolx)
         .map_err(|_| "vfs selftest: close nolxfs failed")?;
 
+    // 5. Exercise the M8 NOLXFS operations through the VFS: hard links,
+    // symlinks, rename, mkdir/rmdir and unlink, all COW-persisted.
+    if vfs
+        .stat(&ctx, b"/mnt/nolxfs/boot.txt", Final::Follow)
+        .is_err()
+    {
+        return Err("vfs selftest: nolxfs stat before link failed");
+    }
+    vfs.link(&ctx, b"/mnt/nolxfs/boot.txt", b"/mnt/nolxfs/boot-link.txt")
+        .map_err(|e| match e {
+            errno::ENOENT => "vfs selftest: nolxfs link failed (ENOENT)",
+            errno::EEXIST => "vfs selftest: nolxfs link failed (EEXIST)",
+            errno::ENOSPC => "vfs selftest: nolxfs link failed (ENOSPC)",
+            errno::EIO => "vfs selftest: nolxfs link failed (EIO)",
+            _ => "vfs selftest: nolxfs link failed (other)",
+        })?;
+    let st = vfs
+        .stat(&ctx, b"/mnt/nolxfs/boot.txt", Final::Follow)
+        .map_err(|_| "vfs selftest: nolxfs stat after link failed")?;
+    if st.st_nlink != 2 {
+        return Err("vfs selftest: nolxfs nlink != 2 after link");
+    }
+    vfs.rename(
+        &ctx,
+        b"/mnt/nolxfs/boot-link.txt",
+        b"/mnt/nolxfs/boot-renamed.txt",
+    )
+    .map_err(|_| "vfs selftest: nolxfs rename failed")?;
+    vfs.symlink(&ctx, b"boot.txt", b"/mnt/nolxfs/boot-sym")
+        .map_err(|_| "vfs selftest: nolxfs symlink failed")?;
+    let target = vfs
+        .readlink(&ctx, b"/mnt/nolxfs/boot-sym")
+        .map_err(|_| "vfs selftest: nolxfs readlink failed")?;
+    if target != b"boot.txt" {
+        return Err("vfs selftest: nolxfs readlink mismatch");
+    }
+    vfs.mkdir(&ctx, b"/mnt/nolxfs/sub", 0o755)
+        .map_err(|_| "vfs selftest: nolxfs mkdir sub failed")?;
+    vfs.rmdir(&ctx, b"/mnt/nolxfs/sub")
+        .map_err(|_| "vfs selftest: nolxfs rmdir sub failed")?;
+    vfs.unlink(&ctx, b"/mnt/nolxfs/boot-renamed.txt")
+        .map_err(|_| "vfs selftest: nolxfs unlink renamed failed")?;
+    vfs.unlink(&ctx, b"/mnt/nolxfs/boot-sym")
+        .map_err(|_| "vfs selftest: nolxfs unlink sym failed")?;
+
     let _ = writeln!(
         console,
         "NOLX: vfs selftest: mounted tmpfs(/), devfs(/dev), initrd(/initrd), nolxfs(/mnt/nolxfs); \
-         tmpfs write/read {written} bytes verified={tmpfs_verified}, devfs ok, initrd ok, nolxfs ok; audit ok",
+         tmpfs write/read {written} bytes verified={tmpfs_verified}, devfs ok, initrd ok, nolxfs ok, nolxfs-m8 ok; audit ok",
     );
     Ok(())
 }

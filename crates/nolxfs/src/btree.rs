@@ -375,6 +375,12 @@ pub trait BlockAllocator {
     ///
     /// [`FsError::Device`] or an allocator-specific out-of-space error.
     fn alloc(&mut self) -> Result<u64>;
+
+    /// Return a block the tree no longer needs (an emptied merge sibling or an old
+    /// root child). The default keeps the block allocated, which is always safe;
+    /// allocators backed by the space manager override this to defer the free to the
+    /// reaper, so a block visible to a snapshot is never reused early.
+    fn free(&mut self, _block: u64) {}
 }
 
 /// A B-tree over a block device.
@@ -527,6 +533,48 @@ impl<'d, D: BlockDevice, A: BlockAllocator> BTree<'d, D, A> {
         let mut out = Vec::new();
         self.collect_into(self.root, &mut out)?;
         Ok(out)
+    }
+
+    /// The transaction id stamped on blocks this handle writes.
+    #[must_use]
+    pub const fn xid(&self) -> u64 {
+        self.xid
+    }
+
+    /// Stamp a different transaction id on blocks written from now on.
+    pub fn set_xid(&mut self, xid: u64) {
+        self.xid = xid;
+    }
+
+    /// Every block the tree occupies, root first, in traversal order.
+    ///
+    /// The volume layer defers these blocks to the reaper when it replaces a tree with
+    /// a clone, and `fsck` uses the same list as the reachable set. Corrupt interior
+    /// pointers surface as errors rather than being followed blindly.
+    ///
+    /// # Errors
+    ///
+    /// Device or corruption errors.
+    pub fn collect_blocks(&mut self) -> Result<Vec<u64>> {
+        let mut out = Vec::new();
+        self.collect_blocks_into(self.root, &mut out)?;
+        Ok(out)
+    }
+
+    fn collect_blocks_into(&mut self, block: u64, out: &mut Vec<u64>) -> Result<()> {
+        if block >= self.dev.block_count() {
+            return Err(FsError::BlockOutOfRange(block));
+        }
+        out.push(block);
+        let node = self.read_node(block)?;
+        if node.is_leaf() {
+            return Ok(());
+        }
+        let children: Vec<u64> = node.entries.iter().map(Entry::child_block).collect();
+        for child in children {
+            self.collect_blocks_into(child, out)?;
+        }
+        Ok(())
     }
 
     // ------------------------------------------------------------- internals
@@ -693,7 +741,278 @@ impl<'d, D: BlockDevice, A: BlockAllocator> BTree<'d, D, A> {
             Err(i) => i - 1,
         };
         let child = node.entries[index].child_block();
-        self.remove_from(child, key)
+        if !self.remove_from(child, key)? {
+            return Ok(false);
+        }
+        // The subtree shrank by one entry. If the child fell below the merge fill
+        // threshold and a sibling can absorb it (or be absorbed by it), merge them so
+        // a churned tree returns its blocks instead of keeping half-empty nodes.
+        self.rebalance_child(block, &mut node, index)?;
+        Ok(true)
+    }
+
+    /// Merge the child at `index` in `parent` with a sibling when it is under-filled.
+    ///
+    /// Writes the parent (or, when the root is left with one child, the shrunken
+    /// root). Separator keys in this tree are the smallest key of each child, so
+    /// concatenating siblings in index order keeps entries sorted, and a separator
+    /// left pointing at a key that was deleted is still a valid lower bound for
+    /// routing, which is why deletion never has to rewrite ancestors on the way down.
+    fn rebalance_child(
+        &mut self,
+        parent_block: u64,
+        parent: &mut Node,
+        index: usize,
+    ) -> Result<()> {
+        let block_size = self.dev.block_size();
+        let child_block = parent.entries[index].child_block();
+        let child = self.read_node(child_block)?;
+        let merge_floor = block_size * (gen::BTREE_MERGE_FILL_PCT as usize) / 100;
+        if !child.entries.is_empty() && child.encoded_len() >= merge_floor {
+            // Healthy fill: the parent is unchanged, but the caller already rewrote
+            // nothing, so there is nothing to persist here.
+            return Ok(());
+        }
+
+        // A root with a single child shrinks: the child becomes the root. The root
+        // block never moves (callers pin it), so the child's contents are copied up
+        // and the child's old block is returned to the allocator.
+        if parent_block == self.root && parent.entries.len() == 1 {
+            let mut new_root = child.clone();
+            if new_root.is_leaf() {
+                new_root.flags |= (gen::BTNODE_ROOT | gen::BTNODE_LEAF) as u16;
+            } else {
+                new_root.flags |= gen::BTNODE_ROOT as u16;
+            }
+            self.write_node(self.root, &new_root, true)?;
+            self.alloc.free(child_block);
+            return Ok(());
+        }
+
+        // Prefer merging into the left sibling; fall back to absorbing the right one.
+        if index > 0 {
+            let left_block = parent.entries[index - 1].child_block();
+            let mut left = self.read_node(left_block)?;
+            let combined_len = left.encoded_len() + child.encoded_len() - NODE_HEADER_SIZE;
+            if combined_len <= block_size {
+                left.entries.extend(child.entries.iter().cloned());
+                self.write_node(left_block, &left, false)?;
+                parent.entries.remove(index);
+                self.alloc.free(child_block);
+                self.write_node(parent_block, parent, parent_block == self.root)?;
+                return Ok(());
+            }
+        }
+        if index + 1 < parent.entries.len() {
+            let right_block = parent.entries[index + 1].child_block();
+            let right = self.read_node(right_block)?;
+            let combined_len = child.encoded_len() + right.encoded_len() - NODE_HEADER_SIZE;
+            if combined_len <= block_size {
+                let mut merged = child.clone();
+                merged.entries.extend(right.entries.iter().cloned());
+                self.write_node(child_block, &merged, false)?;
+                parent.entries.remove(index + 1);
+                self.alloc.free(right_block);
+                self.write_node(parent_block, parent, parent_block == self.root)?;
+                return Ok(());
+            }
+        }
+        // Neither sibling can absorb this node. Leave it under-filled rather than
+        // borrow entries: ordering and lookup stay correct, only space is wasted
+        // until a later deletion makes a merge possible.
+        Ok(())
+    }
+}
+
+/// Deep-copy the tree rooted at `root` into fresh blocks from `alloc`, returning the
+/// new root block.
+///
+/// Every node is re-encoded and sealed at `xid`; children are cloned before their
+/// parent so a parent never points at a block that has not been written. The source
+/// tree is not modified, which is the whole point: after a clone, the source remains
+/// a valid point-in-time view (a checkpoint or a snapshot) while the copy is mutated.
+///
+/// # Errors
+///
+/// Device errors, out-of-space from `alloc`, or corruption in the source tree.
+pub fn clone_subtree<D: BlockDevice, A: BlockAllocator>(
+    dev: &mut D,
+    alloc: &mut A,
+    root: u64,
+    kind: KeyKind,
+    subtype: u16,
+    xid: u64,
+) -> Result<u64> {
+    // `kind` is accepted for symmetry with `BTree::new`; node kinds are not
+    // re-encoded on clone, the decoded node already carries its layout.
+    let _ = kind;
+    clone_block(dev, alloc, root, root, subtype, xid)
+}
+
+fn clone_block<D: BlockDevice, A: BlockAllocator>(
+    dev: &mut D,
+    alloc: &mut A,
+    block: u64,
+    root: u64,
+    subtype: u16,
+    xid: u64,
+) -> Result<u64> {
+    let block_size = dev.block_size();
+    let mut buf = vec![0u8; block_size];
+    dev.read_block(block, &mut buf)?;
+    let expected = if block == root {
+        gen::OBJ_BTREE_ROOT
+    } else {
+        gen::OBJ_BTREE_NODE
+    };
+    let mut node = Node::decode(&buf, expected)?;
+    let new_block = alloc.alloc()?;
+    let is_root = block == root;
+    if !node.is_leaf() {
+        let children: Vec<u64> = node.entries.iter().map(Entry::child_block).collect();
+        let mut cloned_children = Vec::with_capacity(children.len());
+        for child in children {
+            cloned_children.push(clone_block(dev, alloc, child, root, subtype, xid)?);
+        }
+        for (entry, child) in node.entries.iter_mut().zip(cloned_children.iter()) {
+            entry.val = child.to_le_bytes().to_vec();
+        }
+    }
+    let obj_type = if is_root {
+        gen::OBJ_BTREE_ROOT
+    } else {
+        gen::OBJ_BTREE_NODE
+    };
+    let mut out = vec![0u8; block_size];
+    node.encode(&mut out, 0, xid, obj_type, subtype)?;
+    dev.write_block(new_block, &out)?;
+    Ok(new_block)
+}
+
+/// Read-only walk helpers shared by the volume and `fsck`: search and collect without
+/// a [`BTree`] handle (which needs `&mut` device access and an allocator).
+pub mod walk {
+    use super::{Entry, Node};
+    use crate::blockdev::BlockDevice;
+    use crate::btree::KeyKind;
+    use crate::on_disk::{FsError, Result};
+    use crate::on_disk_gen as gen;
+    use crate::Pod;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    /// Read and decode the node at `block`, expecting the root type at `root`.
+    ///
+    /// # Errors
+    ///
+    /// Device or corruption errors; a block past the end of the device is
+    /// [`FsError::BlockOutOfRange`], never a panic.
+    pub fn read_node_at<D: BlockDevice>(
+        dev: &D,
+        root: u64,
+        block: u64,
+    ) -> Result<(Node, gen::nolx_obj_phys_t)> {
+        if block >= dev.block_count() {
+            return Err(FsError::BlockOutOfRange(block));
+        }
+        let mut buf = vec![0u8; dev.block_size()];
+        dev.read_block(block, &mut buf)?;
+        let expected = if block == root {
+            gen::OBJ_BTREE_ROOT
+        } else {
+            gen::OBJ_BTREE_NODE
+        };
+        let header = gen::nolx_obj_phys_t::read_from(&buf).ok_or(FsError::TooShort {
+            have: buf.len(),
+            need: gen::nolx_obj_phys_t::DISK_SIZE,
+        })?;
+        let node = Node::decode(&buf, expected)?;
+        Ok((node, header))
+    }
+
+    /// Look up `key` in the tree rooted at `root` without mutating anything.
+    ///
+    /// # Errors
+    ///
+    /// Device or corruption errors.
+    pub fn search<D: BlockDevice>(
+        dev: &D,
+        root: u64,
+        kind: KeyKind,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        let mut block = root;
+        loop {
+            let (node, _) = read_node_at(dev, root, block)?;
+            let index = match node.find(kind, key) {
+                Ok(i) => i,
+                Err(_) if node.is_leaf() => return Ok(None),
+                Err(0) => return Ok(None),
+                Err(i) => i - 1,
+            };
+            if node.is_leaf() {
+                return Ok(Some(node.entries[index].val.clone()));
+            }
+            block = node.entries[index].child_block();
+        }
+    }
+
+    /// Every entry in the tree rooted at `root`, in key order.
+    ///
+    /// # Errors
+    ///
+    /// Device or corruption errors.
+    pub fn collect<D: BlockDevice>(dev: &D, root: u64) -> Result<Vec<Entry>> {
+        let mut out = Vec::new();
+        collect_into(dev, root, root, &mut out)?;
+        Ok(out)
+    }
+
+    fn collect_into<D: BlockDevice>(
+        dev: &D,
+        root: u64,
+        block: u64,
+        out: &mut Vec<Entry>,
+    ) -> Result<()> {
+        let (node, _) = read_node_at(dev, root, block)?;
+        if node.is_leaf() {
+            out.extend(node.entries.iter().cloned());
+            return Ok(());
+        }
+        let children: Vec<u64> = node.entries.iter().map(Entry::child_block).collect();
+        for child in children {
+            collect_into(dev, root, child, out)?;
+        }
+        Ok(())
+    }
+
+    /// Every block occupied by the tree rooted at `root`, root first.
+    ///
+    /// # Errors
+    ///
+    /// Device or corruption errors.
+    pub fn blocks<D: BlockDevice>(dev: &D, root: u64) -> Result<Vec<u64>> {
+        let mut out = Vec::new();
+        blocks_into(dev, root, root, &mut out)?;
+        Ok(out)
+    }
+
+    fn blocks_into<D: BlockDevice>(
+        dev: &D,
+        root: u64,
+        block: u64,
+        out: &mut Vec<u64>,
+    ) -> Result<()> {
+        let (node, _) = read_node_at(dev, root, block)?;
+        out.push(block);
+        if node.is_leaf() {
+            return Ok(());
+        }
+        let children: Vec<u64> = node.entries.iter().map(Entry::child_block).collect();
+        for child in children {
+            blocks_into(dev, root, child, out)?;
+        }
+        Ok(())
     }
 }
 

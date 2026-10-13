@@ -55,6 +55,18 @@ pub enum FsError {
     CorruptNode(&'static str),
     /// The operation cannot be done on a read-only mount.
     ReadOnly,
+    /// The named object does not exist.
+    NotFound,
+    /// The named object already exists.
+    AlreadyExists,
+    /// A path component that must be a directory is not one.
+    NotDirectory,
+    /// A directory was given where a non-directory is required.
+    IsDirectory,
+    /// A directory that must be empty still has entries.
+    NotEmpty,
+    /// A name exceeds the on-disk name length limit.
+    NameTooLong,
     /// The device failed.
     Device(crate::DevError),
 }
@@ -75,6 +87,12 @@ impl fmt::Display for FsError {
             Self::UnsupportedFeature(bits) => write!(f, "unsupported feature bits {bits:#x}"),
             Self::CorruptNode(what) => write!(f, "corrupt B-tree node: {what}"),
             Self::ReadOnly => write!(f, "volume is mounted read-only"),
+            Self::NotFound => write!(f, "no such file or directory"),
+            Self::AlreadyExists => write!(f, "file exists"),
+            Self::NotDirectory => write!(f, "not a directory"),
+            Self::IsDirectory => write!(f, "is a directory"),
+            Self::NotEmpty => write!(f, "directory not empty"),
+            Self::NameTooLong => write!(f, "file name too long"),
             Self::Device(e) => write!(f, "device error: {e:?}"),
         }
     }

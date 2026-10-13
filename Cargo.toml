@@ -11,6 +11,8 @@ members = [
     "crates/nolx-vfs",
     "kernel",
     "tools/mkfs-nolxfs",
+    "tools/fsck-nolxfs",
+    "tools/nolxfs-dump",
 ]
 # `cargo test` with no `-p` and no `--workspace` uses these. The kernel is deliberately
 # excluded: it is a `no_std` binary with no host test harness, and its testable HAL,
@@ -25,6 +27,8 @@ default-members = [
     "crates/nolxfs",
     "crates/nolx-vfs",
     "tools/mkfs-nolxfs",
+    "tools/fsck-nolxfs",
+    "tools/nolxfs-dump",
 ]
 
 [workspace.package]

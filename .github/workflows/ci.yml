@@ -256,7 +256,7 @@ jobs:
             "io: 16 major codes" \
             "NOLX: io selftest: 2 drivers, 2 stacked devices, 3 IORBs (1 sync, 1 async completion port, 1 cancelled), unload busy->ok; audit ok" \
             "NOLX: cache selftest: 1 shared map, 2 copy-writes, 3 copy-reads, 2 read-ahead pages, lazy writer + MmFlushSection flushed 2 dirty pages; audit ok" \
-            "NOLX: vfs selftest: mounted tmpfs(/), devfs(/dev), initrd(/initrd), nolxfs(/mnt/nolxfs); tmpfs write/read 32 bytes verified=true, devfs ok, initrd ok, nolxfs ok; audit ok" \
+            "NOLX: vfs selftest: mounted tmpfs(/), devfs(/dev), initrd(/initrd), nolxfs(/mnt/nolxfs); tmpfs write/read 32 bytes verified=true, devfs ok, initrd ok, nolxfs ok, nolxfs-m8 ok; audit ok" \
             "NOLX: io online" \
             "NOLX: round-robin T2:" \
             "NOLX: user mode T2: init spawned (pid 1), entering ring 3" \
