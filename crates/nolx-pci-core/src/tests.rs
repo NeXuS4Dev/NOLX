@@ -120,10 +120,7 @@ fn a_present_function_reports_its_identity_and_multifunction_bit() {
     let info = read_function(&mut machine, bdf(0, 1, 0)).expect("present");
     assert_eq!(info.vendor_id, 0x8086);
     assert_eq!(info.device_id, 0x1237);
-    assert_eq!(
-        (info.class, info.subclass, info.prog_if, info.revision),
-        (6, 0, 2, 7),
-    );
+    assert_eq!((info.class, info.subclass, info.prog_if, info.revision), (6, 0, 2, 7));
     assert_eq!(info.header_type, 0);
     assert!(info.multifunction);
 }
@@ -142,14 +139,14 @@ fn memory_bars_decode_width_and_prefetch() {
         Bar::Memory32 {
             base: 0xFEBC_0000,
             prefetchable: true,
-        },
+        }
     );
     assert_eq!(
         decode_bar(0xFEBC_0000, 0),
         Bar::Memory32 {
             base: 0xFEBC_0000,
             prefetchable: false,
-        },
+        }
     );
     // Type 0b10 is a 64-bit window: the high dword supplies bits 63:32.
     assert_eq!(
@@ -157,7 +154,7 @@ fn memory_bars_decode_width_and_prefetch() {
         Bar::Memory64 {
             base: 0x2_0010_0000,
             prefetchable: false,
-        },
+        }
     );
     // Type 0b01 is the legacy below-1-MiB window, reserved in PCI 3.0; refused, not misread.
     assert_eq!(decode_bar(0x0000_0002, 0), Bar::Reserved);
@@ -210,7 +207,7 @@ fn bars_are_sized_decoded_and_restored() {
         Bar::Memory64 {
             base: 0x2_0010_0000,
             prefetchable: true,
-        },
+        }
     );
     assert_eq!(set.slots[1], Bar::Unused);
     assert_eq!(set.sizes[0], Some(0x10_0000));
@@ -219,7 +216,7 @@ fn bars_are_sized_decoded_and_restored() {
         Bar::Memory32 {
             base: 0xFEBC_0000,
             prefetchable: false,
-        },
+        }
     );
     assert_eq!(set.sizes[2], Some(0x4000));
     assert_eq!(set.slots[3], Bar::Unused);
@@ -260,10 +257,7 @@ fn the_capability_list_is_walked_in_link_order() {
     machine.add(bdf(0, 1, 0), regs);
     let list = capabilities(&mut machine, bdf(0, 1, 0));
     assert!(!list.truncated);
-    assert_eq!(
-        list.as_slice(),
-        &[cap(0x50, 0x01), cap(0x60, 0x05), cap(0x70, 0x11)],
-    );
+    assert_eq!(list.as_slice(), &[cap(0x50, 0x01), cap(0x60, 0x05), cap(0x70, 0x11)]);
     assert_eq!(list.find(0x05).map(|entry| entry.offset), Some(0x60));
     assert_eq!(list.find(0x10), None);
 }
@@ -314,16 +308,12 @@ fn enumeration_follows_multifunction_devices_and_secondary_buses() {
 
     let inventory = enumerate(&mut machine);
     let found: Vec<Bdf> = inventory.as_slice().iter().map(|info| info.bdf).collect();
-    assert_eq!(
-        found,
-        vec![
-            bdf(0, 0, 0),
-            bdf(0, 1, 0),
-            bdf(0, 1, 2),
-            bdf(0, 2, 0),
-            bdf(1, 0, 0),
-        ],
-    );
+    assert_eq!(found.len(), 5);
+    assert_eq!(found[0], bdf(0, 0, 0));
+    assert_eq!(found[1], bdf(0, 1, 0));
+    assert_eq!(found[2], bdf(0, 1, 2));
+    assert_eq!(found[3], bdf(0, 2, 0));
+    assert_eq!(found[4], bdf(1, 0, 0));
     assert_eq!(inventory.refused_bridges, 0);
     assert!(!inventory.overflowed);
     let nic = inventory

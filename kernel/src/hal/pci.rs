@@ -57,7 +57,7 @@ pub fn init(console: &mut dyn HalConsole) {
         console,
         "pci: {} function(s), {} bridge(s) refused{note}",
         inventory.len,
-        inventory.refused_bridges,
+        inventory.refused_bridges
     );
     for info in inventory.as_slice() {
         let _ = writeln!(
@@ -72,7 +72,7 @@ pub fn init(console: &mut dyn HalConsole) {
             info.subclass,
             info.prog_if,
             info.revision,
-            info.header_type,
+            info.header_type
         );
     }
 }
