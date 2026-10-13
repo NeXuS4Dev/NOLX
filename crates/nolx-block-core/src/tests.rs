@@ -116,28 +116,40 @@ fn a_sector_shorter_than_a_header_is_refused() {
 fn a_header_without_the_signature_is_refused() {
     let mut image = disk(&[]);
     image[512] = b'X';
-    assert_eq!(parse_at(&primary_bytes(&image), 1), Err(GptError::BadSignature));
+    assert_eq!(
+        parse_at(&primary_bytes(&image), 1),
+        Err(GptError::BadSignature)
+    );
 }
 
 #[test]
 fn a_header_of_another_revision_is_refused() {
     let mut image = disk(&[]);
     image[512 + 10] = 0;
-    assert_eq!(parse_at(&primary_bytes(&image), 1), Err(GptError::BadRevision));
+    assert_eq!(
+        parse_at(&primary_bytes(&image), 1),
+        Err(GptError::BadRevision)
+    );
 }
 
 #[test]
 fn a_header_size_below_the_minimum_is_refused() {
     let mut image = disk(&[]);
     image[512 + 12..512 + 16].copy_from_slice(&91u32.to_le_bytes());
-    assert_eq!(parse_at(&primary_bytes(&image), 1), Err(GptError::BadHeaderSize));
+    assert_eq!(
+        parse_at(&primary_bytes(&image), 1),
+        Err(GptError::BadHeaderSize)
+    );
 }
 
 #[test]
 fn an_edited_header_without_a_new_crc_is_refused() {
     let mut image = disk(&[]);
     image[512 + 60] ^= 0xFF;
-    assert_eq!(parse_at(&primary_bytes(&image), 1), Err(GptError::BadHeaderCrc));
+    assert_eq!(
+        parse_at(&primary_bytes(&image), 1),
+        Err(GptError::BadHeaderCrc)
+    );
 }
 
 #[test]
@@ -151,7 +163,10 @@ fn a_nonzero_reserved_field_is_refused_even_with_a_valid_crc() {
 #[test]
 fn a_header_read_from_the_wrong_lba_is_refused() {
     let image = disk(&[]);
-    assert_eq!(parse_at(&primary_bytes(&image), DISK_SECTORS - 1), Err(GptError::BadLocation));
+    assert_eq!(
+        parse_at(&primary_bytes(&image), DISK_SECTORS - 1),
+        Err(GptError::BadLocation)
+    );
 }
 
 #[test]
@@ -190,14 +205,20 @@ fn a_table_with_a_bad_crc_is_refused() {
     let mut image = disk(&[(0, TYPE, 34, 133)]);
     image[1024 + 5] ^= 1;
     let h = parse_at(&primary_bytes(&image), 1).unwrap();
-    assert_eq!(verify_table(&h, table(&image)), Err(GptError::BadEntriesCrc));
+    assert_eq!(
+        verify_table(&h, table(&image)),
+        Err(GptError::BadEntriesCrc)
+    );
 }
 
 #[test]
 fn a_table_shorter_than_the_header_says_is_refused() {
     let image = disk(&[]);
     let h = parse_at(&primary_bytes(&image), 1).unwrap();
-    assert_eq!(verify_table(&h, &table(&image)[..100]), Err(GptError::EntriesTooShort));
+    assert_eq!(
+        verify_table(&h, &table(&image)[..100]),
+        Err(GptError::EntriesTooShort)
+    );
 }
 
 #[test]
@@ -225,21 +246,30 @@ fn used_entries_are_read_and_counted() {
 fn a_partition_outside_the_usable_area_is_refused() {
     let image = disk(&[(0, TYPE, 10, 50)]);
     let h = parse_at(&primary_bytes(&image), 1).unwrap();
-    assert_eq!(check_partitions(&h, table(&image)), Err(GptError::PartitionOutOfRange));
+    assert_eq!(
+        check_partitions(&h, table(&image)),
+        Err(GptError::PartitionOutOfRange)
+    );
 }
 
 #[test]
 fn a_partition_that_ends_before_it_starts_is_refused() {
     let image = disk(&[(0, TYPE, 300, 200)]);
     let h = parse_at(&primary_bytes(&image), 1).unwrap();
-    assert_eq!(check_partitions(&h, table(&image)), Err(GptError::PartitionInverted));
+    assert_eq!(
+        check_partitions(&h, table(&image)),
+        Err(GptError::PartitionInverted)
+    );
 }
 
 #[test]
 fn two_partitions_sharing_a_block_are_refused() {
     let image = disk(&[(0, TYPE, 100, 199), (1, TYPE_TWO, 150, 250)]);
     let h = parse_at(&primary_bytes(&image), 1).unwrap();
-    assert_eq!(check_partitions(&h, table(&image)), Err(GptError::PartitionsOverlap));
+    assert_eq!(
+        check_partitions(&h, table(&image)),
+        Err(GptError::PartitionsOverlap)
+    );
 }
 
 #[test]
