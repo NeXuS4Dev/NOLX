@@ -373,11 +373,15 @@ pub fn check<D: BlockDevice>(dev: &mut D, repair: bool) -> Result<FsckReport> {
 
     for (&ino, inode) in &inodes {
         let mode = u32::from(inode.mode);
-        match mode & 0o170_000 {
-            0o040_000 => report.num_dirs += 1,
-            0o100_000 => report.num_files += 1,
-            0o120_000 => report.num_symlinks += 1,
-            _ => {}
+        // The reserved private/snapshot directories are internal plumbing;
+        // the volume counters track the root plus user-visible entries.
+        if ino != gen::PRIVATE_DIR_INO && ino != gen::SNAPSHOT_DIR_INO {
+            match mode & 0o170_000 {
+                0o040_000 => report.num_dirs += 1,
+                0o100_000 => report.num_files += 1,
+                0o120_000 => report.num_symlinks += 1,
+                _ => {}
+            }
         }
         if inode.change_time < inode.create_time && inode.create_time != 0 {
             report.issues.push(FsckIssue::TimestampOrder { ino });
@@ -519,6 +523,13 @@ pub fn check<D: BlockDevice>(dev: &mut D, repair: bool) -> Result<FsckReport> {
     }
     collect_tree_blocks(dev, layout.container_omap_tree, &mut reachable, &mut report);
     collect_tree_blocks(dev, layout.volume_omap_tree, &mut reachable, &mut report);
+    collect_tree_blocks(dev, layout.snap_meta_tree_root, &mut reachable, &mut report);
+    if let Some(state) = &state {
+        collect_tree_blocks(dev, state.snapmeta_root, &mut reachable, &mut report);
+        if state.fext_root != 0 {
+            collect_tree_blocks(dev, state.fext_root, &mut reachable, &mut report);
+        }
+    }
     if let Some(f) = &found {
         reachable.insert(f.desc_block);
         reachable.insert(f.csb_block);

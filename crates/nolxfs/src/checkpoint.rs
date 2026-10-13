@@ -863,4 +863,3 @@ mod tests {
         assert!(find_latest(&dev, &layout).unwrap().is_none());
     }
 }
-
