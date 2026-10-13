@@ -1947,7 +1947,10 @@ fn dentry_key(parent: u64, name: &str) -> Vec<u8> {
         name_len: name.len() as u16,
         pad: 0,
     };
-    let mut key = hdr.as_bytes().to_vec();
+    // `as_bytes` covers `size_of`, which pads this 12-byte header to 16; the
+    // on-disk key is the DISK_SIZE prefix, and the padding bytes are
+    // unspecified — including them would make the key depend on stack garbage.
+    let mut key = hdr.as_bytes()[..gen::nolx_dentry_key_t::DISK_SIZE].to_vec();
     key.extend_from_slice(name.as_bytes());
     key
 }
@@ -1972,7 +1975,7 @@ fn sibling_key(child: u64, parent: u64, name: &str) -> Vec<u8> {
         name_len: name.len() as u16,
         pad: 0,
     };
-    let mut key = hdr.as_bytes().to_vec();
+    let mut key = hdr.as_bytes()[..gen::nolx_sibling_key_t::DISK_SIZE].to_vec();
     key.extend_from_slice(name.as_bytes());
     key
 }
@@ -1983,7 +1986,7 @@ fn sibling_val(parent: u64, name: &str, file_type: u16) -> Vec<u8> {
         nlen: name.len() as u16,
         r#type: file_type,
     };
-    let mut bytes = val.as_bytes().to_vec();
+    let mut bytes = val.as_bytes()[..gen::nolx_sibling_val_t::DISK_SIZE].to_vec();
     bytes.extend_from_slice(name.as_bytes());
     bytes
 }
@@ -2002,7 +2005,7 @@ fn xattr_key(ino: u64, name: &str) -> Vec<u8> {
         name_len: name.len() as u16,
         pad: 0,
     };
-    let mut key = hdr.as_bytes().to_vec();
+    let mut key = hdr.as_bytes()[..gen::nolx_xattr_key_t::DISK_SIZE].to_vec();
     key.extend_from_slice(name.as_bytes());
     key
 }

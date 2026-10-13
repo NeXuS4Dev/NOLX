@@ -491,26 +491,13 @@ mod tests {
 }
 
 #[cfg(test)]
-mod diag_tests {
+mod regression_tests {
     use super::*;
     use nolxfs::blockdev::MemBlockDevice;
     use nolxfs::volume::Volume;
 
     #[test]
-    fn diag_dump_keys() {
-        let mut vol = NolxfsVolume::format_and_mount(4096, 96, "root").unwrap();
-        let _etc = vol.mkdir(NOLXFS_ROOT_INO, "etc", 0o755, 0, 0).unwrap();
-        let root_block = vol.volume().fs_root();
-        let entries = nolxfs::btree::walk::collect(vol.volume().device(), root_block).unwrap();
-        let keys: Vec<String> = entries
-            .iter()
-            .map(|e| e.key.iter().map(|b| format!("{b:02x}")).collect())
-            .collect();
-        panic!("fs_root={root_block} lookup={:?} keys={keys:?}", vol.lookup(NOLXFS_ROOT_INO, "etc"));
-    }
-
-    #[test]
-    fn diag_sparse_remount_lookup() {
+    fn sparse_remount_lookup_regression() {
         let mut vol = NolxfsVolume::format_and_mount(4096, 96, "root").unwrap();
         let etc = vol.mkdir(NOLXFS_ROOT_INO, "etc", 0o755, 0, 0).unwrap();
         assert!(
@@ -537,7 +524,7 @@ mod diag_tests {
     }
 
     #[test]
-    fn diag_mem_remount_lookup() {
+    fn mem_remount_lookup_regression() {
         let dev = MemBlockDevice::new(4096, 96);
         let vol = Volume::format(
             dev,
