@@ -11,13 +11,13 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | Status | Assertions | Cumulative verified at or above status |
 |---|---|---|
 | `unimplemented` | 0 | 100.0% |
-| `implemented` | 13 | 100.0% |
-| `tested-T1` | 119 | 92.1% |
+| `implemented` | 4 | 100.0% |
+| `tested-T1` | 127 | 97.6% |
 | `pending-T2` | 0 | — |
-| `tested-T2` | 33 | 20.0% |
+| `tested-T2` | 34 | 20.6% |
 | `tested-T3` | 0 | 0.0% |
 
-**152 of 165 assertions have a passing automated test; 0 are awaiting T2 results.**
+**161 of 165 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
@@ -30,14 +30,14 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | mm | 34 | 34 | 23 | 0 | 11 | 0 |
 | nxfs | 15 | 15 | 14 | 0 | 1 | 0 |
 | obj | 14 | 14 | 9 | 0 | 5 | 0 |
-| pci | 9 | 9 | 0 | 0 | 0 | 0 |
+| pci | 9 | 9 | 8 | 0 | 1 | 0 |
 | vfs | 48 | 48 | 46 | 0 | 2 | 0 |
 
 ## Unimplemented assertions (0)
 
 None.
 
-## Implemented but untested (13)
+## Implemented but untested (4)
 
 | ID | Specification reference |
 |---|---|
@@ -45,15 +45,6 @@ None.
 | HAL-019 | APIC arithmetic: x2APIC MSRs, compressed TPR priority classes, timer divisors, and HPET-based counter calibration are checked |
 | HAL-020 | HPET clocksource: 32-bit MMIO reads and wrap extension produce monotonic nanoseconds |
 | HAL-021 | I/O APIC routes: GSI windows and ISA overrides are validated, redirections start masked, and NMI sources use MADT polarity/trigger flags |
-| PCI-001 | NOLX M9 Configuration address: the `0xCF8` value packs enable, bus, device, function, and the dword index, and discards the low two offset bits |
-| PCI-002 | NOLX M9 Addressing limits: a device number of 32 or more and a function number of 8 or more are refused before any access |
-| PCI-003 | NOLX M9 Function identity: a vendor of 0xFFFF or 0 is absent; a present function reports vendor, device, class, subclass, prog-if, revision, header type, and the multifunction bit |
-| PCI-004 | NOLX M9 BAR decoding: I/O, 32-bit and 64-bit memory windows, and reserved types are decoded from the low dword and, for 64-bit windows, the high dword; a 64-bit window occupies two slots |
-| PCI-005 | NOLX M9 BAR sizing: the window size is the power of two given by the probe mask; a slot that implements no bits has no size; every probed register is restored to its original value |
-| PCI-006 | NOLX M9 Capability walk: the list is read only when the status bit says it exists, pointers into the header are refused, and a looped list is bounded and reported as truncated |
-| PCI-007 | NOLX M9 Bus enumeration: every bus is scanned once; multifunction devices expose functions 0 to 7; buses beyond 0 are reached only through a PCI-to-PCI bridge whose secondary bus is above its own; a bridge that points back is refused and the scan terminates |
-| PCI-008 | NOLX M9 Inventory capacity: an inventory that is full refuses the next function and records that the list is incomplete |
-| PCI-009 | NOLX M9 Boot discovery: the kernel enumerates configuration space through the legacy ports before the periodic timer starts and prints one `pci:` line per function, with a summary that flags an incomplete inventory |
 
 ## Pending T2 verification (0)
 
@@ -192,15 +183,15 @@ None.
 | OBJ-012 | obj | Session directories are initialized under `\\Sessions\\<id>` and the same child name in two sessions resolves to distinct objects | `tested-T2` | `kernel/src/obj/boot.rs` selftest creates `SharedName` in sessions 0 and 1 and checks distinct ids and lookups, then requires the header pool back where it started. Boot marker `NOLX: obj session selftest: sessions 0 and 1 are isolated` (CI run 38249363821, revision 15aee68, boot smoke green). |
 | OBJ-013 | obj | Private namespaces isolate identical paths, enforce boundary READ/WRITE/DELETE checks, audit allowed and refused operations, reject destruction while nonempty, and invalidate stale ids after slot reuse | `tested-T2` | `kernel/src/obj/boot.rs` selftest creates same-path objects in two roots, follows a private link, opens through it, checks one outsider denial and an exact audit delta (15 decisions, 1 refused), cleans up objects/directories, and verifies stale-generation rejection and nonempty destroy refusal. Boot marker `NOLX: obj private namespace selftest: boundaries enforced, isolated roots` (CI run 38249363821, revision 15aee68, boot smoke green). |
 | OBJ-014 | obj | The generic private namespace primitive gates reads, writes, deletes, and symlink creation with its boundary descriptor while preserving symlink resolution within its independent root | `tested-T1` | `crates/nolx-obj-core/src/namespace.rs` tests `private_namespaces_are_isolated_for_the_same_path`, `private_namespace_symbolic_links_stay_inside_their_root`, and `private_namespace_boundary_gates_read_write_and_delete`. |
-| PCI-001 | pci | NOLX M9 Configuration address: the `0xCF8` value packs enable, bus, device, function, and the dword index, and discards the low two offset bits | `implemented` | nolx-pci-core tests::config_address_packs_bus_device_function_and_dword |
-| PCI-002 | pci | NOLX M9 Addressing limits: a device number of 32 or more and a function number of 8 or more are refused before any access | `implemented` | nolx-pci-core tests::addresses_the_hardware_cannot_express_are_refused |
-| PCI-003 | pci | NOLX M9 Function identity: a vendor of 0xFFFF or 0 is absent; a present function reports vendor, device, class, subclass, prog-if, revision, header type, and the multifunction bit | `implemented` | nolx-pci-core tests::an_absent_function_is_not_recorded, tests::a_present_function_reports_its_identity_and_multifunction_bit |
-| PCI-004 | pci | NOLX M9 BAR decoding: I/O, 32-bit and 64-bit memory windows, and reserved types are decoded from the low dword and, for 64-bit windows, the high dword; a 64-bit window occupies two slots | `implemented` | nolx-pci-core tests::io_bars_decode_to_their_port_and_zero_is_unused, tests::memory_bars_decode_width_and_prefetch |
-| PCI-005 | pci | NOLX M9 BAR sizing: the window size is the power of two given by the probe mask; a slot that implements no bits has no size; every probed register is restored to its original value | `implemented` | nolx-pci-core tests::bar_sizes_are_powers_of_two_from_the_probe_mask, tests::bars_are_sized_decoded_and_restored |
-| PCI-006 | pci | NOLX M9 Capability walk: the list is read only when the status bit says it exists, pointers into the header are refused, and a looped list is bounded and reported as truncated | `implemented` | nolx-pci-core tests::a_function_without_a_capability_bit_has_no_list, tests::the_capability_list_is_walked_in_link_order, tests::a_pointer_into_the_header_is_refused_and_a_loop_is_bounded |
-| PCI-007 | pci | NOLX M9 Bus enumeration: every bus is scanned once; multifunction devices expose functions 0 to 7; buses beyond 0 are reached only through a PCI-to-PCI bridge whose secondary bus is above its own; a bridge that points back is refused and the scan terminates | `implemented` | nolx-pci-core tests::enumeration_follows_multifunction_devices_and_secondary_buses, tests::a_bridge_that_points_back_is_refused_and_enumeration_terminates |
-| PCI-008 | pci | NOLX M9 Inventory capacity: an inventory that is full refuses the next function and records that the list is incomplete | `implemented` | nolx-pci-core tests::an_inventory_refuses_the_function_after_its_last_slot |
-| PCI-009 | pci | NOLX M9 Boot discovery: the kernel enumerates configuration space through the legacy ports before the periodic timer starts and prints one `pci:` line per function, with a summary that flags an incomplete inventory | `implemented` | kernel/src/hal/pci.rs init; boot-smoke asserts `pci: N function(s), M bridge(s) refused` in .github/workflows/ci.yml (promotion to tested-T2 pending a green run) |
+| PCI-001 | pci | NOLX M9 Configuration address: the `0xCF8` value packs enable, bus, device, function, and the dword index, and discards the low two offset bits | `tested-T1` | nolx-pci-core tests::config_address_packs_bus_device_function_and_dword |
+| PCI-002 | pci | NOLX M9 Addressing limits: a device number of 32 or more and a function number of 8 or more are refused before any access | `tested-T1` | nolx-pci-core tests::addresses_the_hardware_cannot_express_are_refused |
+| PCI-003 | pci | NOLX M9 Function identity: a vendor of 0xFFFF or 0 is absent; a present function reports vendor, device, class, subclass, prog-if, revision, header type, and the multifunction bit | `tested-T1` | nolx-pci-core tests::an_absent_function_is_not_recorded, tests::a_present_function_reports_its_identity_and_multifunction_bit |
+| PCI-004 | pci | NOLX M9 BAR decoding: I/O, 32-bit and 64-bit memory windows, and reserved types are decoded from the low dword and, for 64-bit windows, the high dword; a 64-bit window occupies two slots | `tested-T1` | nolx-pci-core tests::io_bars_decode_to_their_port_and_zero_is_unused, tests::memory_bars_decode_width_and_prefetch |
+| PCI-005 | pci | NOLX M9 BAR sizing: the window size is the power of two given by the probe mask; a slot that implements no bits has no size; every probed register is restored to its original value | `tested-T1` | nolx-pci-core tests::bar_sizes_are_powers_of_two_from_the_probe_mask, tests::bars_are_sized_decoded_and_restored |
+| PCI-006 | pci | NOLX M9 Capability walk: the list is read only when the status bit says it exists, pointers into the header are refused, and a looped list is bounded and reported as truncated | `tested-T1` | nolx-pci-core tests::a_function_without_a_capability_bit_has_no_list, tests::the_capability_list_is_walked_in_link_order, tests::a_pointer_into_the_header_is_refused_and_a_loop_is_bounded |
+| PCI-007 | pci | NOLX M9 Bus enumeration: every bus is scanned once; multifunction devices expose functions 0 to 7; buses beyond 0 are reached only through a PCI-to-PCI bridge whose secondary bus is above its own; a bridge that points back is refused and the scan terminates | `tested-T1` | nolx-pci-core tests::enumeration_follows_multifunction_devices_and_secondary_buses, tests::a_bridge_that_points_back_is_refused_and_enumeration_terminates |
+| PCI-008 | pci | NOLX M9 Inventory capacity: an inventory that is full refuses the next function and records that the list is incomplete | `tested-T1` | nolx-pci-core tests::an_inventory_refuses_the_function_after_its_last_slot |
+| PCI-009 | pci | NOLX M9 Boot discovery: the kernel enumerates configuration space through the legacy ports before the periodic timer starts and prints one `pci:` line per function, with a summary that flags an incomplete inventory | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `pci: N function(s), M bridge(s) refused` (N >= 1); workflow [38370090989](https://github.com/NeXuS4Dev/NOLX/actions/runs/38370090989) on revision `3a15bf4` passed all six jobs |
 | PN-001 | vfs | XBD 4.12 Pathname Resolution: a pathname beginning with a slash resolves against the root | `tested-T1` | crates/nolx-vfs path::tests::leading_slash_ignores_the_start_node |
 | PN-002 | vfs | XBD 4.12 Pathname Resolution: the empty pathname is invalid | `tested-T1` | crates/nolx-vfs path::tests::empty_path_is_enoent |
 | PN-003 | vfs | XBD 4.12 Pathname Resolution: the last component may be empty, and then refers to the directory itself | `tested-T1` | crates/nolx-vfs path::tests::trailing_slash_requires_a_directory |

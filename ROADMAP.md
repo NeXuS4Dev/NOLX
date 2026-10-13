@@ -555,9 +555,10 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
 holds the host-testable PCI configuration-space logic -- `0xCF8` address encoding, function
 identity, BAR decoding and sizing with restore-after-probe, capability-list walking with a
 bounded loop guard, and bridge-aware bus enumeration -- behind a `ConfigSpace` trait. Assertions
-PCI-001 to PCI-008 are recorded as `implemented` in `docs/testing/assertions/pci.md`. Not yet
-done: the kernel `ConfigSpace` over port I/O and its boot inventory marker, PCIe ECAM, MSI/MSI-X,
-and every driver below. Those rows are promoted only once CI has run them.
+PCI-001 to PCI-008 are `tested-T1` and PCI-009 is `tested-T2` in `docs/testing/assertions/pci.md`;
+the kernel binds the logic to ports `0xCF8`/`0xCFC` and prints the inventory during boot (CI run
+[38370090989](https://github.com/NeXuS4Dev/NOLX/actions/runs/38370090989)). Not yet done: BAR
+sizing at boot, PCIe ECAM, MSI/MSI-X, and every driver below.
 
 
 - PCI/PCIe enumeration, BAR assignment, MSI/MSI-X, capability walking.
