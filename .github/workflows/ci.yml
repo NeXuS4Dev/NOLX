@@ -325,6 +325,12 @@ jobs:
             echo "the NUMA node list was not built"
             exit 1
           fi
+          # Device discovery: the legacy configuration ports were read and at least one function
+          # answered. The summary line is the evidence; each function has its own `pci:` line.
+          if ! grep -Eq 'pci: [1-9][0-9]* function\(s\), [0-9]+ bridge\(s\) refused' build/serial.log; then
+            echo "PCI discovery did not report any function"
+            exit 1
+          fi
           # The pools are charged by the code that consumes memory -- the heap takes the
           # nonpaged pool, page tables take the system PTE pool -- and the report is the
           # executive's view of the same numbers.
