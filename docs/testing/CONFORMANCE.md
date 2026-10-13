@@ -12,18 +12,18 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 |---|---|---|
 | `unimplemented` | 0 | 100.0% |
 | `implemented` | 4 | 100.0% |
-| `tested-T1` | 140 | 97.2% |
-| `pending-T2` | 1 | — |
-| `tested-T2` | 35 | 19.4% |
+| `tested-T1` | 140 | 97.8% |
+| `pending-T2` | 0 | — |
+| `tested-T2` | 36 | 20.0% |
 | `tested-T3` | 0 | 0.0% |
 
-**175 of 180 assertions have a passing automated test; 1 are awaiting T2 results.**
+**176 of 180 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
 | Area | Assertions | Implemented | Tested (T1) | Pending (T2) | Tested (T2) | Tested (T3) |
 |---|---|---|---|---|---|---|
-| drv | 14 | 14 | 13 | 1 | 0 | 0 |
+| drv | 14 | 14 | 13 | 0 | 1 | 0 |
 | elf | 3 | 3 | 3 | 0 | 0 | 0 |
 | exec | 12 | 12 | 9 | 0 | 3 | 0 |
 | hal | 25 | 25 | 11 | 0 | 10 | 0 |
@@ -47,11 +47,9 @@ None.
 | HAL-020 | HPET clocksource: 32-bit MMIO reads and wrap extension produce monotonic nanoseconds |
 | HAL-021 | I/O APIC routes: GSI windows and ISA overrides are validated, redirections start masked, and NMI sources use MADT polarity/trigger flags |
 
-## Pending T2 verification (1)
+## Pending T2 verification (0)
 
-| ID | Specification reference | Configured test |
-|---|---|---|
-| MMIO-005 | NOLX M9 Boot window check: the local APIC is mapped through the window, uncached, and its version register reads the same value as through the direct map | `.github/workflows/ci.yml` boot-smoke asserts `mm: mmio: LAPIC 0x... at 0x...: uncached=true, version 0x... read through the window matches the direct map`; kernel/src/mm/mmio.rs selfcheck |
+None.
 
 ## All assertions
 
@@ -159,7 +157,7 @@ None.
 | MMIO-002 | drv | NOLX M9 Window refusals: an empty range, a range past the physical address space, and a range that starts inside the direct map (cacheable RAM) are refused before any table is edited | `tested-T1` | nolx-mm-core tests::an_empty_range_is_refused, tests::ranges_past_the_physical_address_space_are_refused, tests::a_range_that_starts_inside_the_direct_map_is_refused |
 | MMIO-003 | drv | NOLX M9 Window mapping: the window occupies PML4 slot 257, directly above the direct map; its pages are present, writable, not executable, and uncached (cache-disable with write-through), and never user or global | `tested-T1` | nolx-mm-core tests::mmio_pages_are_uncached_writable_and_never_executable, tests::the_window_slot_is_the_one_above_the_direct_map |
 | MMIO-004 | drv | NOLX M9 Register access: a read or write through a mapped range is refused unless its width is 1, 2, or 4 bytes, its offset is aligned to the width, and it lies inside the range | `tested-T1` | nolx-mm-core tests::accesses_must_be_aligned_and_inside_the_region |
-| MMIO-005 | drv | NOLX M9 Boot window check: the local APIC is mapped through the window, uncached, and its version register reads the same value as through the direct map | `pending-T2` | `.github/workflows/ci.yml` boot-smoke asserts `mm: mmio: LAPIC 0x... at 0x...: uncached=true, version 0x... read through the window matches the direct map`; kernel/src/mm/mmio.rs selfcheck |
+| MMIO-005 | drv | NOLX M9 Boot window check: the local APIC is mapped through the window, uncached, and its version register reads the same value as through the direct map | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `mm: mmio: LAPIC 0x... at 0x...: uncached=true, version 0x... read through the window matches the direct map`; kernel/src/mm/mmio.rs selfcheck; workflow [38400960802](https://github.com/NeXuS4Dev/NOLX/actions/runs/38400960802) on the final revision passed all six jobs. An earlier run on the same kernel code, [38400282521](https://github.com/NeXuS4Dev/NOLX/actions/runs/38400282521), failed at the boot-marker step; its cause was not confirmed, and the rerun on identical code passed. |
 | MNT-001 | vfs | NOLX M7 Mount Propagation: shared peer groups replicate submounts and unmounts, slave mounts receive master events one-way, private mounts isolate events, and unbindable mounts refuse bind operations with EINVAL | `tested-T1` | crates/nolx-vfs mount::tests::shared_peer_group_propagates_submounts_and_unmounts, slave_propagation_is_one_way_from_master_to_slave, private_and_unbindable_mounts_enforce_isolation |
 | MNT-002 | vfs | NOLX M7 Pivot Root: pivot_root swaps the root mount and moves the previous root under put_old inside the new root | `tested-T1` | crates/nolx-vfs mount::tests::pivot_root_moves_old_root_under_put_old |
 | NXFS-001 | nxfs | NOLXFS format §3–§6: mkfs→mount→create→write→fsync→remount round trip on an in-memory device returns byte-identical data | `tested-T1` | crates/nolxfs volume::tests::create_write_read_round_trip_survives_remount; CI [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564) on revision `be7730a` passed host-tests. |
