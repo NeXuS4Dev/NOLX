@@ -120,7 +120,10 @@ fn a_present_function_reports_its_identity_and_multifunction_bit() {
     let info = read_function(&mut machine, bdf(0, 1, 0)).expect("present");
     assert_eq!(info.vendor_id, 0x8086);
     assert_eq!(info.device_id, 0x1237);
-    assert_eq!((info.class, info.subclass, info.prog_if, info.revision), (6, 0, 2, 7));
+    assert_eq!(
+        (info.class, info.subclass, info.prog_if, info.revision),
+        (6, 0, 2, 7)
+    );
     assert_eq!(info.header_type, 0);
     assert!(info.multifunction);
 }
@@ -257,7 +260,10 @@ fn the_capability_list_is_walked_in_link_order() {
     machine.add(bdf(0, 1, 0), regs);
     let list = capabilities(&mut machine, bdf(0, 1, 0));
     assert!(!list.truncated);
-    assert_eq!(list.as_slice(), &[cap(0x50, 0x01), cap(0x60, 0x05), cap(0x70, 0x11)]);
+    assert_eq!(
+        list.as_slice(),
+        &[cap(0x50, 0x01), cap(0x60, 0x05), cap(0x70, 0x11)]
+    );
     assert_eq!(list.find(0x05).map(|entry| entry.offset), Some(0x60));
     assert_eq!(list.find(0x10), None);
 }
