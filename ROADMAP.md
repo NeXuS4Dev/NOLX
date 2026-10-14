@@ -636,6 +636,12 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   [38608775432](https://github.com/NeXuS4Dev/NOLX/actions/runs/38608775432)). The kernel does not
   drive a controller yet, and hubs and other device classes are not here.
 
+- e1000 rules (`crates/nolx-e1000-core`): register map and device identity, the EEPROM MAC read,
+  receive address registers, engine control values, legacy receive and transmit descriptors, ring sizing,
+  and free-slot arithmetic. Host-tested; NIC-001 to NIC-007 are `tested-T1` (run
+  [38611667077](https://github.com/NeXuS4Dev/NOLX/actions/runs/38611667077)). The kernel has no e1000
+  driver yet.
+
 Not yet done: PCIe ECAM, MSI/MSI-X programming in the kernel, per-device queues, and every driver below.
 
 - PCI/PCIe enumeration, BAR assignment, MSI/MSI-X, capability walking.
