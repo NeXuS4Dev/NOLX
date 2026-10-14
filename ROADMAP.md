@@ -586,10 +586,12 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   with the pattern and runs `fsck.nolxfs` on the partition. BLK-024 and BLK-025 are `tested-T2`
   (run [38456685552](https://github.com/NeXuS4Dev/NOLX/actions/runs/38456685552)).
 - AHCI (`crates/nolx-ahci-core`, `kernel/src/hal/ahci.rs`): register layout, port state, FIS and
-  command-header encodings, and physical region descriptors, host-tested (AHCI-001 to AHCI-007 are
-  `tested-T1`). The probe finds the controller through BAR 5, starts the first SATA port, and reads
-  sector 0 through command slot 0. AHCI-008 and AHCI-009 are `tested-T2` (run [38460754722](https://github.com/NeXuS4Dev/NOLX/actions/runs/38460754722)),
-  with CI attaching a copy of the disk image to an AHCI port.
+  command-header encodings, physical region descriptors, and the WRITE DMA EXT encoding, host-tested
+  (AHCI-001 to AHCI-007 and AHCI-010 are `tested-T1`). The probe finds the controller through BAR 5,
+  starts the first SATA port, reads sector 0 through command slot 0, then writes a 2 KiB pattern to
+  sectors 1600 to 1603, reads it back, and checks CRC-32. AHCI-008 and AHCI-009 are `tested-T2`
+  (run [38460754722](https://github.com/NeXuS4Dev/NOLX/actions/runs/38460754722)); AHCI-011 is `tested-T2` (run [38523473276](https://github.com/NeXuS4Dev/NOLX/actions/runs/38523473276)). CI attaches
+  a copy of the disk image to the AHCI port and checksums the written sectors in that copy after QEMU exits.
   Not yet done: interrupts, NVMe, and the other storage paths (request merging, per-device queues).
 
 Not yet done: PCIe ECAM, MSI/MSI-X, and every driver below.
