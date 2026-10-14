@@ -11,20 +11,20 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | Status | Assertions | Cumulative verified at or above status |
 |---|---|---|
 | `unimplemented` | 0 | 100.0% |
-| `implemented` | 6 | 100.0% |
-| `tested-T1` | 182 | 97.5% |
+| `implemented` | 4 | 100.0% |
+| `tested-T1` | 184 | 98.3% |
 | `pending-T2` | 0 | — |
 | `tested-T2` | 50 | 21.0% |
 | `tested-T3` | 0 | 0.0% |
 
-**232 of 238 assertions have a passing automated test; 0 are awaiting T2 results.**
+**234 of 238 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
 | Area | Assertions | Implemented | Tested (T1) | Pending (T2) | Tested (T2) | Tested (T3) |
 |---|---|---|---|---|---|---|
 | ahci | 11 | 11 | 8 | 0 | 3 | 0 |
-| blk | 27 | 27 | 21 | 0 | 4 | 0 |
+| blk | 27 | 27 | 23 | 0 | 4 | 0 |
 | drv | 20 | 20 | 15 | 0 | 5 | 0 |
 | elf | 3 | 3 | 3 | 0 | 0 | 0 |
 | exec | 12 | 12 | 9 | 0 | 3 | 0 |
@@ -41,12 +41,10 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 
 None.
 
-## Implemented but untested (6)
+## Implemented but untested (4)
 
 | ID | Specification reference |
 |---|---|
-| BLK-026 | NOLX M9 Request merge: two transfers of one direction that touch end to end merge into one, in either order; a read and a write, a gap, or a merge over the size limit do not; a merge that would overflow a sector end or sum is refused, not wrapped |
-| BLK-027 | NOLX M9 Request queue: requests keep arrival order; a merged request absorbs any queued request it now touches; an empty or oversized request is invalid; a full queue refuses what cannot merge and still takes a merge; the queue pops the oldest request first |
 | HAL-018 | ACPI MADT: legacy/x2APIC processor entries, local NMI routes, I/O APIC routes, ISA overrides, and I/O APIC NMI sources decode from length-checked records |
 | HAL-019 | APIC arithmetic: x2APIC MSRs, compressed TPR priority classes, timer divisors, and HPET-based counter calibration are checked |
 | HAL-020 | HPET clocksource: 32-bit MMIO reads and wrap extension produce monotonic nanoseconds |
@@ -96,8 +94,8 @@ None.
 | BLK-023 | blk | NOLX M9 GPT partitions: each used entry is printed with its LBA range, sector count, and name as `tools/make-test-disk.py` wrote them | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts the lines `virtio-blk: gpt partition 0: LBA 40-1039 (1000 sectors), name nolx-data` and `... 1: LBA 1200-1299 (100 sectors), name nolx-log` Passed in CI run [38456685552](https://github.com/NeXuS4Dev/NOLX/actions/runs/38456685552). |
 | BLK-024 | blk | NOLX M9 NOLXFS on a partition: the kernel mounts the first partition in use as a NOLXFS volume, formatting it first when it holds none; writes an 8 KiB file; commits; mounts the volume again from the same device; and reads back identical bytes | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `virtio-blk: nolxfs file checksum.bin: 8192 bytes written, committed, mounted again, read back, crc32 0x... matches the written data`; kernel/src/hal/virtio_volume.rs run Passed in CI run [38456685552](https://github.com/NeXuS4Dev/NOLX/actions/runs/38456685552). |
 | BLK-025 | blk | NOLX M9 Volume on disk after QEMU: the checksum the kernel read back equals the checksum of the pattern it wrote, and `fsck.nolxfs` reports the partition's volume clean | `tested-T2` | `.github/workflows/ci.yml` step "The NOLXFS volume holds the file and checks clean" compares the printed checksum with the expected pattern, then runs `fsck.nolxfs` on the partition extracted from `build/disk.img` Passed in CI run [38456685552](https://github.com/NeXuS4Dev/NOLX/actions/runs/38456685552). |
-| BLK-026 | blk | NOLX M9 Request merge: two transfers of one direction that touch end to end merge into one, in either order; a read and a write, a gap, or a merge over the size limit do not; a merge that would overflow a sector end or sum is refused, not wrapped | `implemented` | nolx-block-core queue::tests::back_to_back_requests_of_one_direction_merge, queue::tests::a_request_just_before_a_queued_one_merges_at_the_front, queue::tests::different_directions_and_gaps_do_not_merge, queue::tests::a_merge_stops_at_the_size_limit, queue::tests::merge_refuses_overflowing_ends_and_sums_instead_of_wrapping |
-| BLK-027 | blk | NOLX M9 Request queue: requests keep arrival order; a merged request absorbs any queued request it now touches; an empty or oversized request is invalid; a full queue refuses what cannot merge and still takes a merge; the queue pops the oldest request first | `implemented` | nolx-block-core queue::tests::a_merge_bridges_two_queued_requests, queue::tests::empty_and_oversized_requests_are_invalid, queue::tests::a_full_queue_refuses_what_cannot_merge_and_still_takes_merges |
+| BLK-026 | blk | NOLX M9 Request merge: two transfers of one direction that touch end to end merge into one, in either order; a read and a write, a gap, or a merge over the size limit do not; a merge that would overflow a sector end or sum is refused, not wrapped | `tested-T1` | nolx-block-core queue::tests::back_to_back_requests_of_one_direction_merge, queue::tests::a_request_just_before_a_queued_one_merges_at_the_front, queue::tests::different_directions_and_gaps_do_not_merge, queue::tests::a_merge_stops_at_the_size_limit, queue::tests::merge_refuses_overflowing_ends_and_sums_instead_of_wrapping |
+| BLK-027 | blk | NOLX M9 Request queue: requests keep arrival order; a merged request absorbs any queued request it now touches; an empty or oversized request is invalid; a full queue refuses what cannot merge and still takes a merge; the queue pops the oldest request first | `tested-T1` | nolx-block-core queue::tests::a_merge_bridges_two_queued_requests, queue::tests::empty_and_oversized_requests_are_invalid, queue::tests::a_full_queue_refuses_what_cannot_merge_and_still_takes_merges Workflow [38570531260](https://github.com/NeXuS4Dev/NOLX/actions/runs/38570531260) passed all six jobs. |
 | ELF-001 | elf | An x86-64 ELF64 executable yields only a bounded load plan whose file ranges, user virtual ranges, alignment, non-overlapping PT_LOAD segments, executable entry point, PT_INTERP path, PT_TLS template, and PT_GNU_STACK permission metadata have been validated | `tested-T1` | `crates/nolx-exec-core/src/elf.rs` tests `plans_nonoverlapping_executable_and_data_segments`, `rejects_short_bad_magic_and_unsupported_images`, `rejects_program_header_table_outside_the_file`, `rejects_missing_or_unbounded_program_header_tables`, `rejects_more_load_segments_than_the_fixed_plan_holds`, `rejects_inconsistent_sizes_and_writable_executable_segments`, `rejects_out_of_user_range_overlapping_and_non_executable_entry`, `records_interpreter_tls_and_executable_stack_metadata`, `rejects_malformed_interpreter_path`, and `rejects_tls_not_backed_by_a_load_segment`; host tests passed in [workflow 38163939179](https://github.com/NeXuS4Dev/NOLX/actions/runs/38163939179). |
 | ELF-002 | elf | The second loader stage turns an accepted plan into page-fill operations (zero every touched page, then copy file bytes, so shared pages and bss tails come out byte-exact), an `ET_DYN` bias bounded to the user interval and sensitive to entropy, validated `R_X86_64_RELATIVE` relocations, and a SysV-shaped initial stack (argc/argv/envp/auxv/AT_RANDOM/AT_EXECFN, 16-byte-aligned `%rsp`) | `tested-T1` | `crates/nolx-exec-core/src/image.rs` tests `page_fills_zero_every_touched_page_then_copy_file_bytes`, `page_fills_apply_the_bias_to_every_address`, `dyn_bias_is_entropy_sensitive_bounded_and_zero_for_exec`, `relative_relocations_are_collected_biased_and_bounded`, `unsupported_and_unmapped_relocations_are_refused`, `static_images_carry_no_relocations`, `stack_image_carries_argc_argv_envp_auxv_and_entropy`, `stack_image_rejects_bad_strings_and_oversized_requests`, and `empty_images_still_build_a_zero_argument_stack`. |
 | ELF-003 | elf | The embedded `hello` and `init` ring-3 programs are byte-deterministic static x86-64 ET_EXEC images that parse through the kernel's own load plan, place their entry bytes at their entry addresses when the page plan is applied, and carry exactly the lines the boot test waits for | `tested-T1` | `crates/nolx-exec-core/src/image.rs` tests `the_embedded_programs_plan_like_the_kernel_will_load_them` and `the_embedded_programs_carry_the_lines_the_boot_test_waits_for`; generated by `tools/user-elf/gen.py`, checked by `make usercheck`. |

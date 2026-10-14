@@ -609,7 +609,12 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   (PCI-011 to PCI-013 are `tested-T1`, run [38567825680](https://github.com/NeXuS4Dev/NOLX/actions/runs/38567825680)).
   The kernel does not program MSI or MSI-X yet.
 
-Not yet done: PCIe ECAM, MSI/MSI-X programming in the kernel, and every driver below.
+- Block request queue (`crates/nolx-block-core/src/queue.rs`): adjacent same-direction requests merge
+  up to a size limit, a merge can bridge queued requests, and the queue keeps arrival order. Host-tested;
+  BLK-026 and BLK-027 are `tested-T1` (run [38570531260](https://github.com/NeXuS4Dev/NOLX/actions/runs/38570531260)).
+  The drivers do not submit through the queue yet.
+
+Not yet done: PCIe ECAM, MSI/MSI-X programming in the kernel, per-device queues, and every driver below.
 
 - PCI/PCIe enumeration, BAR assignment, MSI/MSI-X, capability walking.
 - Storage: AHCI (SATA), NVMe, virtio-blk; block layer with partitions (GPT), request
