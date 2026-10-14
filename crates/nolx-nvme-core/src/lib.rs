@@ -149,7 +149,14 @@ pub fn create_io_cq(cid: u16, queue: u16, entries: u16, prp1: u64) -> Option<Sqe
     queue_size(entries)?;
     let cdw10 = u32::from(queue) | (u32::from(entries - 1) << 16);
     // Bit 0: physically contiguous. Bit 1 (interrupts enabled) stays clear: the driver polls.
-    Some(sqe(OP_CREATE_IO_CQ, cid, 0, prp1, 0, [cdw10, 1, 0, 0, 0, 0]))
+    Some(sqe(
+        OP_CREATE_IO_CQ,
+        cid,
+        0,
+        prp1,
+        0,
+        [cdw10, 1, 0, 0, 0, 0],
+    ))
 }
 
 /// A Create I/O Submission Queue command for queue `queue` of `entries` entries, bound to
@@ -159,7 +166,14 @@ pub fn create_io_sq(cid: u16, queue: u16, entries: u16, completion: u16, prp1: u
     queue_size(entries)?;
     let cdw10 = u32::from(queue) | (u32::from(entries - 1) << 16);
     let cdw11 = 1 | (u32::from(completion) << 16);
-    Some(sqe(OP_CREATE_IO_SQ, cid, 0, prp1, 0, [cdw10, cdw11, 0, 0, 0, 0]))
+    Some(sqe(
+        OP_CREATE_IO_SQ,
+        cid,
+        0,
+        prp1,
+        0,
+        [cdw10, cdw11, 0, 0, 0, 0],
+    ))
 }
 
 /// The entry count a queue can have: at least one, at most [`QUEUE_ENTRIES_MAX`].
@@ -186,7 +200,14 @@ pub fn read_write(
     let cdw10 = lba as u32;
     let cdw11 = (lba >> 32) as u32;
     let cdw12 = u32::from(blocks - 1);
-    Some(sqe(opcode, cid, nsid, prp1, 0, [cdw10, cdw11, cdw12, 0, 0, 0]))
+    Some(sqe(
+        opcode,
+        cid,
+        nsid,
+        prp1,
+        0,
+        [cdw10, cdw11, cdw12, 0, 0, 0],
+    ))
 }
 
 /// The command identifier a completion carries, from completion dword 3.

@@ -37,7 +37,14 @@ fn admin_queue_sizes_are_stored_one_less_and_bounded() {
 
 #[test]
 fn a_submission_entry_places_each_field_at_its_offset() {
-    let entry = sqe(0x02, 0x1234, 1, 0x1122_3344_5566_7788, 0, [1, 2, 3, 4, 5, 6]);
+    let entry = sqe(
+        0x02,
+        0x1234,
+        1,
+        0x1122_3344_5566_7788,
+        0,
+        [1, 2, 3, 4, 5, 6],
+    );
     assert_eq!(&entry[0..4], &(0x02u32 | (0x1234u32 << 16)).to_le_bytes());
     assert_eq!(&entry[4..8], &1u32.to_le_bytes());
     assert_eq!(&entry[24..32], &0x1122_3344_5566_7788u64.to_le_bytes());
@@ -61,11 +68,19 @@ fn io_queues_are_stored_one_entry_less_and_refused_when_empty_or_too_big() {
     let cq = create_io_cq(3, 1, 8, 0x5000).unwrap();
     assert_eq!(cq[0], OP_CREATE_IO_CQ);
     assert_eq!(&cq[40..44], &((7u32 << 16) | 1).to_le_bytes());
-    assert_eq!(&cq[44..48], &1u32.to_le_bytes(), "physically contiguous, no interrupts");
+    assert_eq!(
+        &cq[44..48],
+        &1u32.to_le_bytes(),
+        "physically contiguous, no interrupts"
+    );
 
     let sq = create_io_sq(4, 1, 8, 1, 0x6000).unwrap();
     assert_eq!(sq[0], OP_CREATE_IO_SQ);
-    assert_eq!(&sq[44..48], &((1u32 << 16) | 1).to_le_bytes(), "bound to completion queue 1");
+    assert_eq!(
+        &sq[44..48],
+        &((1u32 << 16) | 1).to_le_bytes(),
+        "bound to completion queue 1"
+    );
 
     assert!(create_io_cq(3, 1, 0, 0x5000).is_none());
     assert!(create_io_sq(4, 1, 4097, 1, 0x6000).is_none());
@@ -111,5 +126,9 @@ fn the_namespace_reports_its_block_count_and_block_size() {
     identify[26] = 0;
     assert_eq!(namespace_block_bytes(&identify), Some(4096));
     identify[128 + 2] = 8;
-    assert_eq!(namespace_block_bytes(&identify), None, "exponent below 9 is refused");
+    assert_eq!(
+        namespace_block_bytes(&identify),
+        None,
+        "exponent below 9 is refused"
+    );
 }
