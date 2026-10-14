@@ -11,13 +11,13 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | Status | Assertions | Cumulative verified at or above status |
 |---|---|---|
 | `unimplemented` | 0 | 100.0% |
-| `implemented` | 8 | 100.0% |
-| `tested-T1` | 226 | 97.2% |
+| `implemented` | 5 | 100.0% |
+| `tested-T1` | 226 | 98.3% |
 | `pending-T2` | 0 | — |
-| `tested-T2` | 52 | 18.2% |
+| `tested-T2` | 55 | 19.2% |
 | `tested-T3` | 0 | 0.0% |
 
-**278 of 286 assertions have a passing automated test; 0 are awaiting T2 results.**
+**281 of 286 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
@@ -27,7 +27,7 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | blk | 32 | 32 | 27 | 0 | 4 | 0 |
 | df | 7 | 7 | 7 | 0 | 0 | 0 |
 | drv | 20 | 20 | 15 | 0 | 5 | 0 |
-| e1000 | 10 | 10 | 7 | 0 | 0 | 0 |
+| e1000 | 10 | 10 | 7 | 0 | 3 | 0 |
 | elf | 3 | 3 | 3 | 0 | 0 | 0 |
 | exec | 12 | 12 | 9 | 0 | 3 | 0 |
 | hal | 25 | 25 | 11 | 0 | 10 | 0 |
@@ -47,14 +47,11 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 
 None.
 
-## Implemented but untested (8)
+## Implemented but untested (5)
 
 | ID | Specification reference |
 |---|---|
 | BLK-028 | NOLX M9 Per-device queues, attachment: a device is attached once, with a nonzero in-flight limit; an unattached or out-of-range device refuses work; a device with queued or in-flight requests cannot be detached |
-| NIC-008 | NOLX M9 e1000 kernel bring-up: the controller is found by its vendor and device ID, memory space and bus mastering are enabled, BAR 0 is mapped through the MMIO window, the device is reset and its link set up, and the MAC address is read from EEPROM words 0 to 2 and programmed into the receive address registers |
-| NIC-009 | NOLX M9 e1000 kernel transmit: one receive and one transmit ring of eight legacy descriptors are set up, both engines are enabled, and a 60-byte frame is transmitted with the device marking its descriptor done |
-| NIC-010 | NOLX M9 e1000 driver framework: the driver is registered with nolx-df, bound to the device by its match rule, and started through the framework |
 | HAL-018 | ACPI MADT: legacy/x2APIC processor entries, local NMI routes, I/O APIC routes, ISA overrides, and I/O APIC NMI sources decode from length-checked records |
 | HAL-019 | APIC arithmetic: x2APIC MSRs, compressed TPR priority classes, timer divisors, and HPET-based counter calibration are checked |
 | HAL-020 | HPET clocksource: 32-bit MMIO reads and wrap extension produce monotonic nanoseconds |
@@ -236,9 +233,9 @@ None.
 | NIC-005 | e1000 | NOLX M9 Legacy descriptors: a receive descriptor holds its buffer and completes only when done and end-of-packet are both set; a transmit descriptor names its length and command, and empty or oversized buffers are refused | `tested-T1` | nolx-e1000-core tests::a_receive_descriptor_holds_its_buffer_and_completes_on_done_and_end, tests::a_transmit_descriptor_names_its_length_and_command, tests::a_transmit_descriptor_is_done_when_the_device_sets_done |
 | NIC-006 | e1000 | NOLX M9 Ring free slots: the driver may fill all but one slot of a transmit ring, and the arithmetic holds across the wrap | `tested-T1` | nolx-e1000-core tests::an_empty_ring_has_all_but_one_slot_free |
 | NIC-007 | e1000 | NOLX M9 Interrupt and status bits: the transmit, link-change, and receive cause bits and the link-up and control bits are at their positions | `tested-T1` | nolx-e1000-core tests::the_interrupt_cause_and_status_bits_are_distinct |
-| NIC-008 | e1000 | NOLX M9 e1000 kernel bring-up: the controller is found by its vendor and device ID, memory space and bus mastering are enabled, BAR 0 is mapped through the MMIO window, the device is reset and its link set up, and the MAC address is read from EEPROM words 0 to 2 and programmed into the receive address registers | `implemented` | `.github/workflows/ci.yml` boot-smoke asserts `e1000: <bdf> bar0 0x..., mac xx:..., link up|down`; kernel/src/hal/e1000.rs |
-| NIC-009 | e1000 | NOLX M9 e1000 kernel transmit: one receive and one transmit ring of eight legacy descriptors are set up, both engines are enabled, and a 60-byte frame is transmitted with the device marking its descriptor done | `implemented` | `.github/workflows/ci.yml` boot-smoke asserts `e1000: transmitted a 60-byte frame, descriptor done`; CI attaches e1000 on a user-mode network backend; kernel/src/hal/e1000.rs |
-| NIC-010 | e1000 | NOLX M9 e1000 driver framework: the driver is registered with nolx-df, bound to the device by its match rule, and started through the framework | `implemented` | `.github/workflows/ci.yml` boot-smoke asserts `e1000: bound and started through nolx-df`; kernel/src/hal/e1000.rs; nolx-df-core DF-002 and DF-003 |
+| NIC-008 | e1000 | NOLX M9 e1000 kernel bring-up: the controller is found by its vendor and device ID, memory space and bus mastering are enabled, BAR 0 is mapped through the MMIO window, the device is reset and its link set up, and the MAC address is read from EEPROM words 0 to 2 and programmed into the receive address registers | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `e1000: <bdf> bar0 0x..., mac xx:..., link up|down`; kernel/src/hal/e1000.rs |
+| NIC-009 | e1000 | NOLX M9 e1000 kernel transmit: one receive and one transmit ring of eight legacy descriptors are set up, both engines are enabled, and a 60-byte frame is transmitted with the device marking its descriptor done | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `e1000: transmitted a 60-byte frame, descriptor done`; CI attaches e1000 on a user-mode network backend; kernel/src/hal/e1000.rs |
+| NIC-010 | e1000 | NOLX M9 e1000 driver framework: the driver is registered with nolx-df, bound to the device by its match rule, and started through the framework | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `e1000: bound and started through nolx-df`; kernel/src/hal/e1000.rs; nolx-df-core DF-002 and DF-003 |
 | NVME-001 | nvme | NOLX M9 Controller capabilities: the queue size limit, doorbell stride, and ready timeout are decoded from their CAP fields, with the timeout in 500 ms units | `tested-T1` | nolx-nvme-core tests::capability_fields_decode_queue_limit_stride_and_timeout |
 | NVME-002 | nvme | NOLX M9 Doorbells: each queue's submission and completion doorbells sit at 0x1000 plus (2 times the queue plus 0 or 1) times (4 shifted by the stride) | `tested-T1` | nolx-nvme-core tests::doorbells_are_spaced_by_the_stride |
 | NVME-003 | nvme | NOLX M9 Enable and admin queue: CC enables the controller with 64-byte submission and 16-byte completion entries, CSTS.RDY reports ready, and AQA stores each admin queue size one less than the count, refusing sizes outside 1 to 4096 | `tested-T1` | nolx-nvme-core tests::enable_selects_64_byte_commands_and_16_byte_completions, tests::admin_queue_sizes_are_stored_one_less_and_bounded |

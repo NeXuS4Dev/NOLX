@@ -659,6 +659,12 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   USB-008 are `tested-T2` (run [38621595620](https://github.com/NeXuS4Dev/NOLX/actions/runs/38621595620)).
   Not yet done: command and event rings, slots, and device enumeration.
 
+- e1000 driver in the kernel (`kernel/src/hal/e1000.rs`), run through the driver framework: the
+  framework binds and starts the device, which resets it, reads the MAC from the EEPROM, sets up one
+  receive and one transmit ring, and transmits a 60-byte frame. NIC-008 to NIC-010 are `tested-T2`
+  (run [38630855644](https://github.com/NeXuS4Dev/NOLX/actions/runs/38630855644)). Not yet done: receive
+  checks, interrupts, and the network stack above the driver.
+
 Not yet done: PCIe ECAM, MSI/MSI-X programming in the kernel, and every driver below.
 
 - PCI/PCIe enumeration, BAR assignment, MSI/MSI-X, capability walking.
