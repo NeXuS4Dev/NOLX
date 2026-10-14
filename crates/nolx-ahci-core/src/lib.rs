@@ -81,6 +81,8 @@ pub const DET_PRESENT: u32 = 3;
 pub const FIS_H2D: u8 = 0x27;
 /// The ATA command READ DMA EXT: 48-bit LBA, DMA.
 pub const ATA_READ_DMA_EXT: u8 = 0x25;
+/// The ATA command that writes sectors with a 48-bit address (WRITE DMA EXT).
+pub const ATA_WRITE_DMA_EXT: u8 = 0x35;
 /// The device register bit that selects LBA addressing.
 pub const ATA_DEVICE_LBA: u8 = 0x40;
 /// Bytes in a host-to-device register FIS.
@@ -152,11 +154,24 @@ pub fn tfd_busy(tfd: u32) -> bool {
 /// crate never asks for.
 #[must_use]
 pub fn h2d_read_dma_ext(lba: u64, count: u16) -> [u8; FIS_LEN] {
+    h2d_dma_ext(ATA_READ_DMA_EXT, lba, count)
+}
+
+/// A host-to-device register FIS that writes `count` sectors starting at `lba` with WRITE DMA EXT.
+#[must_use]
+pub fn h2d_write_dma_ext(lba: u64, count: u16) -> [u8; FIS_LEN] {
+    h2d_dma_ext(ATA_WRITE_DMA_EXT, lba, count)
+}
+
+/// A host-to-device register FIS for a 48-bit DMA command: the address and count are split across
+/// the bytes the specification names.
+#[must_use]
+fn h2d_dma_ext(command: u8, lba: u64, count: u16) -> [u8; FIS_LEN] {
     let mut fis = [0u8; FIS_LEN];
     fis[0] = FIS_H2D;
     // Bit 7 set: this FIS carries a command, not a control update.
     fis[1] = 0x80;
-    fis[2] = ATA_READ_DMA_EXT;
+    fis[2] = command;
     fis[4] = lba as u8;
     fis[5] = (lba >> 8) as u8;
     fis[6] = (lba >> 16) as u8;

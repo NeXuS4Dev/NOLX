@@ -53,6 +53,18 @@ fn read_dma_ext_fis_carries_the_48_bit_address_and_count() {
 }
 
 #[test]
+fn write_dma_ext_fis_names_the_write_command_and_the_same_address_layout() {
+    let read = h2d_read_dma_ext(0x0000_0102_0304_0506, 4);
+    let write = h2d_write_dma_ext(0x0000_0102_0304_0506, 4);
+    assert_eq!(write[2], ATA_WRITE_DMA_EXT);
+    assert_eq!(write[2], 0x35);
+    assert_eq!(read[2], ATA_READ_DMA_EXT);
+    // Everything except the command byte is the same for both directions.
+    assert_eq!(&write[..2], &read[..2]);
+    assert_eq!(&write[3..], &read[3..]);
+}
+
+#[test]
 fn a_command_header_names_its_fis_length_direction_and_table() {
     let read = CommandHeader {
         fis_dwords: 5,
