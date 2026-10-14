@@ -36,7 +36,11 @@ fn a_net_header_is_twelve_bytes_and_round_trips() {
     assert_eq!(&bytes[2..4], &[0x02, 0x01], "little-endian hdr_len");
     assert_eq!(&bytes[10..12], &[2, 0], "num_buffers is the last field");
     assert_eq!(NetHeader::decode(&bytes), Some(header));
-    assert_eq!(NetHeader::decode(&bytes[..11]), None, "short buffers are refused");
+    assert_eq!(
+        NetHeader::decode(&bytes[..11]),
+        None,
+        "short buffers are refused"
+    );
 }
 
 #[test]
@@ -54,7 +58,10 @@ fn unicast_and_valid_source_addresses_are_told_apart() {
     assert!(is_unicast(&unicast));
     assert!(is_valid_source(&unicast));
     assert!(!is_unicast(&BROADCAST), "the group bit is set");
-    assert!(!is_unicast(&[0x01, 0x00, 0x5E, 0x00, 0x00, 0x01]), "a multicast address");
+    assert!(
+        !is_unicast(&[0x01, 0x00, 0x5E, 0x00, 0x00, 0x01]),
+        "a multicast address"
+    );
     assert!(!is_valid_source(&[0u8; 6]), "all zeros is not a source");
 }
 
@@ -66,7 +73,11 @@ fn a_mac_address_prints_as_lower_case_hex_pairs() {
 
 #[test]
 fn frames_are_padded_to_the_minimum_and_refused_over_the_mtu() {
-    assert_eq!(transmit_length(20, MTU_DEFAULT), Ok(FRAME_MIN), "short frames pad to 60");
+    assert_eq!(
+        transmit_length(20, MTU_DEFAULT),
+        Ok(FRAME_MIN),
+        "short frames pad to 60"
+    );
     assert_eq!(transmit_length(100, MTU_DEFAULT), Ok(100));
     assert_eq!(transmit_length(FRAME_MAX_DEFAULT, MTU_DEFAULT), Ok(1514));
     assert_eq!(
@@ -84,7 +95,11 @@ fn an_ethernet_header_gives_its_addresses_and_ethertype() {
     frame[12..14].copy_from_slice(&ETHERTYPE_ARP.to_be_bytes());
     assert_eq!(
         parse_ethernet(&frame),
-        Some((BROADCAST, [0x52, 0x54, 0x00, 0x12, 0x34, 0x56], ETHERTYPE_ARP))
+        Some((
+            BROADCAST,
+            [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
+            ETHERTYPE_ARP
+        ))
     );
     assert_eq!(parse_ethernet(&frame[..13]), None);
     assert_eq!(ETHERTYPE_IPV4, 0x0800);
