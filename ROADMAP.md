@@ -592,7 +592,17 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   sectors 1600 to 1603, reads it back, and checks CRC-32. AHCI-008 and AHCI-009 are `tested-T2`
   (run [38460754722](https://github.com/NeXuS4Dev/NOLX/actions/runs/38460754722)); AHCI-011 is `tested-T2` (run [38523473276](https://github.com/NeXuS4Dev/NOLX/actions/runs/38523473276)). CI attaches
   a copy of the disk image to the AHCI port and checksums the written sectors in that copy after QEMU exits.
-  Not yet done: interrupts, NVMe, and the other storage paths (request merging, per-device queues).
+  Not yet done: interrupts, and the other storage paths (request merging, per-device queues).
+- NVMe (`crates/nolx-nvme-core`, `kernel/src/hal/nvme.rs`): controller registers, doorbell offsets,
+  the enable sequence, 64-byte submission and 16-byte completion entries, the Create I/O queue and
+  Read and Write encodings, completion status, and the namespace block size, host-tested
+  (NVME-001 to NVME-008 are `tested-T1`). The probe finds class 01:08:02, enables memory decoding and
+  bus mastering, maps BAR 0, sets up one admin queue pair and one I/O queue pair of eight entries,
+  identifies namespace 1, reads sector 0 through the I/O queue, then writes sectors 1600 to 1603,
+  reads them back, and checks CRC-32. NVME-009 to NVME-011 are `tested-T2` (run
+  [38558796880](https://github.com/NeXuS4Dev/NOLX/actions/runs/38558796880)). CI attaches a copy of the
+  disk image as an NVMe namespace and checksums the written sectors in that copy after QEMU exits.
+  Not yet done: interrupts, and the other storage paths.
 
 Not yet done: PCIe ECAM, MSI/MSI-X, and every driver below.
 
