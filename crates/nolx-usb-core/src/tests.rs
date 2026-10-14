@@ -27,8 +27,16 @@ fn a_port_reset_keeps_the_port_and_clears_nothing_by_accident() {
     let portsc = PORTSC_CONNECTED | PORTSC_ENABLED | PORTSC_POWER | PORTSC_CONNECT_CHANGE;
     let written = portsc_start_reset(portsc);
     assert_eq!(written & PORTSC_RESET, PORTSC_RESET);
-    assert_eq!(written & PORTSC_ENABLED, 0, "writing 1 to enabled would disable the port");
-    assert_eq!(written & PORTSC_CONNECT_CHANGE, 0, "the change bit is not re-written as set");
+    assert_eq!(
+        written & PORTSC_ENABLED,
+        0,
+        "writing 1 to enabled would disable the port"
+    );
+    assert_eq!(
+        written & PORTSC_CONNECT_CHANGE,
+        0,
+        "the change bit is not re-written as set"
+    );
     assert_eq!(written & PORTSC_POWER, PORTSC_POWER);
 }
 
@@ -36,10 +44,22 @@ fn a_port_reset_keeps_the_port_and_clears_nothing_by_accident() {
 fn acknowledging_writes_back_only_the_change_bits_that_are_set() {
     let portsc = PORTSC_CONNECTED | PORTSC_POWER | PORTSC_CONNECT_CHANGE;
     let written = portsc_acknowledge(portsc);
-    assert_eq!(written & PORTSC_CHANGE_BITS, PORTSC_CONNECT_CHANGE, "only the set change bit");
-    assert_eq!(written & PORTSC_ENABLED, 0, "the enable bit is not written as a 1");
+    assert_eq!(
+        written & PORTSC_CHANGE_BITS,
+        PORTSC_CONNECT_CHANGE,
+        "only the set change bit"
+    );
+    assert_eq!(
+        written & PORTSC_ENABLED,
+        0,
+        "the enable bit is not written as a 1"
+    );
     assert_eq!(written & PORTSC_POWER, PORTSC_POWER, "power is kept");
-    assert_eq!(portsc_acknowledge(PORTSC_CONNECTED) & PORTSC_CHANGE_BITS, 0, "no change to clear");
+    assert_eq!(
+        portsc_acknowledge(PORTSC_CONNECTED) & PORTSC_CHANGE_BITS,
+        0,
+        "no change to clear"
+    );
 }
 
 #[test]
@@ -49,7 +69,10 @@ fn a_link_trb_names_its_target_and_keeps_the_cycle_and_toggle_bits() {
     assert!(cycle_bit(&trb));
     assert_eq!(&trb[0..8], &0x1_0000u64.to_le_bytes());
     assert_eq!(word(&trb, 12) & 0b10, 0b10, "toggle cycle is bit 1");
-    assert!(link_trb(0x1_0008, false, false).is_none(), "targets are 16-byte aligned");
+    assert!(
+        link_trb(0x1_0008, false, false).is_none(),
+        "targets are 16-byte aligned"
+    );
 }
 
 #[test]
@@ -75,7 +98,9 @@ fn an_event_gives_its_completion_code_slot_and_port() {
     // Command completion: status dword holds the code, control dword the slot.
     let mut event = [0u8; 16];
     event[8..12].copy_from_slice(&((u32::from(CC_SUCCESS)) << 24).to_le_bytes());
-    event[12..16].copy_from_slice(&((u32::from(TRB_COMMAND_COMPLETION) << 10) | (3 << 24) | 1).to_le_bytes());
+    event[12..16].copy_from_slice(
+        &((u32::from(TRB_COMMAND_COMPLETION) << 10) | (3 << 24) | 1).to_le_bytes(),
+    );
     assert_eq!(trb_type(&event), TRB_COMMAND_COMPLETION);
     assert_eq!(completion_code(&event), CC_SUCCESS);
     assert_eq!(event_slot(&event), 3);
@@ -104,17 +129,43 @@ fn an_unchanged_report_produces_no_events() {
 #[test]
 fn a_new_key_presses_and_a_dropped_key_releases() {
     let got = report_events(&report(0, &[]), &report(0, &[0x04])).unwrap();
-    assert_eq!(got.iter().collect::<Vec<_>>(), [KeyEvent { usage: 0x04, pressed: true }]);
+    assert_eq!(
+        got.iter().collect::<Vec<_>>(),
+        [KeyEvent {
+            usage: 0x04,
+            pressed: true
+        }]
+    );
     let got = report_events(&report(0, &[0x04]), &report(0, &[])).unwrap();
-    assert_eq!(got.iter().collect::<Vec<_>>(), [KeyEvent { usage: 0x04, pressed: false }]);
+    assert_eq!(
+        got.iter().collect::<Vec<_>>(),
+        [KeyEvent {
+            usage: 0x04,
+            pressed: false
+        }]
+    );
 }
 
 #[test]
 fn a_modifier_bit_gives_its_usage_in_the_e_range() {
     let got = report_events(&report(0, &[]), &report(0x02, &[])).unwrap();
-    assert_eq!(got.iter().collect::<Vec<_>>(), [KeyEvent { usage: 0xE1, pressed: true }], "left Shift");
+    assert_eq!(
+        got.iter().collect::<Vec<_>>(),
+        [KeyEvent {
+            usage: 0xE1,
+            pressed: true
+        }],
+        "left Shift"
+    );
     let got = report_events(&report(0x80, &[]), &report(0, &[])).unwrap();
-    assert_eq!(got.iter().collect::<Vec<_>>(), [KeyEvent { usage: 0xE7, pressed: false }], "right GUI");
+    assert_eq!(
+        got.iter().collect::<Vec<_>>(),
+        [KeyEvent {
+            usage: 0xE7,
+            pressed: false
+        }],
+        "right GUI"
+    );
 }
 
 #[test]
@@ -125,9 +176,18 @@ fn releases_come_before_presses_and_modifiers_first_of_all() {
     assert_eq!(
         got,
         [
-            KeyEvent { usage: 0xE0, pressed: true },
-            KeyEvent { usage: 0x04, pressed: false },
-            KeyEvent { usage: 0x05, pressed: true },
+            KeyEvent {
+                usage: 0xE0,
+                pressed: true
+            },
+            KeyEvent {
+                usage: 0x04,
+                pressed: false
+            },
+            KeyEvent {
+                usage: 0x05,
+                pressed: true
+            },
         ]
     );
 }

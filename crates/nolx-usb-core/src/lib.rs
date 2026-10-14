@@ -65,11 +65,11 @@ pub const PORTSC_CONNECT_CHANGE: u32 = 1 << 17;
 pub const PORTSC_RESET_CHANGE: u32 = 1 << 21;
 /// The PORTSC bits that clear when a 1 is written to them. Writing back a register that keeps
 /// one of these set would clear it, so these are masked out of a write unless meant.
-pub const PORTSC_WRITE_ONE_TO_CLEAR: u32 = (1 << 1) | (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20)
-    | (1 << 21) | (1 << 22) | (1 << 23);
+pub const PORTSC_WRITE_ONE_TO_CLEAR: u32 =
+    (1 << 1) | (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20) | (1 << 21) | (1 << 22) | (1 << 23);
 /// The change bits: each set one is an event the driver must acknowledge.
-pub const PORTSC_CHANGE_BITS: u32 = (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20) | (1 << 21)
-    | (1 << 22) | (1 << 23);
+pub const PORTSC_CHANGE_BITS: u32 =
+    (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20) | (1 << 21) | (1 << 22) | (1 << 23);
 
 /// The offset, from the controller's base, of port `port`'s register set. Ports count from 1.
 #[must_use]
@@ -173,7 +173,12 @@ pub fn link_trb(target: u64, toggle_cycle: bool, cycle: bool) -> Option<Trb> {
 /// for a length the field cannot name. With `interrupt_on_completion` the controller posts an
 /// event when it is done.
 #[must_use]
-pub fn normal_trb(buffer: u64, length: u32, interrupt_on_completion: bool, cycle: bool) -> Option<Trb> {
+pub fn normal_trb(
+    buffer: u64,
+    length: u32,
+    interrupt_on_completion: bool,
+    cycle: bool,
+) -> Option<Trb> {
     if length > TRB_LENGTH_MAX {
         return None;
     }
@@ -191,7 +196,11 @@ pub fn normal_trb(buffer: u64, length: u32, interrupt_on_completion: bool, cycle
 #[must_use]
 pub fn enable_slot_trb(cycle: bool) -> Trb {
     let mut trb = [0u8; TRB_BYTES];
-    put_word(&mut trb, 12, (u32::from(TRB_ENABLE_SLOT) << 10) | u32::from(cycle));
+    put_word(
+        &mut trb,
+        12,
+        (u32::from(TRB_ENABLE_SLOT) << 10) | u32::from(cycle),
+    );
     trb
 }
 
@@ -286,12 +295,18 @@ pub fn report_events(previous: &BootReport, next: &BootReport) -> Option<ReportE
     let is_key = |usage: u8| usage >= 0x04;
     for &usage in previous[2..8].iter().filter(|&&u| is_key(u)) {
         if !next[2..8].contains(&usage) {
-            out.push(KeyEvent { usage, pressed: false });
+            out.push(KeyEvent {
+                usage,
+                pressed: false,
+            });
         }
     }
     for &usage in next[2..8].iter().filter(|&&u| is_key(u)) {
         if !previous[2..8].contains(&usage) {
-            out.push(KeyEvent { usage, pressed: true });
+            out.push(KeyEvent {
+                usage,
+                pressed: true,
+            });
         }
     }
     Some(out)
