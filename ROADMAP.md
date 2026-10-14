@@ -642,6 +642,12 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   [38611667077](https://github.com/NeXuS4Dev/NOLX/actions/runs/38611667077)). The kernel has no e1000
   driver yet.
 
+- Driver framework rules (`crates/nolx-df-core`, `nolx-df`): device identity and match rules, binding in
+  registration order with a probe, the lifecycle (bind, start, stop, remove, failure), a dispatch table of
+  function pointers, and fixed capacity. Host-tested; DF-001 to DF-007 are `tested-T1` (run
+  [38614702136](https://github.com/NeXuS4Dev/NOLX/actions/runs/38614702136)). The kernel does not use the
+  framework yet, and no driver is registered with it.
+
 Not yet done: PCIe ECAM, MSI/MSI-X programming in the kernel, per-device queues, and every driver below.
 
 - PCI/PCIe enumeration, BAR assignment, MSI/MSI-X, capability walking.
