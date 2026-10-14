@@ -8,7 +8,10 @@ fn a_device_is_usable_only_when_present_enabled_and_functioning() {
     assert!(is_usable(0x1F), "a battery bit does not change that");
     assert!(!is_usable(0x03), "present and enabled, not functioning");
     assert!(!is_usable(0x00), "absent");
-    assert!(!is_usable(STA_PRESENT | STA_FUNCTIONAL), "present but disabled");
+    assert!(
+        !is_usable(STA_PRESENT | STA_FUNCTIONAL),
+        "present but disabled"
+    );
 }
 
 #[test]
@@ -16,13 +19,19 @@ fn an_irq_and_an_io_port_descriptor_are_decoded() {
     // IRQ 4: small tag 0x22 (name 4, two bytes), mask 0x0010.
     let irq = [0x22, 0x10, 0x00, 0x79, 0x00];
     let got = parse_resources(&irq).unwrap();
-    assert_eq!(got.iter().collect::<Vec<_>>(), [Resource::Irq { mask: 0x0010 }]);
+    assert_eq!(
+        got.iter().collect::<Vec<_>>(),
+        [Resource::Irq { mask: 0x0010 }]
+    );
     // I/O port 0x60 to 0x60, eight ports: tag 0x47 (name 8, seven bytes).
     let io = [0x47, 0x01, 0x60, 0x00, 0x60, 0x00, 0x01, 0x08, 0x79, 0x00];
     let got = parse_resources(&io).unwrap();
     assert_eq!(
         got.iter().collect::<Vec<_>>(),
-        [Resource::Io { base: 0x60, length: 8 }]
+        [Resource::Io {
+            base: 0x60,
+            length: 8
+        }]
     );
 }
 
@@ -31,8 +40,14 @@ fn a_fixed_io_and_a_fixed_memory_descriptor_are_decoded() {
     // Fixed I/O at 0x03F0, eight ports: tag 0x4B (name 9, three bytes).
     let fixed_io = [0x4B, 0xF0, 0x03, 0x08, 0x79, 0x00];
     assert_eq!(
-        parse_resources(&fixed_io).unwrap().iter().collect::<Vec<_>>(),
-        [Resource::Io { base: 0x03F0, length: 8 }]
+        parse_resources(&fixed_io)
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
+        [Resource::Io {
+            base: 0x03F0,
+            length: 8
+        }]
     );
     // Memory32Fixed at 0xFEBF0000, 4 KiB: tag 0x86, length 9, information, base, length.
     let mut memory = vec![0x86, 0x09, 0x00, 0x01];
@@ -41,7 +56,10 @@ fn a_fixed_io_and_a_fixed_memory_descriptor_are_decoded() {
     memory.extend_from_slice(&[0x79, 0x00]);
     assert_eq!(
         parse_resources(&memory).unwrap().iter().collect::<Vec<_>>(),
-        [Resource::Memory { base: 0xFEBF_0000, length: 0x1000 }]
+        [Resource::Memory {
+            base: 0xFEBF_0000,
+            length: 0x1000
+        }]
     );
 }
 
@@ -57,14 +75,23 @@ fn a_qword_memory_descriptor_takes_its_minimum_and_length() {
     qword.extend_from_slice(&[0x79, 0x00]);
     assert_eq!(
         parse_resources(&qword).unwrap().iter().collect::<Vec<_>>(),
-        [Resource::Memory { base: 0x1_0000_0000, length: 0x2000 }]
+        [Resource::Memory {
+            base: 0x1_0000_0000,
+            length: 0x2000
+        }]
     );
 }
 
 #[test]
 fn a_template_without_an_end_tag_or_cut_short_is_refused() {
-    assert_eq!(parse_resources(&[0x22, 0x10, 0x00]), Err(ResourceError::NoEnd));
-    assert_eq!(parse_resources(&[0x22, 0x10]), Err(ResourceError::Truncated));
+    assert_eq!(
+        parse_resources(&[0x22, 0x10, 0x00]),
+        Err(ResourceError::NoEnd)
+    );
+    assert_eq!(
+        parse_resources(&[0x22, 0x10]),
+        Err(ResourceError::Truncated)
+    );
 }
 
 #[test]
@@ -90,9 +117,15 @@ fn a_template_holds_at_most_sixteen_resources() {
 fn the_sleep_type_comes_from_the_s5_package_in_the_aml() {
     // Name "_S5_" holding package { 0x07, 0x07 }: NameOp, name, PackageOp, length, count,
     // then BytePrefix 7 twice.
-    let aml = [0x08, b'_', b'S', b'5', b'_', 0x12, 0x06, 0x02, 0x0A, 0x07, 0x0A, 0x07];
+    let aml = [
+        0x08, b'_', b'S', b'5', b'_', 0x12, 0x06, 0x02, 0x0A, 0x07, 0x0A, 0x07,
+    ];
     assert_eq!(sleep_type(&aml, SleepState::S5.name()), Some(7));
-    assert_eq!(sleep_type(&aml, SleepState::S3.name()), None, "no _S3_ here");
+    assert_eq!(
+        sleep_type(&aml, SleepState::S3.name()),
+        None,
+        "no _S3_ here"
+    );
 }
 
 #[test]
@@ -103,7 +136,9 @@ fn a_zero_or_one_sleep_type_is_read_without_a_prefix() {
 
 #[test]
 fn a_name_not_opened_by_a_name_opcode_is_not_a_sleep_package() {
-    let aml = [0x00, b'_', b'S', b'5', b'_', 0x12, 0x06, 0x02, 0x0A, 0x07, 0x0A, 0x07];
+    let aml = [
+        0x00, b'_', b'S', b'5', b'_', 0x12, 0x06, 0x02, 0x0A, 0x07, 0x0A, 0x07,
+    ];
     assert_eq!(sleep_type(&aml, *b"_S5_"), None);
 }
 
@@ -111,5 +146,9 @@ fn a_name_not_opened_by_a_name_opcode_is_not_a_sleep_package() {
 fn the_pm1_word_places_the_type_and_the_go_bit() {
     assert_eq!(pm1_sleep_value(5, true), Some(0x3400));
     assert_eq!(pm1_sleep_value(7, false), Some(0x1C00));
-    assert_eq!(pm1_sleep_value(8, true), None, "a type must fit in three bits");
+    assert_eq!(
+        pm1_sleep_value(8, true),
+        None,
+        "a type must fit in three bits"
+    );
 }
