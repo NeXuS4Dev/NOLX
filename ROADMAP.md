@@ -619,6 +619,11 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   Host-tested; PS2-001 to PS2-007 are `tested-T1` (run [38599792741](https://github.com/NeXuS4Dev/NOLX/actions/runs/38599792741)).
   The kernel does not read the keyboard yet, and the mouse and xHCI are not started.
 
+- Network device rules (`crates/nolx-net-core`): virtio-net identity, features, configuration space,
+  queue layout, and the 12-byte net header, plus Ethernet frame limits, header fields, and MAC address
+  rules. Host-tested; NET-001 to NET-006 are `tested-T1` (run [38603598789](https://github.com/NeXuS4Dev/NOLX/actions/runs/38603598789)).
+  The kernel has no network driver yet.
+
 Not yet done: PCIe ECAM, MSI/MSI-X programming in the kernel, per-device queues, and every driver below.
 
 - PCI/PCIe enumeration, BAR assignment, MSI/MSI-X, capability walking.
