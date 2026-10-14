@@ -21,7 +21,6 @@ pub mod interrupts;
 pub mod ioapic;
 pub mod multiboot;
 pub mod nvme;
-pub mod xhci;
 pub mod pci;
 pub mod pic;
 pub mod rtc;
@@ -30,6 +29,7 @@ pub mod tables;
 pub mod timer;
 pub mod virtio_blk;
 pub mod virtio_volume;
+pub mod xhci;
 
 use nolx_hal_core::console::HalConsole;
 
