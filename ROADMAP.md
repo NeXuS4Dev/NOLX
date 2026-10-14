@@ -614,6 +614,11 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   BLK-026 and BLK-027 are `tested-T1` (run [38570531260](https://github.com/NeXuS4Dev/NOLX/actions/runs/38570531260)).
   The drivers do not submit through the queue yet.
 
+- PS/2 keyboard rules (`crates/nolx-input-core`): controller status and configuration bits, device
+  replies, and the scancode set 1 decoder with the E0 and E1 prefixes, producing USB HID usage codes.
+  Host-tested; PS2-001 to PS2-007 are `tested-T1` (run [38599792741](https://github.com/NeXuS4Dev/NOLX/actions/runs/38599792741)).
+  The kernel does not read the keyboard yet, and the mouse and xHCI are not started.
+
 Not yet done: PCIe ECAM, MSI/MSI-X programming in the kernel, per-device queues, and every driver below.
 
 - PCI/PCIe enumeration, BAR assignment, MSI/MSI-X, capability walking.

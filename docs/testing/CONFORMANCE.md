@@ -11,13 +11,13 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | Status | Assertions | Cumulative verified at or above status |
 |---|---|---|
 | `unimplemented` | 0 | 100.0% |
-| `implemented` | 11 | 100.0% |
-| `tested-T1` | 184 | 95.5% |
+| `implemented` | 4 | 100.0% |
+| `tested-T1` | 191 | 98.4% |
 | `pending-T2` | 0 | — |
 | `tested-T2` | 50 | 20.4% |
 | `tested-T3` | 0 | 0.0% |
 
-**234 of 245 assertions have a passing automated test; 0 are awaiting T2 results.**
+**241 of 245 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
@@ -35,14 +35,14 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | nxfs | 15 | 15 | 14 | 0 | 1 | 0 |
 | obj | 14 | 14 | 9 | 0 | 5 | 0 |
 | pci | 13 | 13 | 11 | 0 | 2 | 0 |
-| ps2 | 7 | 7 | 0 | 0 | 0 | 0 |
+| ps2 | 7 | 7 | 7 | 0 | 0 | 0 |
 | vfs | 48 | 48 | 46 | 0 | 2 | 0 |
 
 ## Unimplemented assertions (0)
 
 None.
 
-## Implemented but untested (11)
+## Implemented but untested (4)
 
 | ID | Specification reference |
 |---|---|
@@ -50,13 +50,6 @@ None.
 | HAL-019 | APIC arithmetic: x2APIC MSRs, compressed TPR priority classes, timer divisors, and HPET-based counter calibration are checked |
 | HAL-020 | HPET clocksource: 32-bit MMIO reads and wrap extension produce monotonic nanoseconds |
 | HAL-021 | I/O APIC routes: GSI windows and ISA overrides are validated, redirections start masked, and NMI sources use MADT polarity/trigger flags |
-| PS2-001 | NOLX M9 Controller status: output-full, input-full, timeout, and parity are read from their status bits, and a timeout or parity error marks a byte as untrustworthy |
-| PS2-002 | NOLX M9 Keyboard configuration: the configuration byte enables the keyboard interrupt and set 1 translation, keeps the keyboard clock running, and keeps the other bits |
-| PS2-003 | NOLX M9 Device replies: acknowledge (0xFA), resend (0xFE), and self-test passed (0xAA) are classified; any other byte is a key or an unawaited reply |
-| PS2-004 | NOLX M9 Make and break codes: a make code presses its key, and the same code with bit 7 set releases it, with the same HID usage |
-| PS2-005 | NOLX M9 Key table: letters, digits, the standard controls, the modifiers, and the function keys map to their HID usage codes |
-| PS2-006 | NOLX M9 Extended keys: a key after the E0 prefix uses the extended table, so the arrows, Delete, and the right-hand Ctrl and Alt are distinct from their unprefixed codes |
-| PS2-007 | NOLX M9 Pause and Print Screen: the Pause sequence is consumed in full and decoding resumes after it; the Print Screen fake-shift sequences report no key, and an unknown code reports nothing |
 
 ## Pending T2 verification (0)
 
@@ -284,13 +277,13 @@ None.
 | PN-020 | vfs | XSH fstat: the device and inode of an open file identify it | `tested-T1` | crates/nolx-vfs mount::tests::mount_over_replaces_the_root |
 | PN-021 | vfs | XSH pathconf / fpathconf: _PC_LINK_MAX, _PC_NAME_MAX, _PC_PATH_MAX, _PC_PIPE_BUF, _PC_CHOWN_RESTRICTED, _PC_NO_TRUNC, _PC_VDISABLE, and _PC_SYMLINK_MAX return the filesystem limits and reject unknown names with EINVAL | `tested-T1` | crates/nolx-vfs path::tests::pathconf_reports_posix_limits_and_rejects_unknown_names |
 | PN-022 | vfs | XBD 4.12 Pathname Resolution: a chroot or pivot-root directory confines both `/` and `..` traversal to the process root | `tested-T1` | crates/nolx-vfs path::tests::chroot_confines_absolute_and_dot_dot_resolution |
-| PS2-001 | ps2 | NOLX M9 Controller status: output-full, input-full, timeout, and parity are read from their status bits, and a timeout or parity error marks a byte as untrustworthy | `implemented` | nolx-input-core tests::controller_status_bits_say_what_the_cpu_may_do |
-| PS2-002 | ps2 | NOLX M9 Keyboard configuration: the configuration byte enables the keyboard interrupt and set 1 translation, keeps the keyboard clock running, and keeps the other bits | `implemented` | nolx-input-core tests::keyboard_config_enables_the_irq_and_translation_and_keeps_the_clock_on |
-| PS2-003 | ps2 | NOLX M9 Device replies: acknowledge (0xFA), resend (0xFE), and self-test passed (0xAA) are classified; any other byte is a key or an unawaited reply | `implemented` | nolx-input-core tests::device_replies_are_classified |
-| PS2-004 | ps2 | NOLX M9 Make and break codes: a make code presses its key, and the same code with bit 7 set releases it, with the same HID usage | `implemented` | nolx-input-core tests::a_make_code_presses_and_its_break_code_releases_the_same_usage |
-| PS2-005 | ps2 | NOLX M9 Key table: letters, digits, the standard controls, the modifiers, and the function keys map to their HID usage codes | `implemented` | nolx-input-core tests::letters_digits_and_controls_map_to_hid_usages |
-| PS2-006 | ps2 | NOLX M9 Extended keys: a key after the E0 prefix uses the extended table, so the arrows, Delete, and the right-hand Ctrl and Alt are distinct from their unprefixed codes | `implemented` | nolx-input-core tests::extended_keys_need_the_prefix_and_map_to_their_own_usages |
-| PS2-007 | ps2 | NOLX M9 Pause and Print Screen: the Pause sequence is consumed in full and decoding resumes after it; the Print Screen fake-shift sequences report no key, and an unknown code reports nothing | `implemented` | nolx-input-core tests::pause_is_consumed_and_decoding_resumes_after_it, tests::print_screen_fake_shifts_and_unknown_codes_report_nothing |
+| PS2-001 | ps2 | NOLX M9 Controller status: output-full, input-full, timeout, and parity are read from their status bits, and a timeout or parity error marks a byte as untrustworthy | `tested-T1` | nolx-input-core tests::controller_status_bits_say_what_the_cpu_may_do |
+| PS2-002 | ps2 | NOLX M9 Keyboard configuration: the configuration byte enables the keyboard interrupt and set 1 translation, keeps the keyboard clock running, and keeps the other bits | `tested-T1` | nolx-input-core tests::keyboard_config_enables_the_irq_and_translation_and_keeps_the_clock_on |
+| PS2-003 | ps2 | NOLX M9 Device replies: acknowledge (0xFA), resend (0xFE), and self-test passed (0xAA) are classified; any other byte is a key or an unawaited reply | `tested-T1` | nolx-input-core tests::device_replies_are_classified |
+| PS2-004 | ps2 | NOLX M9 Make and break codes: a make code presses its key, and the same code with bit 7 set releases it, with the same HID usage | `tested-T1` | nolx-input-core tests::a_make_code_presses_and_its_break_code_releases_the_same_usage |
+| PS2-005 | ps2 | NOLX M9 Key table: letters, digits, the standard controls, the modifiers, and the function keys map to their HID usage codes | `tested-T1` | nolx-input-core tests::letters_digits_and_controls_map_to_hid_usages |
+| PS2-006 | ps2 | NOLX M9 Extended keys: a key after the E0 prefix uses the extended table, so the arrows, Delete, and the right-hand Ctrl and Alt are distinct from their unprefixed codes | `tested-T1` | nolx-input-core tests::extended_keys_need_the_prefix_and_map_to_their_own_usages |
+| PS2-007 | ps2 | NOLX M9 Pause and Print Screen: the Pause sequence is consumed in full and decoding resumes after it; the Print Screen fake-shift sequences report no key, and an unknown code reports nothing | `tested-T1` | nolx-input-core tests::pause_is_consumed_and_decoding_resumes_after_it, tests::print_screen_fake_shifts_and_unknown_codes_report_nothing |
 | UN-001 | vfs | XSH unlink: an entry is removed but an open file remains accessible until the last descriptor closes | `tested-T1` | crates/nolx-vfs vfs::tests::un001_unlink_removes_entry_while_open_file_remains_accessible_until_last_close |
 | UN-002 | vfs | XSH link: creating a hard link to a directory fails with EPERM unless privileged | `tested-T1` | crates/nolx-vfs vfs::tests::un002_hard_link_to_directory_fails_with_eperm |
 | UN-003 | vfs | XSH rename: renaming a directory onto one of its own descendants fails with EINVAL | `tested-T1` | crates/nolx-vfs vfs::tests::un003_rename_directory_into_own_descendant_fails_with_einval |
