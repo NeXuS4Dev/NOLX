@@ -34,6 +34,10 @@ name = "nolx-block-core"
 version = "0.1.0"
 
 [[package]]
+name = "nolx-e1000-core"
+version = "0.1.0"
+
+[[package]]
 name = "nolx-exec-core"
 version = "0.1.0"
 dependencies = [
