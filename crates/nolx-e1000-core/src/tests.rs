@@ -38,7 +38,11 @@ fn the_receive_address_registers_hold_the_mac_with_the_valid_bit() {
 
 #[test]
 fn a_ring_is_a_multiple_of_eight_descriptors_within_the_limits() {
-    assert_eq!(ring_bytes(8), Some(128), "128 bytes is the hardware alignment");
+    assert_eq!(
+        ring_bytes(8),
+        Some(128),
+        "128 bytes is the hardware alignment"
+    );
     assert_eq!(ring_bytes(256), Some(4096));
     assert_eq!(ring_bytes(4), None, "below the minimum");
     assert_eq!(ring_bytes(12), None, "not a multiple of eight");
@@ -47,7 +51,10 @@ fn a_ring_is_a_multiple_of_eight_descriptors_within_the_limits() {
 
 #[test]
 fn the_control_values_enable_the_engines_with_the_expected_bits() {
-    assert_eq!(rctl_enable(false) & (RCTL_EN | RCTL_SECRC), RCTL_EN | RCTL_SECRC);
+    assert_eq!(
+        rctl_enable(false) & (RCTL_EN | RCTL_SECRC),
+        RCTL_EN | RCTL_SECRC
+    );
     assert_eq!(rctl_enable(false) & RCTL_BAM, 0);
     assert_eq!(rctl_enable(true) & RCTL_BAM, RCTL_BAM);
     let tctl = tctl_enable();
@@ -61,10 +68,19 @@ fn the_control_values_enable_the_engines_with_the_expected_bits() {
 fn a_receive_descriptor_holds_its_buffer_and_completes_on_done_and_end() {
     let rx = rx_descriptor(0x0123_4567_89AB_CDEF);
     assert_eq!(&rx[0..8], &0x0123_4567_89AB_CDEFu64.to_le_bytes());
-    assert!(rx[8..].iter().all(|&byte| byte == 0), "the device fills the rest");
+    assert!(
+        rx[8..].iter().all(|&byte| byte == 0),
+        "the device fills the rest"
+    );
     assert!(rx_complete(DESC_DD | RX_STATUS_EOP));
-    assert!(!rx_complete(DESC_DD), "a packet must end in this descriptor");
-    assert!(!rx_complete(RX_STATUS_EOP), "the device has not written it back");
+    assert!(
+        !rx_complete(DESC_DD),
+        "a packet must end in this descriptor"
+    );
+    assert!(
+        !rx_complete(RX_STATUS_EOP),
+        "the device has not written it back"
+    );
 }
 
 #[test]
@@ -74,7 +90,11 @@ fn a_transmit_descriptor_names_its_length_and_command() {
     assert_eq!(&tx[8..10], &60u16.to_le_bytes());
     assert_eq!(tx[11], TX_CMD_EOP | TX_CMD_IFCS | TX_CMD_RS);
     let middle = tx_descriptor(0x2000, 1500, false).unwrap();
-    assert_eq!(middle[11] & TX_CMD_EOP, 0, "a fragment does not end the packet");
+    assert_eq!(
+        middle[11] & TX_CMD_EOP,
+        0,
+        "a fragment does not end the packet"
+    );
     assert!(tx_descriptor(0x2000, 0, true).is_none());
     assert!(tx_descriptor(0x2000, TX_LENGTH_MAX + 1, true).is_none());
 }
@@ -90,7 +110,11 @@ fn an_empty_ring_has_all_but_one_slot_free() {
     assert_eq!(tx_free(0, 0, 8), 7);
     assert_eq!(tx_free(3, 5, 8), 5, "two in flight");
     assert_eq!(tx_free(6, 4, 8), 1, "wrapped: six in flight");
-    assert_eq!(tx_free(5, 4, 8), 0, "full: the slot behind the head is kept empty");
+    assert_eq!(
+        tx_free(5, 4, 8),
+        0,
+        "full: the slot behind the head is kept empty"
+    );
 }
 
 #[test]
