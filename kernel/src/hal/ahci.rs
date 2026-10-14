@@ -129,7 +129,16 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
 
     // Sector 0 first: its first bytes are the pattern CI wrote into the image.
     data.write(0, &[0u8; SECTOR_BYTES as usize]);
-    transfer(&port, &page, &data, Command { write: false, lba: 0, sectors: 1 })?;
+    transfer(
+        &port,
+        &page,
+        &data,
+        Command {
+            write: false,
+            lba: 0,
+            sectors: 1,
+        },
+    )?;
     let mut sector = [0u8; SECTOR_BYTES as usize];
     data.read(0, &mut sector);
     if sector[..SECTOR_PATTERN.len()] != *SECTOR_PATTERN {
@@ -149,14 +158,22 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
         &port,
         &page,
         &data,
-        Command { write: true, lba: ROUND_TRIP_SECTOR, sectors: ROUND_TRIP_SECTORS },
+        Command {
+            write: true,
+            lba: ROUND_TRIP_SECTOR,
+            sectors: ROUND_TRIP_SECTORS,
+        },
     )?;
     data.write(0, &[0u8; ROUND_TRIP_BYTES]);
     transfer(
         &port,
         &page,
         &data,
-        Command { write: false, lba: ROUND_TRIP_SECTOR, sectors: ROUND_TRIP_SECTORS },
+        Command {
+            write: false,
+            lba: ROUND_TRIP_SECTOR,
+            sectors: ROUND_TRIP_SECTORS,
+        },
     )?;
     let mut back = [0u8; ROUND_TRIP_BYTES];
     data.read(0, &mut back);
