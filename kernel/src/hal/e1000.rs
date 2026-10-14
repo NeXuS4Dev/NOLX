@@ -124,7 +124,7 @@ const DISPATCH: Dispatch = Dispatch {
 /// Probe for an e1000, register the driver with the framework, bind and start the device, and
 /// report the result. Failure is reported on the console and does not stop boot.
 pub fn probe(console: &mut dyn HalConsole) {
-    let Some((bdf, id)) = find_controller() else {
+    let Some((_, id)) = find_controller() else {
         let _ = writeln!(console, "e1000: no controller on the PCI bus");
         return;
     };
