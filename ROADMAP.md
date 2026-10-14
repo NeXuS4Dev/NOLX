@@ -630,6 +630,12 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   [38607105889](https://github.com/NeXuS4Dev/NOLX/actions/runs/38607105889)). The kernel does not run
   `_STA` or `_CRS` yet, and does not enter a sleep state.
 
+- USB host rules (`crates/nolx-usb-core`): xHCI register offsets and port status with the
+  write-one-to-clear rules, the link, normal, and event TRBs, and the HID boot keyboard report, which
+  yields the same key events as the PS/2 decoder. Host-tested; USB-001 to USB-006 are `tested-T1` (run
+  [38608775432](https://github.com/NeXuS4Dev/NOLX/actions/runs/38608775432)). The kernel does not
+  drive a controller yet, and hubs and other device classes are not here.
+
 Not yet done: PCIe ECAM, MSI/MSI-X programming in the kernel, per-device queues, and every driver below.
 
 - PCI/PCIe enumeration, BAR assignment, MSI/MSI-X, capability walking.

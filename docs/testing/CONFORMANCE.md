@@ -11,13 +11,13 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | Status | Assertions | Cumulative verified at or above status |
 |---|---|---|
 | `unimplemented` | 0 | 100.0% |
-| `implemented` | 10 | 100.0% |
-| `tested-T1` | 202 | 96.2% |
+| `implemented` | 4 | 100.0% |
+| `tested-T1` | 208 | 98.5% |
 | `pending-T2` | 0 | — |
 | `tested-T2` | 50 | 19.1% |
 | `tested-T3` | 0 | 0.0% |
 
-**252 of 262 assertions have a passing automated test; 0 are awaiting T2 results.**
+**258 of 262 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
@@ -38,14 +38,14 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | pci | 13 | 13 | 11 | 0 | 2 | 0 |
 | power | 5 | 5 | 5 | 0 | 0 | 0 |
 | ps2 | 7 | 7 | 7 | 0 | 0 | 0 |
-| usb | 6 | 6 | 0 | 0 | 0 | 0 |
+| usb | 6 | 6 | 6 | 0 | 0 | 0 |
 | vfs | 48 | 48 | 46 | 0 | 2 | 0 |
 
 ## Unimplemented assertions (0)
 
 None.
 
-## Implemented but untested (10)
+## Implemented but untested (4)
 
 | ID | Specification reference |
 |---|---|
@@ -53,12 +53,6 @@ None.
 | HAL-019 | APIC arithmetic: x2APIC MSRs, compressed TPR priority classes, timer divisors, and HPET-based counter calibration are checked |
 | HAL-020 | HPET clocksource: 32-bit MMIO reads and wrap extension produce monotonic nanoseconds |
 | HAL-021 | I/O APIC routes: GSI windows and ISA overrides are validated, redirections start masked, and NMI sources use MADT polarity/trigger flags |
-| USB-001 | NOLX M9 Controller registers: port register sets sit 16 bytes apart from 0x400 past the capability length, the port and slot counts come from HCSPARAMS1, and each doorbell is four bytes apart with its reserved low bits dropped |
-| USB-002 | NOLX M9 Port reset and acknowledgement: a reset is started with the enable bit and the other write-one-to-clear bits masked so it cannot disable the port or clear a change; acknowledging writes back only the change bits that are set |
-| USB-003 | NOLX M9 Link TRB: its target is 16-byte aligned or refused, the type is 6, and the cycle and toggle-cycle bits sit in their fields |
-| USB-004 | NOLX M9 Normal and enable-slot TRBs: the normal TRB carries its buffer, a 17-bit length, and the interrupt-on-completion flag; an enable-slot command has its type and cycle |
-| USB-005 | NOLX M9 Event TRBs: the completion code, slot, and port are read from their fields |
-| USB-006 | NOLX M9 Boot keyboard report: the difference between two reports gives modifier events in the E0 range, releases of keys no longer held, and presses of new keys, in that order; a roll-over report is refused; codes 0 to 3 are not keys |
 
 ## Pending T2 verification (0)
 
@@ -309,12 +303,12 @@ None.
 | UN-003 | vfs | XSH rename: renaming a directory onto one of its own descendants fails with EINVAL | `tested-T1` | crates/nolx-vfs vfs::tests::un003_rename_directory_into_own_descendant_fails_with_einval |
 | UN-004 | vfs | XSH rmdir: removing a non-empty directory fails with ENOTEMPTY | `tested-T1` | crates/nolx-vfs vfs::tests::un004_rmdir_non_empty_directory_fails_with_enotempty |
 | UN-005 | vfs | XSH mkdir: creating an existing path fails with EEXIST | `tested-T1` | crates/nolx-vfs vfs::tests::un005_mkdir_existing_path_fails_with_eexist |
-| USB-001 | usb | NOLX M9 Controller registers: port register sets sit 16 bytes apart from 0x400 past the capability length, the port and slot counts come from HCSPARAMS1, and each doorbell is four bytes apart with its reserved low bits dropped | `implemented` | nolx-usb-core tests::port_register_sets_sit_sixteen_bytes_apart_past_the_operational_base, tests::hcsparams1_gives_the_port_and_slot_counts, tests::doorbells_are_four_bytes_apart_and_the_offset_drops_its_low_bits |
-| USB-002 | usb | NOLX M9 Port reset and acknowledgement: a reset is started with the enable bit and the other write-one-to-clear bits masked so it cannot disable the port or clear a change; acknowledging writes back only the change bits that are set | `implemented` | nolx-usb-core tests::a_port_reset_keeps_the_port_and_clears_nothing_by_accident, tests::acknowledging_writes_back_only_the_change_bits_that_are_set |
-| USB-003 | usb | NOLX M9 Link TRB: its target is 16-byte aligned or refused, the type is 6, and the cycle and toggle-cycle bits sit in their fields | `implemented` | nolx-usb-core tests::a_link_trb_names_its_target_and_keeps_the_cycle_and_toggle_bits |
-| USB-004 | usb | NOLX M9 Normal and enable-slot TRBs: the normal TRB carries its buffer, a 17-bit length, and the interrupt-on-completion flag; an enable-slot command has its type and cycle | `implemented` | nolx-usb-core tests::a_normal_trb_carries_its_buffer_length_and_completion_flag, tests::an_enable_slot_command_has_its_type_and_cycle |
-| USB-005 | usb | NOLX M9 Event TRBs: the completion code, slot, and port are read from their fields | `implemented` | nolx-usb-core tests::an_event_gives_its_completion_code_slot_and_port |
-| USB-006 | usb | NOLX M9 Boot keyboard report: the difference between two reports gives modifier events in the E0 range, releases of keys no longer held, and presses of new keys, in that order; a roll-over report is refused; codes 0 to 3 are not keys | `implemented` | nolx-usb-core tests::an_unchanged_report_produces_no_events, tests::a_new_key_presses_and_a_dropped_key_releases, tests::a_modifier_bit_gives_its_usage_in_the_e_range, tests::releases_come_before_presses_and_modifiers_first_of_all, tests::a_roll_over_report_is_not_acted_on, tests::the_reserved_codes_below_four_are_not_keys |
+| USB-001 | usb | NOLX M9 Controller registers: port register sets sit 16 bytes apart from 0x400 past the capability length, the port and slot counts come from HCSPARAMS1, and each doorbell is four bytes apart with its reserved low bits dropped | `tested-T1` | nolx-usb-core tests::port_register_sets_sit_sixteen_bytes_apart_past_the_operational_base, tests::hcsparams1_gives_the_port_and_slot_counts, tests::doorbells_are_four_bytes_apart_and_the_offset_drops_its_low_bits |
+| USB-002 | usb | NOLX M9 Port reset and acknowledgement: a reset is started with the enable bit and the other write-one-to-clear bits masked so it cannot disable the port or clear a change; acknowledging writes back only the change bits that are set | `tested-T1` | nolx-usb-core tests::a_port_reset_keeps_the_port_and_clears_nothing_by_accident, tests::acknowledging_writes_back_only_the_change_bits_that_are_set |
+| USB-003 | usb | NOLX M9 Link TRB: its target is 16-byte aligned or refused, the type is 6, and the cycle and toggle-cycle bits sit in their fields | `tested-T1` | nolx-usb-core tests::a_link_trb_names_its_target_and_keeps_the_cycle_and_toggle_bits |
+| USB-004 | usb | NOLX M9 Normal and enable-slot TRBs: the normal TRB carries its buffer, a 17-bit length, and the interrupt-on-completion flag; an enable-slot command has its type and cycle | `tested-T1` | nolx-usb-core tests::a_normal_trb_carries_its_buffer_length_and_completion_flag, tests::an_enable_slot_command_has_its_type_and_cycle |
+| USB-005 | usb | NOLX M9 Event TRBs: the completion code, slot, and port are read from their fields | `tested-T1` | nolx-usb-core tests::an_event_gives_its_completion_code_slot_and_port |
+| USB-006 | usb | NOLX M9 Boot keyboard report: the difference between two reports gives modifier events in the E0 range, releases of keys no longer held, and presses of new keys, in that order; a roll-over report is refused; codes 0 to 3 are not keys | `tested-T1` | nolx-usb-core tests::an_unchanged_report_produces_no_events, tests::a_new_key_presses_and_a_dropped_key_releases, tests::a_modifier_bit_gives_its_usage_in_the_e_range, tests::releases_come_before_presses_and_modifiers_first_of_all, tests::a_roll_over_report_is_not_acted_on, tests::the_reserved_codes_below_four_are_not_keys |
 | VIO-001 | drv | NOLX M9 Capability discovery: the vendor capabilities of the PCI capability list are read by `cfg_type`, the common, notify, ISR, and device regions are each recorded once, and vendor capabilities of other types are ignored | `tested-T1` | nolx-virtio-core tests::discovery_finds_each_region_by_type, tests::a_device_without_a_capability_list_has_no_regions, tests::the_first_valid_capability_of_a_type_wins |
 | VIO-002 | drv | NOLX M9 Capability validation: a virtio capability shorter than 16 bytes, one that runs past the 256-byte space, one naming a BAR above 5, or a notify capability shorter than 20 bytes is skipped, and does not hide the capabilities after it | `tested-T1` | nolx-virtio-core tests::malformed_capabilities_are_skipped_not_trusted, tests::a_notify_region_needs_its_multiplier_field, tests::a_capability_past_the_end_of_configuration_space_is_refused |
 | VIO-003 | drv | NOLX M9 Notify address: a queue's notification address is the notify region's offset plus the queue's notify offset times the capability's multiplier | `tested-T1` | nolx-virtio-core tests::notify_address_scales_the_queue_offset |
