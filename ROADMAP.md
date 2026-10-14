@@ -604,7 +604,12 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   disk image as an NVMe namespace and checksums the written sectors in that copy after QEMU exits.
   Not yet done: interrupts, and the other storage paths.
 
-Not yet done: PCIe ECAM, MSI/MSI-X, and every driver below.
+- MSI and MSI-X rules (`crates/nolx-pci-core/src/msi.rs`): capability layouts, the message address
+  and data for a local APIC, the MSI-X table entry and its placement in a BAR, host-tested
+  (PCI-011 to PCI-013 are `tested-T1`, run [38567825680](https://github.com/NeXuS4Dev/NOLX/actions/runs/38567825680)).
+  The kernel does not program MSI or MSI-X yet.
+
+Not yet done: PCIe ECAM, MSI/MSI-X programming in the kernel, and every driver below.
 
 - PCI/PCIe enumeration, BAR assignment, MSI/MSI-X, capability walking.
 - Storage: AHCI (SATA), NVMe, virtio-blk; block layer with partitions (GPT), request
