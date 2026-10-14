@@ -192,7 +192,7 @@ mod tests {
     #[test]
     fn a_message_address_names_the_local_apic_and_data_names_the_vector() {
         assert_eq!(message_address(3), 0xFEE0_3000);
-        assert_eq!(message_address(0xFF), 0xFEFF_F000);
+        assert_eq!(message_address(0xFF), 0xFEEF_F000);
         assert_eq!(message_data(0x31), Some(0x31));
         assert_eq!(message_data(31), None, "exceptions are not device vectors");
     }
