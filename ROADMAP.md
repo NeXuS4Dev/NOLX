@@ -648,7 +648,13 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   [38614702136](https://github.com/NeXuS4Dev/NOLX/actions/runs/38614702136)). The kernel does not use the
   framework yet, and no driver is registered with it.
 
-Not yet done: PCIe ECAM, MSI/MSI-X programming in the kernel, per-device queues, and every driver below.
+- Per-device block queues (`crates/nolx-block-core/src/devices.rs`): each attached device has its own
+  request queue, so merges stay within one device; dispatch is round-robin with a per-device in-flight
+  limit, so one device cannot starve the others. Host-tested; BLK-028 to BLK-032 are `tested-T1` (run
+  [38619742873](https://github.com/NeXuS4Dev/NOLX/actions/runs/38619742873)). The drivers do not submit
+  through these queues yet.
+
+Not yet done: PCIe ECAM, MSI/MSI-X programming in the kernel, and every driver below.
 
 - PCI/PCIe enumeration, BAR assignment, MSI/MSI-X, capability walking.
 - Storage: AHCI (SATA), NVMe, virtio-blk; block layer with partitions (GPT), request

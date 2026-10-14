@@ -11,20 +11,20 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | Status | Assertions | Cumulative verified at or above status |
 |---|---|---|
 | `unimplemented` | 0 | 100.0% |
-| `implemented` | 9 | 100.0% |
-| `tested-T1` | 222 | 96.8% |
+| `implemented` | 5 | 100.0% |
+| `tested-T1` | 226 | 98.2% |
 | `pending-T2` | 0 | — |
 | `tested-T2` | 50 | 17.8% |
 | `tested-T3` | 0 | 0.0% |
 
-**272 of 281 assertions have a passing automated test; 0 are awaiting T2 results.**
+**276 of 281 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
 | Area | Assertions | Implemented | Tested (T1) | Pending (T2) | Tested (T2) | Tested (T3) |
 |---|---|---|---|---|---|---|
 | ahci | 11 | 11 | 8 | 0 | 3 | 0 |
-| blk | 32 | 32 | 23 | 0 | 4 | 0 |
+| blk | 32 | 32 | 27 | 0 | 4 | 0 |
 | df | 7 | 7 | 7 | 0 | 0 | 0 |
 | drv | 20 | 20 | 15 | 0 | 5 | 0 |
 | e1000 | 7 | 7 | 7 | 0 | 0 | 0 |
@@ -47,15 +47,11 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 
 None.
 
-## Implemented but untested (9)
+## Implemented but untested (5)
 
 | ID | Specification reference |
 |---|---|
 | BLK-028 | NOLX M9 Per-device queues, attachment: a device is attached once, with a nonzero in-flight limit; an unattached or out-of-range device refuses work; a device with queued or in-flight requests cannot be detached |
-| BLK-029 | NOLX M9 Per-device queues, isolation: each device has its own queue, so a request for one device never merges with a request for another, but merges within its own device as usual |
-| BLK-030 | NOLX M9 Per-device queues, dispatch order: dispatch visits attached devices in round-robin order, starting after the device served last, and skips devices with nothing queued |
-| BLK-031 | NOLX M9 Per-device queues, in-flight limit: a device at its limit is not dispatched again until one of its requests completes, other devices still dispatch, and a completion with nothing in flight is refused |
-| BLK-032 | NOLX M9 Per-device queues, back-pressure: a full queue refuses a request it cannot merge on its own device only, an invalid request is refused, and other devices keep their room |
 | HAL-018 | ACPI MADT: legacy/x2APIC processor entries, local NMI routes, I/O APIC routes, ISA overrides, and I/O APIC NMI sources decode from length-checked records |
 | HAL-019 | APIC arithmetic: x2APIC MSRs, compressed TPR priority classes, timer divisors, and HPET-based counter calibration are checked |
 | HAL-020 | HPET clocksource: 32-bit MMIO reads and wrap extension produce monotonic nanoseconds |
@@ -108,10 +104,10 @@ None.
 | BLK-026 | blk | NOLX M9 Request merge: two transfers of one direction that touch end to end merge into one, in either order; a read and a write, a gap, or a merge over the size limit do not; a merge that would overflow a sector end or sum is refused, not wrapped | `tested-T1` | nolx-block-core queue::tests::back_to_back_requests_of_one_direction_merge, queue::tests::a_request_just_before_a_queued_one_merges_at_the_front, queue::tests::different_directions_and_gaps_do_not_merge, queue::tests::a_merge_stops_at_the_size_limit, queue::tests::merge_refuses_overflowing_ends_and_sums_instead_of_wrapping |
 | BLK-027 | blk | NOLX M9 Request queue: requests keep arrival order; a merged request absorbs any queued request it now touches; an empty or oversized request is invalid; a full queue refuses what cannot merge and still takes a merge; the queue pops the oldest request first | `tested-T1` | nolx-block-core queue::tests::a_merge_bridges_two_queued_requests, queue::tests::empty_and_oversized_requests_are_invalid, queue::tests::a_full_queue_refuses_what_cannot_merge_and_still_takes_merges Workflow [38570531260](https://github.com/NeXuS4Dev/NOLX/actions/runs/38570531260) passed all six jobs. |
 | BLK-028 | blk | NOLX M9 Per-device queues, attachment: a device is attached once, with a nonzero in-flight limit; an unattached or out-of-range device refuses work; a device with queued or in-flight requests cannot be detached | `implemented` | nolx-block-core devices::tests::a_device_must_be_attached_once_with_a_nonzero_limit_to_take_work |
-| BLK-029 | blk | NOLX M9 Per-device queues, isolation: each device has its own queue, so a request for one device never merges with a request for another, but merges within its own device as usual | `implemented` | nolx-block-core devices::tests::requests_for_one_device_never_merge_with_another_devices |
-| BLK-030 | blk | NOLX M9 Per-device queues, dispatch order: dispatch visits attached devices in round-robin order, starting after the device served last, and skips devices with nothing queued | `implemented` | nolx-block-core devices::tests::dispatch_is_round_robin_and_skips_empty_devices |
-| BLK-031 | blk | NOLX M9 Per-device queues, in-flight limit: a device at its limit is not dispatched again until one of its requests completes, other devices still dispatch, and a completion with nothing in flight is refused | `implemented` | nolx-block-core devices::tests::a_device_at_its_limit_is_skipped_until_it_completes |
-| BLK-032 | blk | NOLX M9 Per-device queues, back-pressure: a full queue refuses a request it cannot merge on its own device only, an invalid request is refused, and other devices keep their room | `implemented` | nolx-block-core devices::tests::a_full_queue_refuses_its_own_device_only |
+| BLK-029 | blk | NOLX M9 Per-device queues, isolation: each device has its own queue, so a request for one device never merges with a request for another, but merges within its own device as usual | `tested-T1` | nolx-block-core devices::tests::requests_for_one_device_never_merge_with_another_devices |
+| BLK-030 | blk | NOLX M9 Per-device queues, dispatch order: dispatch visits attached devices in round-robin order, starting after the device served last, and skips devices with nothing queued | `tested-T1` | nolx-block-core devices::tests::dispatch_is_round_robin_and_skips_empty_devices |
+| BLK-031 | blk | NOLX M9 Per-device queues, in-flight limit: a device at its limit is not dispatched again until one of its requests completes, other devices still dispatch, and a completion with nothing in flight is refused | `tested-T1` | nolx-block-core devices::tests::a_device_at_its_limit_is_skipped_until_it_completes |
+| BLK-032 | blk | NOLX M9 Per-device queues, back-pressure: a full queue refuses a request it cannot merge on its own device only, an invalid request is refused, and other devices keep their room | `tested-T1` | nolx-block-core devices::tests::a_full_queue_refuses_its_own_device_only |
 | DF-001 | df | NOLX M9 Match rules: a rule compares only the fields it sets (vendor and device, or class, subclass, and optionally programming interface), and a rule that sets a different field does not match | `tested-T1` | nolx-df-core tests::a_match_rule_compares_only_the_fields_it_sets |
 | DF-002 | df | NOLX M9 Binding: a device binds to the first registered driver that has a matching rule and whose probe accepts the device; a device no driver accepts stays discovered and can bind when a suitable driver is added later | `tested-T1` | nolx-df-core tests::a_device_binds_to_the_first_driver_whose_probe_accepts_it, tests::a_device_with_no_accepting_driver_stays_discovered_and_can_bind_later |
 | DF-003 | df | NOLX M9 Lifecycle: a device must be bound before it starts, a started device stops, a stopped device starts again, and a bound device cannot be bound again | `tested-T1` | nolx-df-core tests::the_lifecycle_moves_through_start_stop_and_start_again |
