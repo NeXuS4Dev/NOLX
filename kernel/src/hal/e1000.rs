@@ -16,7 +16,7 @@
 
 use core::sync::atomic::{fence, Ordering};
 
-use nolx_df_core::{DeviceId, Dispatch, Driver, Match, Registry};
+use nolx_df_core::{DeviceId, Dispatch, Driver, Error as DfError, Match, Registry};
 use nolx_e1000_core::{self as e1000, DEVICE_82540EM, VENDOR_INTEL};
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
