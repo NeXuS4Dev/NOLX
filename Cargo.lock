@@ -81,6 +81,10 @@ name = "nolx-pci-core"
 version = "0.1.0"
 
 [[package]]
+name = "nolx-power-core"
+version = "0.1.0"
+
+[[package]]
 name = "nolx-syscall"
 version = "0.1.0"
 dependencies = [

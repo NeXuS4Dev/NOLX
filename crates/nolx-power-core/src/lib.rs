@@ -1,0 +1,254 @@
+//! ACPI device status, resources, and sleep-state rules, decided over bytes.
+//!
+//! Three things the firmware tells the kernel, and what they mean. A device's `_STA` method
+//! returns a status word: whether the device is present, enabled, shown, and working. Its `_CRS`
+//! method returns a resource template: the interrupts, I/O ranges, and memory ranges the device
+//! uses, as a list of small and large resource descriptors ending in an end tag. The sleep types
+//! for each sleep state (`_S3_`, `_S5_`) are named in the DSDT's AML as small packages, and the
+//! PM1 control register takes the chosen type and a go bit to enter that state.
+//!
+//! The kernel finds the methods' bytes and runs nothing: these rules read the results. Scope: the
+//! resource descriptors a PC's devices use, not every descriptor the specification defines; and
+//! the sleep lookup finds a `_Sx_` name that is a literal package, not one computed at runtime.
+
+#![cfg_attr(not(test), no_std)]
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
+/// `_STA` bit 0: the device is present.
+pub const STA_PRESENT: u32 = 1 << 0;
+/// `_STA` bit 1: the device is enabled.
+pub const STA_ENABLED: u32 = 1 << 1;
+/// `_STA` bit 2: the device should be shown in the user interface.
+pub const STA_SHOWN: u32 = 1 << 2;
+/// `_STA` bit 3: the device is functioning.
+pub const STA_FUNCTIONAL: u32 = 1 << 3;
+/// `_STA` bit 4: the device's battery is present.
+pub const STA_BATTERY: u32 = 1 << 4;
+
+/// Whether a device with this `_STA` value may be used: present, enabled, and functioning.
+#[must_use]
+pub fn is_usable(sta: u32) -> bool {
+    let needed = STA_PRESENT | STA_ENABLED | STA_FUNCTIONAL;
+    sta & needed == needed
+}
+
+/// The most resource descriptors a template may hold. A template with more is refused, so the
+/// list needs no allocator.
+pub const MAX_RESOURCES: usize = 16;
+
+/// One resource a device uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Resource {
+    /// Interrupt lines, one bit each: bit `n` is IRQ `n`.
+    Irq {
+        /// The IRQ bitmask.
+        mask: u16,
+    },
+    /// A range of I/O ports.
+    Io {
+        /// The first port.
+        base: u16,
+        /// How many ports.
+        length: u8,
+    },
+    /// A range of physical memory.
+    Memory {
+        /// The first address.
+        base: u64,
+        /// How many bytes.
+        length: u64,
+    },
+}
+
+/// Why a resource template was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResourceError {
+    /// The template ends before its last descriptor or its end tag.
+    Truncated,
+    /// The template has no end tag before its bytes run out.
+    NoEnd,
+    /// A descriptor this crate does not decode. Holds its tag byte.
+    Unsupported(u8),
+    /// The template holds more descriptors than [`MAX_RESOURCES`].
+    TooMany,
+}
+
+/// The decoded resources of one template, in the order the firmware listed them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Resources {
+    items: [Option<Resource>; MAX_RESOURCES],
+    len: usize,
+}
+
+impl Resources {
+    /// The resources, in template order.
+    pub fn iter(&self) -> impl Iterator<Item = Resource> + '_ {
+        self.items[..self.len].iter().flatten().copied()
+    }
+
+    /// How many resources the template holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the template holds no resources.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn push(&mut self, resource: Resource) -> Result<(), ResourceError> {
+        if self.len == MAX_RESOURCES {
+            return Err(ResourceError::TooMany);
+        }
+        self.items[self.len] = Some(resource);
+        self.len += 1;
+        Ok(())
+    }
+}
+
+/// The little-endian value of `len` bytes at `at`, or `Truncated` when the bytes are not there.
+fn le(data: &[u8], at: usize, len: usize) -> Result<u64, ResourceError> {
+    let bytes = data.get(at..at + len).ok_or(ResourceError::Truncated)?;
+    Ok(bytes
+        .iter()
+        .rev()
+        .fold(0u64, |value, &byte| (value << 8) | u64::from(byte)))
+}
+
+/// Decode a `_CRS` resource template up to and including its end tag.
+///
+/// Small descriptors carry their length in the tag: IRQ (name 0x04), fixed I/O (0x09), and I/O
+/// port (0x08). Large descriptors carry a 16-bit length: Memory32Fixed (0x06) and QWord address
+/// space (0x0A), for memory resources only. Anything else is [`ResourceError::Unsupported`].
+///
+/// # Errors
+///
+/// See [`ResourceError`].
+pub fn parse_resources(bytes: &[u8]) -> Result<Resources, ResourceError> {
+    let mut out = Resources::default();
+    let mut at = 0usize;
+    loop {
+        let tag = *bytes.get(at).ok_or(ResourceError::NoEnd)?;
+        if tag & 0x80 == 0 {
+            let name = (tag >> 3) & 0x0F;
+            let len = usize::from(tag & 0x07);
+            match name {
+                // End tag: its one byte is a checksum this crate does not verify.
+                0x0F => return Ok(out),
+                // IRQ: two bytes of mask, a third flags byte may follow.
+                0x04 => out.push(Resource::Irq {
+                    mask: le(bytes, at + 1, 2)? as u16,
+                })?,
+                // I/O port: information, minimum, maximum, alignment, length.
+                0x08 => out.push(Resource::Io {
+                    base: le(bytes, at + 2, 2)? as u16,
+                    length: le(bytes, at + 7, 1)? as u8,
+                })?,
+                // Fixed location I/O port: base, then length.
+                0x09 => out.push(Resource::Io {
+                    base: le(bytes, at + 1, 2)? as u16,
+                    length: le(bytes, at + 3, 1)? as u8,
+                })?,
+                _ => return Err(ResourceError::Unsupported(tag)),
+            }
+            at += 1 + len;
+        } else {
+            let len = le(bytes, at + 1, 2)? as usize;
+            let body = at + 3;
+            match tag & 0x7F {
+                // Memory32Fixed: information, base, length.
+                0x06 => out.push(Resource::Memory {
+                    base: le(bytes, body + 1, 4)?,
+                    length: le(bytes, body + 5, 4)?,
+                })?,
+                // QWord address space: type 0 is memory; minimum is at 11, length at 35.
+                0x0A => {
+                    if le(bytes, body, 1)? != 0 {
+                        return Err(ResourceError::Unsupported(tag));
+                    }
+                    out.push(Resource::Memory {
+                        base: le(bytes, body + 11, 8)?,
+                        length: le(bytes, body + 35, 8)?,
+                    })?;
+                }
+                _ => return Err(ResourceError::Unsupported(tag)),
+            }
+            at = body + len;
+        }
+    }
+}
+
+/// The byte that opens a name in AML.
+const NAME_OP: u8 = 0x08;
+/// The byte that opens a package in AML.
+const PACKAGE_OP: u8 = 0x12;
+/// The byte that prefixes a one-byte constant in AML.
+const BYTE_PREFIX: u8 = 0x0A;
+
+/// A sleep state the kernel may enter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SleepState {
+    /// Suspend to RAM.
+    S3,
+    /// Soft off.
+    S5,
+}
+
+impl SleepState {
+    /// The AML name the DSDT gives this state's sleep types.
+    #[must_use]
+    pub const fn name(self) -> [u8; 4] {
+        match self {
+            Self::S3 => *b"_S3_",
+            Self::S5 => *b"_S5_",
+        }
+    }
+}
+
+/// The first sleep type (SLP_TYPa) of the `_Sx_` package named `name`, found as a literal in
+/// the AML. The name must be preceded by a name opcode and followed by a package whose first
+/// element is a constant: a zero or one, or a one-byte constant. Returns `None` when no such
+/// package is found.
+#[must_use]
+pub fn sleep_type(aml: &[u8], name: [u8; 4]) -> Option<u8> {
+    for at in 1..aml.len() {
+        if aml.get(at..at + 4) != Some(&name[..]) || aml.get(at - 1) != Some(&NAME_OP) {
+            continue;
+        }
+        let package = at + 4;
+        if aml.get(package) != Some(&PACKAGE_OP) {
+            continue;
+        }
+        // The package length: its top two bits count the bytes that follow the first.
+        let lead = *aml.get(package + 1)?;
+        let count_at = package + 2 + usize::from(lead >> 6);
+        if *aml.get(count_at)? == 0 {
+            return None;
+        }
+        let first = count_at + 1;
+        return match *aml.get(first)? {
+            0x00 => Some(0),
+            0x01 => Some(1),
+            BYTE_PREFIX => aml.get(first + 1).copied(),
+            _ => None,
+        };
+    }
+    None
+}
+
+/// The PM1 control word that enters a sleep state: SLP_TYP in bits 12:10 and SLP_EN in bit 13.
+/// Returns `None` for a type that does not fit in three bits.
+#[must_use]
+pub fn pm1_sleep_value(slp_typ: u8, enable: bool) -> Option<u16> {
+    if slp_typ > 7 {
+        return None;
+    }
+    let typ = u16::from(slp_typ) << 10;
+    Some(typ | if enable { 1 << 13 } else { 0 })
+}
+
+#[cfg(test)]
+mod tests;
