@@ -22,6 +22,10 @@ name = "nolx-ahci-core"
 version = "0.1.0"
 
 [[package]]
+name = "nolx-net-core"
+version = "0.1.0"
+
+[[package]]
 name = "nolx-nvme-core"
 version = "0.1.0"
 
