@@ -173,11 +173,7 @@ pub fn probe(console: &mut dyn HalConsole) {
 }
 
 /// Register the driver, add the device, bind it, and start it. Returns the device handle.
-fn attach(
-    registry: &mut Registry<1, 1>,
-    driver: Driver,
-    id: DeviceId,
-) -> Result<usize, DfError> {
+fn attach(registry: &mut Registry<1, 1>, driver: Driver, id: DeviceId) -> Result<usize, DfError> {
     registry.add_driver(driver)?;
     let dev = registry.add_device(id)?;
     registry.bind(dev)?;
