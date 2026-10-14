@@ -16,7 +16,7 @@
 
 use core::sync::atomic::{fence, Ordering};
 
-use nolx_df_core::{Dispatch, DeviceId, Driver, Match, Registry};
+use nolx_df_core::{DeviceId, Dispatch, Driver, Match, Registry};
 use nolx_e1000_core::{self as e1000, DEVICE_82540EM, VENDOR_INTEL};
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
@@ -162,7 +162,10 @@ pub fn probe(console: &mut dyn HalConsole) {
                 report.mac[5],
                 if report.link_up { "up" } else { "down" },
             );
-            let _ = writeln!(console, "e1000: transmitted a {FRAME_BYTES}-byte frame, descriptor done");
+            let _ = writeln!(
+                console,
+                "e1000: transmitted a {FRAME_BYTES}-byte frame, descriptor done"
+            );
             let _ = writeln!(console, "e1000: bound and started through nolx-df");
         }
         (None, Some(error)) => {
@@ -220,12 +223,18 @@ fn bring_up() -> Result<(Rings, Report), Failure> {
     let regs = mmio::map(base, REGISTERS_BYTES)?;
 
     // Reset, then set the link up. The reset bit clears itself when the reset is done.
-    regs.write32(e1000::REG_CTRL, regs.read32(e1000::REG_CTRL)? | e1000::CTRL_RST)?;
+    regs.write32(
+        e1000::REG_CTRL,
+        regs.read32(e1000::REG_CTRL)? | e1000::CTRL_RST,
+    )?;
     poll(
         || Ok(regs.read32(e1000::REG_CTRL)? & e1000::CTRL_RST == 0),
         "device reset",
     )?;
-    regs.write32(e1000::REG_CTRL, regs.read32(e1000::REG_CTRL)? | e1000::CTRL_SLU)?;
+    regs.write32(
+        e1000::REG_CTRL,
+        regs.read32(e1000::REG_CTRL)? | e1000::CTRL_SLU,
+    )?;
 
     // The MAC address: EEPROM words 0 to 2, each read through EERD.
     let mut words = [0u16; 3];
@@ -285,8 +294,8 @@ fn bring_up() -> Result<(Rings, Report), Failure> {
     bytes[12..14].copy_from_slice(&FRAME_TYPE);
     bytes[14..14 + FRAME_PAYLOAD.len()].copy_from_slice(FRAME_PAYLOAD);
     frame.write(0, &bytes);
-    let descriptor = e1000::tx_descriptor(frame.address(0), FRAME_BYTES as u16, true)
-        .ok_or(Failure::Frame)?;
+    let descriptor =
+        e1000::tx_descriptor(frame.address(0), FRAME_BYTES as u16, true).ok_or(Failure::Frame)?;
     tx.write(0, &descriptor);
     fence(Ordering::SeqCst);
     regs.write32(e1000::REG_TDT, 1)?;

@@ -16,6 +16,7 @@ pub mod console;
 pub mod context;
 pub mod cpu;
 pub mod dma;
+pub mod e1000;
 pub mod hpet;
 pub mod interrupts;
 pub mod ioapic;
@@ -29,7 +30,6 @@ pub mod tables;
 pub mod timer;
 pub mod virtio_blk;
 pub mod virtio_volume;
-pub mod e1000;
 pub mod xhci;
 
 use nolx_hal_core::console::HalConsole;
