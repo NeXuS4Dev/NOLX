@@ -333,5 +333,7 @@ pub fn check_partitions(header: &Header, entries: &[u8]) -> Result<u32, GptError
     Ok(used)
 }
 
+pub mod queue;
+
 #[cfg(test)]
 mod tests;
