@@ -154,10 +154,7 @@ pub fn pba_bytes(table_size: u16) -> u64 {
 pub fn msix_fits(cap: &MsixCapability, bar_len: u64) -> bool {
     let table_end = u64::from(cap.table_offset) + u64::from(cap.table_size) * MSIX_ENTRY_BYTES;
     let pba_end = u64::from(cap.pba_offset) + pba_bytes(cap.table_size);
-    cap.table_bar < 6
-        && cap.pba_bar < 6
-        && table_end <= bar_len
-        && pba_end <= bar_len
+    cap.table_bar < 6 && cap.pba_bar < 6 && table_end <= bar_len && pba_end <= bar_len
 }
 
 /// Message Control to write when the driver enables MSI-X and unmasks the function. The table
@@ -212,20 +209,38 @@ mod tests {
     fn msi_enable_keeps_other_bits_and_refuses_bad_counts() {
         // 64-bit, capable of 4 vectors: asking for 2 sets the enable bit and MME = 1.
         let control = 0x0080 | (2 << 1);
-        assert_eq!(msi_enable_control(control, 2), Some(0x0080 | (2 << 1) | 0x10 | 0x01));
+        assert_eq!(
+            msi_enable_control(control, 2),
+            Some(0x0080 | (2 << 1) | 0x10 | 0x01)
+        );
         assert_eq!(msi_enable_control(control, 3), None, "not a power of two");
-        assert_eq!(msi_enable_control(control, 8), None, "more than the function has");
+        assert_eq!(
+            msi_enable_control(control, 8),
+            None,
+            "more than the function has"
+        );
         assert_eq!(msi_enable_control(control, 0), None);
     }
 
     #[test]
     fn msi_layout_moves_data_and_mask_with_the_address_width() {
         let narrow = msi_layout(0x0000);
-        assert_eq!(narrow, MsiLayout { address_high: None, data: 8, mask: None });
+        assert_eq!(
+            narrow,
+            MsiLayout {
+                address_high: None,
+                data: 8,
+                mask: None
+            }
+        );
         let wide_masked = msi_layout(MSI_CTRL_64BIT | MSI_CTRL_PER_VECTOR_MASK);
         assert_eq!(
             wide_masked,
-            MsiLayout { address_high: Some(8), data: 12, mask: Some(16) }
+            MsiLayout {
+                address_high: Some(8),
+                data: 12,
+                mask: Some(16)
+            }
         );
         let narrow_masked = msi_layout(MSI_CTRL_PER_VECTOR_MASK);
         assert_eq!(narrow_masked.mask, Some(12));
@@ -252,7 +267,10 @@ mod tests {
     fn a_table_must_fit_inside_its_bar() {
         let cap = parse_msix(0x8007, 0x0000_2003, 0x0000_3001);
         assert!(msix_fits(&cap, 0x4000));
-        assert!(!msix_fits(&cap, 0x3000), "the pending-bit array runs past the BAR");
+        assert!(
+            !msix_fits(&cap, 0x3000),
+            "the pending-bit array runs past the BAR"
+        );
         let bad_bar = parse_msix(0x8007, 0x0000_2006, 0x0000_3001);
         assert!(!msix_fits(&bad_bar, 0x4000), "BAR 6 does not exist");
     }
