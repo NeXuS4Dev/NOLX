@@ -11,13 +11,13 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | Status | Assertions | Cumulative verified at or above status |
 |---|---|---|
 | `unimplemented` | 0 | 100.0% |
-| `implemented` | 9 | 100.0% |
-| `tested-T1` | 197 | 96.5% |
+| `implemented` | 4 | 100.0% |
+| `tested-T1` | 202 | 98.4% |
 | `pending-T2` | 0 | — |
 | `tested-T2` | 50 | 19.5% |
 | `tested-T3` | 0 | 0.0% |
 
-**247 of 256 assertions have a passing automated test; 0 are awaiting T2 results.**
+**252 of 256 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
@@ -36,7 +36,7 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | nxfs | 15 | 15 | 14 | 0 | 1 | 0 |
 | obj | 14 | 14 | 9 | 0 | 5 | 0 |
 | pci | 13 | 13 | 11 | 0 | 2 | 0 |
-| power | 5 | 5 | 0 | 0 | 0 | 0 |
+| power | 5 | 5 | 5 | 0 | 0 | 0 |
 | ps2 | 7 | 7 | 7 | 0 | 0 | 0 |
 | vfs | 48 | 48 | 46 | 0 | 2 | 0 |
 
@@ -44,7 +44,7 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 
 None.
 
-## Implemented but untested (9)
+## Implemented but untested (4)
 
 | ID | Specification reference |
 |---|---|
@@ -52,11 +52,6 @@ None.
 | HAL-019 | APIC arithmetic: x2APIC MSRs, compressed TPR priority classes, timer divisors, and HPET-based counter calibration are checked |
 | HAL-020 | HPET clocksource: 32-bit MMIO reads and wrap extension produce monotonic nanoseconds |
 | HAL-021 | I/O APIC routes: GSI windows and ISA overrides are validated, redirections start masked, and NMI sources use MADT polarity/trigger flags |
-| PWR-001 | NOLX M9 Device status: a device is usable only when its `_STA` value has the present, enabled, and functioning bits set |
-| PWR-002 | NOLX M9 Resource templates: IRQ, I/O port, fixed I/O, Memory32Fixed, and QWord memory descriptors decode to their ranges, and a template ends at its end tag |
-| PWR-003 | NOLX M9 Template bounds: a template with no end tag, a descriptor cut short, an unknown descriptor, or more than sixteen resources is refused with its reason |
-| PWR-004 | NOLX M9 Sleep types: the first sleep type of the `_S3_` or `_S5_` package is read from the AML when the name is opened by a name opcode and followed by a package with a constant element; a name without that shape gives nothing |
-| PWR-005 | NOLX M9 PM1 sleep control: the sleep type sits in bits 12 to 10 and the go bit in bit 13, and a type that does not fit in three bits is refused |
 
 ## Pending T2 verification (0)
 
@@ -297,11 +292,11 @@ None.
 | PS2-005 | ps2 | NOLX M9 Key table: letters, digits, the standard controls, the modifiers, and the function keys map to their HID usage codes | `tested-T1` | nolx-input-core tests::letters_digits_and_controls_map_to_hid_usages |
 | PS2-006 | ps2 | NOLX M9 Extended keys: a key after the E0 prefix uses the extended table, so the arrows, Delete, and the right-hand Ctrl and Alt are distinct from their unprefixed codes | `tested-T1` | nolx-input-core tests::extended_keys_need_the_prefix_and_map_to_their_own_usages |
 | PS2-007 | ps2 | NOLX M9 Pause and Print Screen: the Pause sequence is consumed in full and decoding resumes after it; the Print Screen fake-shift sequences report no key, and an unknown code reports nothing | `tested-T1` | nolx-input-core tests::pause_is_consumed_and_decoding_resumes_after_it, tests::print_screen_fake_shifts_and_unknown_codes_report_nothing |
-| PWR-001 | power | NOLX M9 Device status: a device is usable only when its `_STA` value has the present, enabled, and functioning bits set | `implemented` | nolx-power-core tests::a_device_is_usable_only_when_present_enabled_and_functioning |
-| PWR-002 | power | NOLX M9 Resource templates: IRQ, I/O port, fixed I/O, Memory32Fixed, and QWord memory descriptors decode to their ranges, and a template ends at its end tag | `implemented` | nolx-power-core tests::an_irq_and_an_io_port_descriptor_are_decoded, tests::a_fixed_io_and_a_fixed_memory_descriptor_are_decoded, tests::a_qword_memory_descriptor_takes_its_minimum_and_length |
-| PWR-003 | power | NOLX M9 Template bounds: a template with no end tag, a descriptor cut short, an unknown descriptor, or more than sixteen resources is refused with its reason | `implemented` | nolx-power-core tests::a_template_without_an_end_tag_or_cut_short_is_refused, tests::an_unknown_descriptor_is_refused_and_named, tests::a_template_holds_at_most_sixteen_resources |
-| PWR-004 | power | NOLX M9 Sleep types: the first sleep type of the `_S3_` or `_S5_` package is read from the AML when the name is opened by a name opcode and followed by a package with a constant element; a name without that shape gives nothing | `implemented` | nolx-power-core tests::the_sleep_type_comes_from_the_s5_package_in_the_aml, tests::a_zero_or_one_sleep_type_is_read_without_a_prefix, tests::a_name_not_opened_by_a_name_opcode_is_not_a_sleep_package |
-| PWR-005 | power | NOLX M9 PM1 sleep control: the sleep type sits in bits 12 to 10 and the go bit in bit 13, and a type that does not fit in three bits is refused | `implemented` | nolx-power-core tests::the_pm1_word_places_the_type_and_the_go_bit |
+| PWR-001 | power | NOLX M9 Device status: a device is usable only when its `_STA` value has the present, enabled, and functioning bits set | `tested-T1` | nolx-power-core tests::a_device_is_usable_only_when_present_enabled_and_functioning |
+| PWR-002 | power | NOLX M9 Resource templates: IRQ, I/O port, fixed I/O, Memory32Fixed, and QWord memory descriptors decode to their ranges, and a template ends at its end tag | `tested-T1` | nolx-power-core tests::an_irq_and_an_io_port_descriptor_are_decoded, tests::a_fixed_io_and_a_fixed_memory_descriptor_are_decoded, tests::a_qword_memory_descriptor_takes_its_minimum_and_length |
+| PWR-003 | power | NOLX M9 Template bounds: a template with no end tag, a descriptor cut short, an unknown descriptor, or more than sixteen resources is refused with its reason | `tested-T1` | nolx-power-core tests::a_template_without_an_end_tag_or_cut_short_is_refused, tests::an_unknown_descriptor_is_refused_and_named, tests::a_template_holds_at_most_sixteen_resources |
+| PWR-004 | power | NOLX M9 Sleep types: the first sleep type of the `_S3_` or `_S5_` package is read from the AML when the name is opened by a name opcode and followed by a package with a constant element; a name without that shape gives nothing | `tested-T1` | nolx-power-core tests::the_sleep_type_comes_from_the_s5_package_in_the_aml, tests::a_zero_or_one_sleep_type_is_read_without_a_prefix, tests::a_name_not_opened_by_a_name_opcode_is_not_a_sleep_package |
+| PWR-005 | power | NOLX M9 PM1 sleep control: the sleep type sits in bits 12 to 10 and the go bit in bit 13, and a type that does not fit in three bits is refused | `tested-T1` | nolx-power-core tests::the_pm1_word_places_the_type_and_the_go_bit |
 | UN-001 | vfs | XSH unlink: an entry is removed but an open file remains accessible until the last descriptor closes | `tested-T1` | crates/nolx-vfs vfs::tests::un001_unlink_removes_entry_while_open_file_remains_accessible_until_last_close |
 | UN-002 | vfs | XSH link: creating a hard link to a directory fails with EPERM unless privileged | `tested-T1` | crates/nolx-vfs vfs::tests::un002_hard_link_to_directory_fails_with_eperm |
 | UN-003 | vfs | XSH rename: renaming a directory onto one of its own descendants fails with EINVAL | `tested-T1` | crates/nolx-vfs vfs::tests::un003_rename_directory_into_own_descendant_fails_with_einval |

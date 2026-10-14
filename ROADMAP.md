@@ -624,6 +624,12 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   rules. Host-tested; NET-001 to NET-006 are `tested-T1` (run [38603598789](https://github.com/NeXuS4Dev/NOLX/actions/runs/38603598789)).
   The kernel has no network driver yet.
 
+- ACPI device and power rules (`crates/nolx-power-core`): `_STA` status bits and usability, `_CRS`
+  resource templates (IRQ, I/O, fixed I/O, Memory32Fixed, QWord memory), the `_S3_`/`_S5_` sleep-type
+  lookup in AML, and the PM1 sleep word. Host-tested; PWR-001 to PWR-005 are `tested-T1` (run
+  [38607105889](https://github.com/NeXuS4Dev/NOLX/actions/runs/38607105889)). The kernel does not run
+  `_STA` or `_CRS` yet, and does not enter a sleep state.
+
 Not yet done: PCIe ECAM, MSI/MSI-X programming in the kernel, per-device queues, and every driver below.
 
 - PCI/PCIe enumeration, BAR assignment, MSI/MSI-X, capability walking.
