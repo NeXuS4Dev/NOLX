@@ -29,6 +29,7 @@ pub mod tables;
 pub mod timer;
 pub mod virtio_blk;
 pub mod virtio_volume;
+pub mod e1000;
 pub mod xhci;
 
 use nolx_hal_core::console::HalConsole;

@@ -60,6 +60,8 @@ version = "0.1.0"
 dependencies = [
  "nolx-ahci-core",
  "nolx-block-core",
+ "nolx-df-core",
+ "nolx-e1000-core",
  "nolx-exec-core",
  "nolx-hal-core",
  "nolx-mm-core",

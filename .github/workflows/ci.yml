@@ -220,6 +220,7 @@ jobs:
             -drive file=build/disk-nvme.img,if=none,id=nvme0,format=raw \
             -device nvme,drive=nvme0,serial=nolx0 \
             -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 \
+            -netdev user,id=net0 -device e1000,netdev=net0 \
             | tee build/serial.log || true
           cat build/serial.log >> /tmp/job.log
       # The NOLXFS file, after a remount from the disk, must be the pattern the kernel wrote.
@@ -512,6 +513,21 @@ jobs:
           fi
           if ! grep -Eq 'xhci: [0-9]+ of [0-9]+ ports connected' build/serial.log; then
             echo "the xHCI port summary was not reported"
+            exit 1
+          fi
+          # e1000: the controller found by its vendor and device ID, its MAC address read from
+          # the EEPROM, a frame transmitted with its descriptor marked done, and the driver bound
+          # and started through the driver framework.
+          if ! grep -Eq 'e1000: [0-9a-f]{2}:[0-9a-f]{2}\.[0-9] bar0 0x[0-9a-f]+, mac ([0-9a-f]{2}:){5}[0-9a-f]{2}, link (up|down)' build/serial.log; then
+            echo "the e1000 controller and its MAC address were not reported"
+            exit 1
+          fi
+          if ! grep -Fq 'e1000: transmitted a 60-byte frame, descriptor done' build/serial.log; then
+            echo "the e1000 transmit did not complete"
+            exit 1
+          fi
+          if ! grep -Fq 'e1000: bound and started through nolx-df' build/serial.log; then
+            echo "the e1000 driver was not bound and started through the framework"
             exit 1
           fi
           # MMIO windows: a device register range is mapped uncached through the window above the
