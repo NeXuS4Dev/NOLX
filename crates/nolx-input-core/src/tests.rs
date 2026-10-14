@@ -5,7 +5,10 @@ use super::*;
 /// Decode a byte sequence in order and collect the key events it completes.
 fn events(bytes: &[u8]) -> Vec<KeyEvent> {
     let mut decoder = Decoder::new();
-    bytes.iter().filter_map(|&byte| decoder.feed(byte)).collect()
+    bytes
+        .iter()
+        .filter_map(|&byte| decoder.feed(byte))
+        .collect()
 }
 
 #[test]
@@ -40,8 +43,14 @@ fn a_make_code_presses_and_its_break_code_releases_the_same_usage() {
     assert_eq!(
         got,
         [
-            KeyEvent { usage: 0x04, pressed: true },
-            KeyEvent { usage: 0x04, pressed: false },
+            KeyEvent {
+                usage: 0x04,
+                pressed: true
+            },
+            KeyEvent {
+                usage: 0x04,
+                pressed: false
+            },
         ]
     );
 }
@@ -66,13 +75,23 @@ fn extended_keys_need_the_prefix_and_map_to_their_own_usages() {
     assert_eq!(
         got,
         [
-            KeyEvent { usage: 0x52, pressed: true },
-            KeyEvent { usage: 0x52, pressed: false },
+            KeyEvent {
+                usage: 0x52,
+                pressed: true
+            },
+            KeyEvent {
+                usage: 0x52,
+                pressed: false
+            },
         ],
         "Up, pressed and released"
     );
     assert_eq!(usage(0x1D, true), Some(0xE4), "right Ctrl");
-    assert_eq!(usage(0x1D, false), Some(0xE0), "left Ctrl without the prefix");
+    assert_eq!(
+        usage(0x1D, false),
+        Some(0xE0),
+        "left Ctrl without the prefix"
+    );
     assert_eq!(usage(0x53, true), Some(0x4C), "Delete");
 }
 
@@ -81,7 +100,10 @@ fn pause_is_consumed_and_decoding_resumes_after_it() {
     let got = events(&[0xE1, 0x1D, 0x45, 0xE1, 0x9D, 0xC5, 0x1E]);
     assert_eq!(
         got,
-        [KeyEvent { usage: 0x04, pressed: true }],
+        [KeyEvent {
+            usage: 0x04,
+            pressed: true
+        }],
         "Pause reports nothing, and the A after it still does"
     );
 }
@@ -92,9 +114,15 @@ fn print_screen_fake_shifts_and_unknown_codes_report_nothing() {
     let got = events(&[0xE0, 0x2A, 0xE0, 0x37, 0xE0, 0xB7, 0xE0, 0xAA, 0x1E]);
     assert_eq!(
         got,
-        [KeyEvent { usage: 0x04, pressed: true }],
+        [KeyEvent {
+            usage: 0x04,
+            pressed: true
+        }],
         "only the A after the sequence is reported"
     );
     assert_eq!(usage(0x7F, false), None);
-    assert!(events(&[0xFA, 0xFE]).is_empty(), "acknowledge and resend are not keys");
+    assert!(
+        events(&[0xFA, 0xFE]).is_empty(),
+        "acknowledge and resend are not keys"
+    );
 }
