@@ -110,12 +110,19 @@ impl<const DEVICES: usize, const DEPTH: usize> DeviceQueues<DEVICES, DEPTH> {
     /// # Errors
     /// [`QueueError::UnknownDevice`] for a device that is not attached; [`QueueError::Invalid`] and
     /// [`QueueError::Full`] as [`Queue::push`] reports them.
-    pub fn submit(&mut self, dev: usize, request: Request, max_sectors: u32) -> Result<(), QueueError> {
+    pub fn submit(
+        &mut self,
+        dev: usize,
+        request: Request,
+        max_sectors: u32,
+    ) -> Result<(), QueueError> {
         let slot = self.attached_slot_mut(dev)?;
-        slot.queue.push(request, max_sectors).map_err(|error| match error {
-            PushError::Invalid => QueueError::Invalid,
-            PushError::Full => QueueError::Full,
-        })
+        slot.queue
+            .push(request, max_sectors)
+            .map_err(|error| match error {
+                PushError::Invalid => QueueError::Invalid,
+                PushError::Full => QueueError::Full,
+            })
     }
 
     /// Hand the next request to a driver. Devices are visited in round-robin order, starting after the
@@ -203,15 +210,29 @@ mod tests {
         assert_eq!(queues.attach(0, 0), Err(QueueError::ZeroLimit));
         assert_eq!(queues.attach(0, 1), Ok(()));
         assert_eq!(queues.attach(0, 1), Err(QueueError::AlreadyAttached));
-        assert_eq!(queues.submit(1, read(0, 1), MAX), Err(QueueError::UnknownDevice));
+        assert_eq!(
+            queues.submit(1, read(0, 1), MAX),
+            Err(QueueError::UnknownDevice)
+        );
         assert_eq!(queues.submit(0, read(0, 1), MAX), Ok(()));
-        assert_eq!(queues.detach(0), Err(QueueError::Busy), "a request is queued");
+        assert_eq!(
+            queues.detach(0),
+            Err(QueueError::Busy),
+            "a request is queued"
+        );
         let dispatched = queues.dispatch();
         assert_eq!(dispatched.map(|d| d.device), Some(0));
-        assert_eq!(queues.detach(0), Err(QueueError::Busy), "a request is in flight");
+        assert_eq!(
+            queues.detach(0),
+            Err(QueueError::Busy),
+            "a request is in flight"
+        );
         assert_eq!(queues.complete(0), Ok(()));
         assert_eq!(queues.detach(0), Ok(()));
-        assert_eq!(queues.submit(0, read(0, 1), MAX), Err(QueueError::UnknownDevice));
+        assert_eq!(
+            queues.submit(0, read(0, 1), MAX),
+            Err(QueueError::UnknownDevice)
+        );
         assert_eq!(queues.dispatch(), None);
     }
 
@@ -256,7 +277,11 @@ mod tests {
         queues.submit(0, read(100, 1), MAX).unwrap();
         queues.submit(1, read(500, 1), MAX).unwrap();
         assert_eq!(queues.dispatch().map(|d| d.device), Some(0));
-        assert_eq!(queues.dispatch().map(|d| d.device), Some(1), "the other device is not held up");
+        assert_eq!(
+            queues.dispatch().map(|d| d.device),
+            Some(1),
+            "the other device is not held up"
+        );
         assert_eq!(queues.dispatch(), None, "device 0 is at its limit");
         assert_eq!(queues.in_flight(0), Ok(1));
         assert_eq!(queues.complete(0), Ok(()));
@@ -274,7 +299,11 @@ mod tests {
         queues.submit(0, read(100, 1), MAX).unwrap();
         assert_eq!(queues.submit(0, read(200, 1), MAX), Err(QueueError::Full));
         assert_eq!(queues.submit(0, read(0, 0), MAX), Err(QueueError::Invalid));
-        assert_eq!(queues.submit(1, read(0, 1), MAX), Ok(()), "device 1 has room");
+        assert_eq!(
+            queues.submit(1, read(0, 1), MAX),
+            Ok(()),
+            "device 1 has room"
+        );
         assert_eq!(queues.pending(0), Ok(2));
     }
 }
