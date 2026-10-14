@@ -206,13 +206,10 @@ fn start_device(_dev: usize) -> bool {
 /// The framework's stop operation: clear both engines' enable bits. The rings stay in place.
 fn stop_device(_dev: usize) -> bool {
     let state = STATE.lock();
-    match &state.report {
-        Some(report) => {
-            report.region.write32(e1000::REG_RCTL, 0).is_ok()
-                && report.region.write32(e1000::REG_TCTL, 0).is_ok()
-        }
-        None => false,
-    }
+    state.report.as_ref().is_some_and(|report| {
+        report.region.write32(e1000::REG_RCTL, 0).is_ok()
+            && report.region.write32(e1000::REG_TCTL, 0).is_ok()
+    })
 }
 
 fn bring_up() -> Result<(Rings, Report), Failure> {
@@ -241,21 +238,11 @@ fn bring_up() -> Result<(Rings, Report), Failure> {
     )?;
 
     // The MAC address: EEPROM words 0 to 2, each read through EERD.
-    let mut words = [0u16; 3];
-    for (index, word) in words.iter_mut().enumerate() {
-        let index = u8::try_from(index).map_err(|_| Failure::Eeprom)?;
-        regs.write32(e1000::REG_EERD, e1000::eerd_read(index))?;
-        let mut value = None;
-        poll(
-            || {
-                value = e1000::eerd_result(regs.read32(e1000::REG_EERD)?);
-                Ok(value.is_some())
-            },
-            "eeprom read",
-        )?;
-        *word = value.ok_or(Failure::Eeprom)?;
-    }
-    let mac = e1000::mac_from_eeprom(words);
+    let mac = e1000::mac_from_eeprom([
+        eeprom_word(&regs, 0)?,
+        eeprom_word(&regs, 1)?,
+        eeprom_word(&regs, 2)?,
+    ]);
     if mac == [0; 6] || mac == [0xFF; 6] {
         return Err(Failure::Eeprom);
     }
@@ -323,6 +310,18 @@ fn bring_up() -> Result<(Rings, Report), Failure> {
             region: regs,
         },
     ))
+}
+
+/// Read one EEPROM word through EERD, waiting for the controller to report the read done.
+fn eeprom_word(regs: &Region, word: u8) -> Result<u16, Failure> {
+    regs.write32(e1000::REG_EERD, e1000::eerd_read(word))?;
+    for _ in 0..POLL_LIMIT {
+        if let Some(value) = e1000::eerd_result(regs.read32(e1000::REG_EERD)?) {
+            return Ok(value);
+        }
+        core::hint::spin_loop();
+    }
+    Err(Failure::Timeout("eeprom read"))
 }
 
 /// Write a 64-bit physical address to a low and high register pair.
