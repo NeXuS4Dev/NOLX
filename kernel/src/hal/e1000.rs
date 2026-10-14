@@ -134,12 +134,7 @@ pub fn probe(console: &mut dyn HalConsole) {
         matches: MATCHES,
         ops: DISPATCH,
     };
-    let attached = (|| {
-        registry.add_driver(driver)?;
-        let dev = registry.add_device(id)?;
-        registry.bind(dev)?;
-        registry.start(dev)
-    })();
+    let attached = attach(&mut registry, driver, id);
     if let Err(error) = attached {
         let _ = writeln!(console, "e1000: framework refused the device: {error:?}");
     }
@@ -175,6 +170,19 @@ pub fn probe(console: &mut dyn HalConsole) {
             let _ = writeln!(console, "e1000: not started");
         }
     }
+}
+
+/// Register the driver, add the device, bind it, and start it. Returns the device handle.
+fn attach(
+    registry: &mut Registry<1, 1>,
+    driver: Driver,
+    id: DeviceId,
+) -> Result<usize, DfError> {
+    registry.add_driver(driver)?;
+    let dev = registry.add_device(id)?;
+    registry.bind(dev)?;
+    registry.start(dev)?;
+    Ok(dev)
 }
 
 fn accept(_: &DeviceId) -> bool {
