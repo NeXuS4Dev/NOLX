@@ -96,6 +96,13 @@ name = "nolx-types"
 version = "0.1.0"
 
 [[package]]
+name = "nolx-usb-core"
+version = "0.1.0"
+dependencies = [
+ "nolx-input-core",
+]
+
+[[package]]
 name = "nolx-vfs"
 version = "0.1.0"
 dependencies = [
