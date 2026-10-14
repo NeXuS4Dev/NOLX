@@ -59,7 +59,10 @@ fn good_driver(rules: &'static [Match]) -> Driver {
 fn a_match_rule_compares_only_the_fields_it_sets() {
     assert!(Match::by_ids(0x8086, 0x100E).matches(&NIC));
     assert!(!Match::by_ids(0x8086, 0x1234).matches(&NIC));
-    assert!(Match::by_class(0x02, 0x00, None).matches(&NIC), "any prog-if");
+    assert!(
+        Match::by_class(0x02, 0x00, None).matches(&NIC),
+        "any prog-if"
+    );
     assert!(!Match::by_class(0x02, 0x00, Some(0x01)).matches(&NIC));
     assert!(!Match::by_class(0x01, 0x00, None).matches(&NIC));
 }
@@ -91,7 +94,11 @@ fn a_device_with_no_accepting_driver_stays_discovered_and_can_bind_later() {
     assert_eq!(reg.bind(dev), Err(Error::NoDriver));
     assert_eq!(reg.state(dev), Ok(State::Discovered));
     reg.add_driver(good_driver(NET_CLASS)).unwrap();
-    assert_eq!(reg.bind(dev), Err(Error::NoDriver), "still not a network device");
+    assert_eq!(
+        reg.bind(dev),
+        Err(Error::NoDriver),
+        "still not a network device"
+    );
     let storage_rules: &'static [Match] = &[Match::by_ids(0x1AF4, 0x1042)];
     reg.add_driver(good_driver(storage_rules)).unwrap();
     assert!(reg.bind(dev).is_ok(), "a driver added later binds it");
@@ -106,7 +113,11 @@ fn the_lifecycle_moves_through_start_stop_and_start_again() {
     reg.bind(dev).unwrap();
     assert_eq!(reg.start(dev), Ok(()));
     assert_eq!(reg.state(dev), Ok(State::Started));
-    assert_eq!(reg.bind(dev), Err(Error::BadState), "a bound device is not rebound");
+    assert_eq!(
+        reg.bind(dev),
+        Err(Error::BadState),
+        "a bound device is not rebound"
+    );
     assert_eq!(reg.stop(dev), Ok(()));
     assert_eq!(reg.state(dev), Ok(State::Stopped));
     assert_eq!(reg.start(dev), Ok(()), "a stopped device starts again");
@@ -129,7 +140,11 @@ fn a_failed_start_marks_the_device_failed_and_only_allows_removal() {
     reg.bind(dev).unwrap();
     assert_eq!(reg.start(dev), Err(Error::OpFailed));
     assert_eq!(reg.state(dev), Ok(State::Failed));
-    assert_eq!(reg.start(dev), Err(Error::BadState), "a failed device does not start");
+    assert_eq!(
+        reg.start(dev),
+        Err(Error::BadState),
+        "a failed device does not start"
+    );
     assert_eq!(reg.remove(dev), Ok(()), "but it can be removed");
 }
 
