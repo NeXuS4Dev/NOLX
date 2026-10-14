@@ -23,5 +23,7 @@ USB-006 | NOLX M9 Boot keyboard report: the difference between two reports gives
 
 All six rows are `tested-T1`: the host tests passed in CI (workflow 38608775432, host-test job).
 
-USB-007 | NOLX M9 xHCI controller bring-up: the controller is found by its class code, memory space and bus mastering are enabled, BAR 0 is mapped through the MMIO window, and the controller is halted, reset, and halted again, each step polled with a bound | implemented | `.github/workflows/ci.yml` boot-smoke asserts `xhci: <bdf> bar0 0x... , version 0x..., N ports, N slots` and `xhci: controller reset, halted`; kernel/src/hal/xhci.rs
-USB-008 | NOLX M9 xHCI root ports: each root port is reported with its connection state, and the summary counts the connected ports | implemented | `.github/workflows/ci.yml` boot-smoke asserts `xhci: port N connected|empty` and `xhci: N of N ports connected`; CI attaches `qemu-xhci` with a `usb-kbd`; kernel/src/hal/xhci.rs
+USB-007 | NOLX M9 xHCI controller bring-up: the controller is found by its class code, memory space and bus mastering are enabled, BAR 0 is mapped through the MMIO window, and the controller is halted, reset, and halted again, each step polled with a bound | tested-T2 | `.github/workflows/ci.yml` boot-smoke asserts `xhci: <bdf> bar0 0x... , version 0x..., N ports, N slots` and `xhci: controller reset, halted`; kernel/src/hal/xhci.rs
+USB-008 | NOLX M9 xHCI root ports: each root port is reported with its connection state, and the summary counts the connected ports | tested-T2 | `.github/workflows/ci.yml` boot-smoke asserts `xhci: port N connected|empty` and `xhci: N of N ports connected`; CI attaches `qemu-xhci` with a `usb-kbd`; kernel/src/hal/xhci.rs
+
+USB-007 and USB-008 are `tested-T2`: the boot-smoke markers passed in CI (workflow 38621595620).

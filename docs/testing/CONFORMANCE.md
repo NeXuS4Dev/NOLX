@@ -11,13 +11,13 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | Status | Assertions | Cumulative verified at or above status |
 |---|---|---|
 | `unimplemented` | 0 | 100.0% |
-| `implemented` | 7 | 100.0% |
-| `tested-T1` | 226 | 97.5% |
+| `implemented` | 5 | 100.0% |
+| `tested-T1` | 226 | 98.2% |
 | `pending-T2` | 0 | — |
-| `tested-T2` | 50 | 17.7% |
+| `tested-T2` | 52 | 18.4% |
 | `tested-T3` | 0 | 0.0% |
 
-**276 of 283 assertions have a passing automated test; 0 are awaiting T2 results.**
+**278 of 283 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
@@ -40,14 +40,14 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | pci | 13 | 13 | 11 | 0 | 2 | 0 |
 | power | 5 | 5 | 5 | 0 | 0 | 0 |
 | ps2 | 7 | 7 | 7 | 0 | 0 | 0 |
-| usb | 8 | 8 | 6 | 0 | 0 | 0 |
+| usb | 8 | 8 | 6 | 0 | 2 | 0 |
 | vfs | 48 | 48 | 46 | 0 | 2 | 0 |
 
 ## Unimplemented assertions (0)
 
 None.
 
-## Implemented but untested (7)
+## Implemented but untested (5)
 
 | ID | Specification reference |
 |---|---|
@@ -56,8 +56,6 @@ None.
 | HAL-019 | APIC arithmetic: x2APIC MSRs, compressed TPR priority classes, timer divisors, and HPET-based counter calibration are checked |
 | HAL-020 | HPET clocksource: 32-bit MMIO reads and wrap extension produce monotonic nanoseconds |
 | HAL-021 | I/O APIC routes: GSI windows and ISA overrides are validated, redirections start masked, and NMI sources use MADT polarity/trigger flags |
-| USB-007 | NOLX M9 xHCI controller bring-up: the controller is found by its class code, memory space and bus mastering are enabled, BAR 0 is mapped through the MMIO window, and the controller is halted, reset, and halted again, each step polled with a bound |
-| USB-008 | NOLX M9 xHCI root ports: each root port is reported with its connection state, and the summary counts the connected ports |
 
 ## Pending T2 verification (0)
 
@@ -333,8 +331,8 @@ None.
 | USB-004 | usb | NOLX M9 Normal and enable-slot TRBs: the normal TRB carries its buffer, a 17-bit length, and the interrupt-on-completion flag; an enable-slot command has its type and cycle | `tested-T1` | nolx-usb-core tests::a_normal_trb_carries_its_buffer_length_and_completion_flag, tests::an_enable_slot_command_has_its_type_and_cycle |
 | USB-005 | usb | NOLX M9 Event TRBs: the completion code, slot, and port are read from their fields | `tested-T1` | nolx-usb-core tests::an_event_gives_its_completion_code_slot_and_port |
 | USB-006 | usb | NOLX M9 Boot keyboard report: the difference between two reports gives modifier events in the E0 range, releases of keys no longer held, and presses of new keys, in that order; a roll-over report is refused; codes 0 to 3 are not keys | `tested-T1` | nolx-usb-core tests::an_unchanged_report_produces_no_events, tests::a_new_key_presses_and_a_dropped_key_releases, tests::a_modifier_bit_gives_its_usage_in_the_e_range, tests::releases_come_before_presses_and_modifiers_first_of_all, tests::a_roll_over_report_is_not_acted_on, tests::the_reserved_codes_below_four_are_not_keys |
-| USB-007 | usb | NOLX M9 xHCI controller bring-up: the controller is found by its class code, memory space and bus mastering are enabled, BAR 0 is mapped through the MMIO window, and the controller is halted, reset, and halted again, each step polled with a bound | `implemented` | `.github/workflows/ci.yml` boot-smoke asserts `xhci: <bdf> bar0 0x... , version 0x..., N ports, N slots` and `xhci: controller reset, halted`; kernel/src/hal/xhci.rs |
-| USB-008 | usb | NOLX M9 xHCI root ports: each root port is reported with its connection state, and the summary counts the connected ports | `implemented` | `.github/workflows/ci.yml` boot-smoke asserts `xhci: port N connected|empty` and `xhci: N of N ports connected`; CI attaches `qemu-xhci` with a `usb-kbd`; kernel/src/hal/xhci.rs |
+| USB-007 | usb | NOLX M9 xHCI controller bring-up: the controller is found by its class code, memory space and bus mastering are enabled, BAR 0 is mapped through the MMIO window, and the controller is halted, reset, and halted again, each step polled with a bound | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `xhci: <bdf> bar0 0x... , version 0x..., N ports, N slots` and `xhci: controller reset, halted`; kernel/src/hal/xhci.rs |
+| USB-008 | usb | NOLX M9 xHCI root ports: each root port is reported with its connection state, and the summary counts the connected ports | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `xhci: port N connected|empty` and `xhci: N of N ports connected`; CI attaches `qemu-xhci` with a `usb-kbd`; kernel/src/hal/xhci.rs |
 | VIO-001 | drv | NOLX M9 Capability discovery: the vendor capabilities of the PCI capability list are read by `cfg_type`, the common, notify, ISR, and device regions are each recorded once, and vendor capabilities of other types are ignored | `tested-T1` | nolx-virtio-core tests::discovery_finds_each_region_by_type, tests::a_device_without_a_capability_list_has_no_regions, tests::the_first_valid_capability_of_a_type_wins |
 | VIO-002 | drv | NOLX M9 Capability validation: a virtio capability shorter than 16 bytes, one that runs past the 256-byte space, one naming a BAR above 5, or a notify capability shorter than 20 bytes is skipped, and does not hide the capabilities after it | `tested-T1` | nolx-virtio-core tests::malformed_capabilities_are_skipped_not_trusted, tests::a_notify_region_needs_its_multiplier_field, tests::a_capability_past_the_end_of_configuration_space_is_refused |
 | VIO-003 | drv | NOLX M9 Notify address: a queue's notification address is the notify region's offset plus the queue's notify offset times the capability's multiplier | `tested-T1` | nolx-virtio-core tests::notify_address_scales_the_queue_offset |
