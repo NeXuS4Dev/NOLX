@@ -50,10 +50,18 @@ pub fn merge(a: Request, b: Request, max_sectors: u32) -> Option<Request> {
     let a_end = a.lba.checked_add(u64::from(a.sectors))?;
     let b_end = b.lba.checked_add(u64::from(b.sectors))?;
     if a_end == b.lba {
-        return Some(Request { direction: a.direction, lba: a.lba, sectors });
+        return Some(Request {
+            direction: a.direction,
+            lba: a.lba,
+            sectors,
+        });
     }
     if b_end == a.lba {
-        return Some(Request { direction: a.direction, lba: b.lba, sectors });
+        return Some(Request {
+            direction: a.direction,
+            lba: b.lba,
+            sectors,
+        });
     }
     None
 }
@@ -167,11 +175,19 @@ mod tests {
     use super::*;
 
     fn read(lba: u64, sectors: u32) -> Request {
-        Request { direction: Direction::Read, lba, sectors }
+        Request {
+            direction: Direction::Read,
+            lba,
+            sectors,
+        }
     }
 
     fn write(lba: u64, sectors: u32) -> Request {
-        Request { direction: Direction::Write, lba, sectors }
+        Request {
+            direction: Direction::Write,
+            lba,
+            sectors,
+        }
     }
 
     #[test]
@@ -236,7 +252,10 @@ mod tests {
         queue.push(read(0, 8), 64).unwrap();
         queue.push(read(100, 8), 64).unwrap();
         assert_eq!(queue.push(read(200, 8), 64), Err(PushError::Full));
-        assert!(queue.push(read(8, 8), 64).is_ok(), "this one merges into 0..8");
+        assert!(
+            queue.push(read(8, 8), 64).is_ok(),
+            "this one merges into 0..8"
+        );
         assert_eq!(queue.pop(), Some(read(0, 16)));
         assert_eq!(queue.pop(), Some(read(100, 8)));
         assert_eq!(queue.pop(), None);
