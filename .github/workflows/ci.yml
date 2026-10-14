@@ -206,15 +206,19 @@ jobs:
           # The AHCI drive gets its own copy. QEMU locks an image that a drive opens for writing,
           # so a second drive on the same file would refuse to start.
           cp build/disk.img build/disk-sata.img
-          # 60 seconds: the boot now also probes an AHCI controller, and the markers after the
+          # The NVMe namespace gets its own copy too, for the same reason.
+          cp build/disk.img build/disk-nvme.img
+          # 90 seconds: the boot also probes AHCI and NVMe controllers, and the markers after the
           # virtio work must still be reached before QEMU is stopped.
-          timeout 60 qemu-system-x86_64 \
+          timeout 90 qemu-system-x86_64 \
             -kernel build/nolx.elf \
             -m 512M -nographic -no-reboot \
             -drive file=build/disk.img,if=none,id=vd0,format=raw \
             -device virtio-blk-pci,drive=vd0 \
             -drive file=build/disk-sata.img,if=none,id=sata0,format=raw \
             -device ahci,id=ahci -device ide-hd,drive=sata0,bus=ahci.0 \
+            -drive file=build/disk-nvme.img,if=none,id=nvme0,format=raw \
+            -device nvme,drive=nvme0,serial=nolx0 \
             | tee build/serial.log || true
           cat build/serial.log >> /tmp/job.log
       # The NOLXFS file, after a remount from the disk, must be the pattern the kernel wrote.
@@ -273,6 +277,24 @@ jobs:
           echo "the kernel wrote crc32 $want through AHCI; the SATA copy's sectors 1600 to 1603 have crc32 $got"
           if [ "$want" != "$got" ]; then
             echo "the SATA disk does not hold the data the kernel wrote"
+            exit 1
+          fi
+
+      # The NVMe round trip wrote sectors 1600 to 1603 to the NVMe copy of the disk. QEMU has
+      # exited, so the copy is checksummed here and must match what the kernel wrote.
+      - name: The NVMe written sectors are on the NVMe disk copy
+        run: |
+          set -e
+          line=$(grep -Eo 'nvme: wrote 4 sectors at 1600, read back, crc32 0x[0-9a-f]{8} matches' build/serial.log | head -1 || true)
+          if [ -z "$line" ]; then
+            echo "the NVMe round trip did not report a checksum"
+            exit 1
+          fi
+          want=$(echo "$line" | grep -Eo '0x[0-9a-f]{8}')
+          got=$(python3 -c "import zlib; d=open('build/disk-nvme.img','rb').read()[1600*512:1604*512]; print('0x%08x' % (zlib.crc32(d) & 0xffffffff))")
+          echo "the kernel wrote crc32 $want through NVMe; the NVMe copy's sectors 1600 to 1603 have crc32 $got"
+          if [ "$want" != "$got" ]; then
+            echo "the NVMe disk does not hold the data the kernel wrote"
             exit 1
           fi
 
@@ -456,6 +478,20 @@ jobs:
           # checked by CRC-32 in the kernel. The checksum step below checks the copy on disk.
           if ! grep -Eq 'ahci: wrote 4 sectors at 1600, read back, crc32 0x[0-9a-f]{8} matches the written data' build/serial.log; then
             echo "the AHCI round trip did not verify"
+            exit 1
+          fi
+          # NVMe: the controller found by its class code, the namespace it reports, sector 0 read
+          # through an I/O queue, and the same CRC-32 round trip the other drivers run.
+          if ! grep -Eq 'nvme: [0-9a-f]{2}:[0-9a-f]{2}\.[0-9] bar0 0x[0-9a-f]+, namespace 1: [0-9]+ sectors of 512 bytes' build/serial.log; then
+            echo "the NVMe controller and namespace were not reported"
+            exit 1
+          fi
+          if ! grep -Fq 'nvme: sector 0 read, status ok, first 16 bytes match the disk image' build/serial.log; then
+            echo "the NVMe read did not return the disk image's sector 0"
+            exit 1
+          fi
+          if ! grep -Eq 'nvme: wrote 4 sectors at 1600, read back, crc32 0x[0-9a-f]{8} matches the written data' build/serial.log; then
+            echo "the NVMe round trip did not verify"
             exit 1
           fi
           # MMIO windows: a device register range is mapped uncached through the window above the

@@ -151,6 +151,7 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         hal::virtio_blk::probe(&mut console);
         // The AHCI controller: the same sector-0 read through a different driver, polled.
         hal::ahci::probe(&mut console);
+        hal::nvme::probe(&mut console);
 
         obj::init(&mut console);
         let _ = writeln!(console, "NOLX: objmgr online");
