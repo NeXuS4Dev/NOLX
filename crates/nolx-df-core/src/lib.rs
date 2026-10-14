@@ -338,7 +338,7 @@ impl<const D: usize, const N: usize> Registry<D, N> {
         let index = driver.ok_or(Error::BadState)?;
         self.drivers
             .get(index)
-            .and_then(|slot| slot.as_ref())
+            .and_then(Option::as_ref)
             .map(|driver| driver.ops)
             .ok_or(Error::BadState)
     }

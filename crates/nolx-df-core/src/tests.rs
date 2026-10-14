@@ -42,6 +42,7 @@ fn record_start(dev: usize) -> bool {
 
 const NIC_RULES: &[Match] = &[Match::by_ids(0x8086, 0x100E)];
 const NET_CLASS: &[Match] = &[Match::by_class(0x02, 0x00, None)];
+const STORAGE_RULES: &[Match] = &[Match::by_ids(0x1AF4, 0x1042)];
 
 fn good_driver(rules: &'static [Match]) -> Driver {
     Driver {
@@ -99,8 +100,7 @@ fn a_device_with_no_accepting_driver_stays_discovered_and_can_bind_later() {
         Err(Error::NoDriver),
         "still not a network device"
     );
-    let storage_rules: &'static [Match] = &[Match::by_ids(0x1AF4, 0x1042)];
-    reg.add_driver(good_driver(storage_rules)).unwrap();
+    reg.add_driver(good_driver(STORAGE_RULES)).unwrap();
     assert!(reg.bind(dev).is_ok(), "a driver added later binds it");
 }
 
