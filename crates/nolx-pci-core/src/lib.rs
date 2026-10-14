@@ -11,14 +11,16 @@
 //! writes dwords through the legacy mechanism (`0xCF8` address, `0xCFC` data). Everything else
 //! is written against that trait, so a test can model a whole machine in a few lines.
 //!
-//! Scope of this module: legacy configuration access only. PCIe extended configuration space
-//! (offsets 0x100 and up, via MMCONFIG/ECAM) and MSI/MSI-X table programming are later M9
-//! work and are not claimed here.
+//! Scope of this module: legacy configuration access, and the MSI and MSI-X rules in [`msi`].
+//! PCIe extended configuration space (offsets 0x100 and up, via MMCONFIG/ECAM) is later M9 work
+//! and is not claimed here. The kernel programs the registers and table the rules describe.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
+
+pub mod msi;
 
 /// I/O port holding the configuration address register.
 pub const CONFIG_ADDRESS_PORT: u16 = 0xCF8;
