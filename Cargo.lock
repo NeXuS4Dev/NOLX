@@ -67,6 +67,7 @@ dependencies = [
  "nolx-obj-core",
  "nolx-pci-core",
  "nolx-types",
+ "nolx-usb-core",
  "nolx-vfs",
  "nolx-virtio-core",
  "nolxfs",

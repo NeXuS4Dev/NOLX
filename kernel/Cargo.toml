@@ -25,6 +25,7 @@ path = "src/main.rs"
 [dependencies]
 nolx-ahci-core = { path = "../crates/nolx-ahci-core" }
 nolx-nvme-core = { path = "../crates/nolx-nvme-core" }
+nolx-usb-core = { path = "../crates/nolx-usb-core" }
 nolx-block-core = { path = "../crates/nolx-block-core" }
 nolx-hal-core = { path = "../crates/nolx-hal-core" }
 # The memory-management algorithms: buddy allocator, frame magazines, page-table

@@ -219,6 +219,7 @@ jobs:
             -device ahci,id=ahci -device ide-hd,drive=sata0,bus=ahci.0 \
             -drive file=build/disk-nvme.img,if=none,id=nvme0,format=raw \
             -device nvme,drive=nvme0,serial=nolx0 \
+            -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 \
             | tee build/serial.log || true
           cat build/serial.log >> /tmp/job.log
       # The NOLXFS file, after a remount from the disk, must be the pattern the kernel wrote.
@@ -492,6 +493,25 @@ jobs:
           fi
           if ! grep -Eq 'nvme: wrote 4 sectors at 1600, read back, crc32 0x[0-9a-f]{8} matches the written data' build/serial.log; then
             echo "the NVMe round trip did not verify"
+            exit 1
+          fi
+          # xHCI: the controller found by its class code, reset to a halted state, and its root
+          # ports reported. The keyboard CI attaches is on a root port, and its connection state is
+          # printed but not asserted here.
+          if ! grep -Eq 'xhci: [0-9a-f]{2}:[0-9a-f]{2}\.[0-9] bar0 0x[0-9a-f]+, version 0x[0-9a-f]+, [0-9]+ ports, [0-9]+ slots' build/serial.log; then
+            echo "the xHCI controller was not reported"
+            exit 1
+          fi
+          if ! grep -Fq 'xhci: controller reset, halted' build/serial.log; then
+            echo "the xHCI controller was not reset to a halted state"
+            exit 1
+          fi
+          if ! grep -Eq 'xhci: port [0-9]+ (connected|empty)' build/serial.log; then
+            echo "the xHCI root ports were not reported"
+            exit 1
+          fi
+          if ! grep -Eq 'xhci: [0-9]+ of [0-9]+ ports connected' build/serial.log; then
+            echo "the xHCI port summary was not reported"
             exit 1
           fi
           # MMIO windows: a device register range is mapped uncached through the window above the
