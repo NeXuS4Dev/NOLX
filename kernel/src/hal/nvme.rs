@@ -12,8 +12,10 @@
 //! written sectors in that copy.
 
 use super::blockdev;
+use super::driver_start::{self, Log};
 use nolx_block_core::devices::QueueError;
 use nolx_block_core::queue::{Direction, Request};
+use nolx_df_core::{DeviceId, Dispatch, Driver, Match, Registry};
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
 use nolx_nvme_core::{self as nvme, Sqe};
@@ -24,6 +26,7 @@ use super::dma::Dma;
 use super::pci::LegacyPorts;
 use super::virtio_blk::fill_pattern;
 use crate::mm::mmio::{self, Region};
+use crate::sync::IrqMutex;
 use core::sync::atomic::{fence, Ordering};
 
 /// NVMe class code: mass storage, non-volatile memory, NVM Express interface.
@@ -107,10 +110,76 @@ impl From<mmio::Failure> for Failure {
 
 /// Probe for an NVMe controller, bring it up, and run the sector read and round trip. Failure is
 /// reported on the console and does not stop boot.
+/// What the framework's start operation leaves for the probe: the bring-up's output and result.
+struct State {
+    log: Log,
+    outcome: Option<Result<(), Failure>>,
+}
+
+static STATE: IrqMutex<State> = IrqMutex::new(State {
+    log: Log::new(),
+    outcome: None,
+});
+
+/// The match rule: the controller's class, subclass, and programming interface.
+static MATCHES: &[Match] = &[Match::by_class(NVME_CLASS, NVME_SUBCLASS, Some(NVME_PROG_IF))];
+
+/// The driver's dispatch table. Probe accepts any device the match rule selects.
+const DISPATCH: Dispatch = Dispatch {
+    probe: accept,
+    start: start_device,
+    stop: stop_device,
+};
+
+/// Probe for the controller, register the driver with the framework, and bind and start it. The
+/// bring-up's output is replayed on the console. Failure is reported and does not stop boot.
 pub fn probe(console: &mut dyn HalConsole) {
-    if let Err(failure) = bring_up(console) {
-        let _ = writeln!(console, "nvme: not brought up: {failure:?}");
+    let Some((_, id)) = find_controller() else {
+        let _ = writeln!(console, "nvme: not brought up: {:?}", Failure::NoController);
+        return;
+    };
+    let mut registry: Registry<1, 1> = Registry::new();
+    let driver = Driver {
+        name: "nvme",
+        matches: MATCHES,
+        ops: DISPATCH,
+    };
+    if let Err(error) = driver_start::attach(&mut registry, driver, id) {
+        let _ = writeln!(console, "nvme: framework refused the device: {error:?}");
     }
+    let state = STATE.lock();
+    state.log.replay(console);
+    match &state.outcome {
+        Some(Ok(())) => {
+            let _ = writeln!(console, "nvme: bound and started through nolx-df");
+        }
+        Some(Err(failure)) => {
+            let _ = writeln!(console, "nvme: not brought up: {failure:?}");
+        }
+        None => {
+            let _ = writeln!(console, "nvme: not started");
+        }
+    }
+}
+
+fn accept(_: &DeviceId) -> bool {
+    true
+}
+
+/// The framework's start operation: the whole bring-up. Its output and result go to [`STATE`].
+fn start_device(_dev: usize) -> bool {
+    let mut log = Log::new();
+    let result = bring_up(&mut log);
+    let started = result.is_ok();
+    let mut state = STATE.lock();
+    state.log = log;
+    state.outcome = Some(result);
+    started
+}
+
+/// Nothing to undo: the queue stays registered for the rest of boot.
+fn stop_device(_dev: usize) -> bool {
+    true
 }
 
 /// One submission and completion queue pair, with the producer and consumer positions the driver
@@ -143,7 +212,7 @@ impl Queue {
 }
 
 fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
-    let bdf = find_controller().ok_or(Failure::NoController)?;
+    let (bdf, _) = find_controller().ok_or(Failure::NoController)?;
     enable_device(bdf);
     let bars = nolx_pci_core::read_bars(&mut LegacyPorts, bdf);
     let base = match bars.slots[BAR0_SLOT] {
@@ -379,7 +448,7 @@ fn enable_device(bdf: Bdf) {
 }
 
 /// The first NVMe controller on the bus, if there is one.
-fn find_controller() -> Option<Bdf> {
+fn find_controller() -> Option<(Bdf, DeviceId)> {
     let inventory = nolx_pci_core::enumerate(&mut LegacyPorts);
     inventory
         .as_slice()
@@ -389,7 +458,18 @@ fn find_controller() -> Option<Bdf> {
                 && info.subclass == NVME_SUBCLASS
                 && info.prog_if == NVME_PROG_IF
         })
-        .map(|info| info.bdf)
+        .map(|info| {
+            (
+                info.bdf,
+                DeviceId {
+                    vendor: info.vendor_id,
+                    device: info.device_id,
+                    class: info.class,
+                    subclass: info.subclass,
+                    prog_if: info.prog_if,
+                },
+            )
+        })
 }
 
 /// Poll `ready` until it returns true, at most [`POLL_LIMIT`] times.

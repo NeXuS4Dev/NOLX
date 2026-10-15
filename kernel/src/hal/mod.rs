@@ -13,6 +13,7 @@ pub mod acpi;
 pub mod ahci;
 pub mod apic;
 pub mod blockdev;
+pub mod driver_start;
 pub mod console;
 pub mod context;
 pub mod cpu;

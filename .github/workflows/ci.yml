@@ -469,6 +469,18 @@ jobs:
             echo "the second GPT partition was not reported as the disk tool wrote it"
             exit 1
           fi
+          if ! grep -Fq 'virtio-blk: bound and started through nolx-df' build/serial.log; then
+            echo "the virtio-blk driver did not bind and start through nolx-df"
+            exit 1
+          fi
+          if ! grep -Fq 'ahci: bound and started through nolx-df' build/serial.log; then
+            echo "the ahci driver did not bind and start through nolx-df"
+            exit 1
+          fi
+          if ! grep -Fq 'nvme: bound and started through nolx-df' build/serial.log; then
+            echo "the nvme driver did not bind and start through nolx-df"
+            exit 1
+          fi
           if ! grep -Fq 'virtio-blk: sector 0 read, status ok, first 16 bytes match the disk image' build/serial.log; then
             echo "the virtio block read did not return the disk image's sector 0"
             exit 1
