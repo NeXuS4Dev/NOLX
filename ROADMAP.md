@@ -665,6 +665,11 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   (run [38630855644](https://github.com/NeXuS4Dev/NOLX/actions/runs/38630855644)). Not yet done: receive
   checks, interrupts, and the network stack above the driver.
 
+- Block request path in the kernel (`kernel/src/hal/blockdev.rs`): every virtio-blk, AHCI, and NVMe
+  read and write goes through a per-device queue, and the boot report prints the count dispatched and
+  completed. BLK-033 is `tested-T2` (run [38690959084](https://github.com/NeXuS4Dev/NOLX/actions/runs/38690959084)).
+  Not yet done: storage drivers registered with `nolx-df`.
+
 Not yet done: PCIe ECAM, MSI/MSI-X programming in the kernel, and every driver below.
 
 - PCI/PCIe enumeration, BAR assignment, MSI/MSI-X, capability walking.
