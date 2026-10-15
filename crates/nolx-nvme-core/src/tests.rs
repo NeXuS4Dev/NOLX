@@ -142,6 +142,12 @@ fn a_completion_queue_with_interrupts_names_its_msi_x_entry() {
         &((1u32 << 16) | 0b11).to_le_bytes(),
         "interrupts enabled, physically contiguous, entry 1"
     );
-    assert!(create_io_cq_msix(3, 1, 8, 0x5000, MSIX_VECTOR_LIMIT).is_none(), "past the table");
-    assert!(create_io_cq_msix(3, 1, 0, 0x5000, 1).is_none(), "empty queue");
+    assert!(
+        create_io_cq_msix(3, 1, 8, 0x5000, MSIX_VECTOR_LIMIT).is_none(),
+        "past the table"
+    );
+    assert!(
+        create_io_cq_msix(3, 1, 0, 0x5000, 1).is_none(),
+        "empty queue"
+    );
 }

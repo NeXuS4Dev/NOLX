@@ -167,7 +167,13 @@ pub const MSIX_VECTOR_LIMIT: u16 = 2048;
 /// contiguous flag; the vector sits in bits 31:16. Returns `None` for a queue size the controller
 /// refuses, or a vector past the table.
 #[must_use]
-pub fn create_io_cq_msix(cid: u16, queue: u16, entries: u16, prp1: u64, vector: u16) -> Option<Sqe> {
+pub fn create_io_cq_msix(
+    cid: u16,
+    queue: u16,
+    entries: u16,
+    prp1: u64,
+    vector: u16,
+) -> Option<Sqe> {
     queue_size(entries)?;
     if vector >= MSIX_VECTOR_LIMIT {
         return None;

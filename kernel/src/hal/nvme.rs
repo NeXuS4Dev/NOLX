@@ -427,7 +427,11 @@ fn enable_msix(regs: &Region, bdf: Bdf) -> Result<(), Failure> {
 
     // Enable MSI-X with the whole function unmasked, keeping the rest of the header dword.
     let enabled = msi::msix_enable(control);
-    LegacyPorts.write_u32(bdf, cap.offset, (u32::from(enabled) << 16) | (header & 0xFFFF));
+    LegacyPorts.write_u32(
+        bdf,
+        cap.offset,
+        (u32::from(enabled) << 16) | (header & 0xFFFF),
+    );
     Ok(())
 }
 
