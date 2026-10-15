@@ -17,11 +17,11 @@
 //! image file after QEMU exits, so the write has to have reached the disk and not only the device's
 //! cache. Last, it puts a NOLXFS volume on the first partition in use; see [`super::virtio_volume`].
 
-use alloc::vec;
-use nolx_block_core::{self as gpt, GptError, Header};
 use super::blockdev;
+use alloc::vec;
 use nolx_block_core::devices::QueueError;
 use nolx_block_core::queue::{Direction, Request};
+use nolx_block_core::{self as gpt, GptError, Header};
 use nolxfs::on_disk::FsError;
 
 use super::dma::Dma;

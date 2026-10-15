@@ -11,12 +11,12 @@
 //! image attached as an NVMe namespace, so the bytes read come from the disk, and CI checks the
 //! written sectors in that copy.
 
-use nolx_hal_core::console::HalConsole;
-use nolx_mm_core::mmio::MmioError;
-use nolx_nvme_core::{self as nvme, Sqe};
 use super::blockdev;
 use nolx_block_core::devices::QueueError;
 use nolx_block_core::queue::{Direction, Request};
+use nolx_hal_core::console::HalConsole;
+use nolx_mm_core::mmio::MmioError;
+use nolx_nvme_core::{self as nvme, Sqe};
 use nolx_pci_core::{Bar, Bdf, ConfigSpace};
 use nolx_virtio_core::crc32;
 

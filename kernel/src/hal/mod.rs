@@ -12,11 +12,11 @@
 pub mod acpi;
 pub mod ahci;
 pub mod apic;
+pub mod blockdev;
 pub mod console;
 pub mod context;
 pub mod cpu;
 pub mod dma;
-pub mod blockdev;
 pub mod e1000;
 pub mod hpet;
 pub mod interrupts;

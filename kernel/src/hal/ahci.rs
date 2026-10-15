@@ -13,8 +13,8 @@
 //! second page, from offset 0. CI runs QEMU with a copy of the disk image attached to an AHCI
 //! port, so the bytes read come from the disk, and CI checks the written sectors in that copy.
 
-use nolx_ahci_core::{self as ahci, CommandHeader};
 use super::blockdev;
+use nolx_ahci_core::{self as ahci, CommandHeader};
 use nolx_block_core::devices::QueueError;
 use nolx_block_core::queue::{Direction, Request};
 use nolx_hal_core::console::HalConsole;
@@ -243,9 +243,7 @@ fn transfer(port: &Port, page: &Dma, data: &Dma, command: Command) -> Result<(),
         lba: command.lba,
         sectors: u32::from(command.sectors),
     };
-    blockdev::run(blockdev::AHCI, request, || {
-        issue(port, page, data, command)
-    })
+    blockdev::run(blockdev::AHCI, request, || issue(port, page, data, command))
 }
 
 /// Issue the command in the port's slot 0 and wait for it. Called through [`transfer`].
