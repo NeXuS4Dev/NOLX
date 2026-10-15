@@ -643,5 +643,11 @@ jobs:
       # comment is.
       - uses: ./.github/actions/report-serial
         if: always()
+      # Diagnostic: the serial log as one error annotation, newlines encoded, so a failed boot can be
+      # read through the checks API. Runs only on failure.
+      - name: Annotate the serial log on failure
+        if: failure()
+        run: |
+          tr -cd '\11\12\40-\176' < build/serial.log | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
       - uses: ./.github/actions/report-failure
         if: failure()
