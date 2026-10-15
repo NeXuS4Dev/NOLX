@@ -114,7 +114,12 @@ pub enum Failure {
     /// The MSI-X table or pending-bit array is not in BAR 0 inside the mapped registers.
     MsixLayout,
     /// Fewer completion interrupts arrived than I/O commands were submitted.
-    Interrupts { delivered: usize, expected: usize },
+    Interrupts {
+        /// Completion interrupts that arrived.
+        delivered: usize,
+        /// I/O commands submitted.
+        expected: usize,
+    },
 }
 
 impl From<MmioError> for Failure {
