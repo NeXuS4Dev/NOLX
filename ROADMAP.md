@@ -602,7 +602,8 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   reads them back, and checks CRC-32. NVME-009 to NVME-011 are `tested-T2` (run
   [38558796880](https://github.com/NeXuS4Dev/NOLX/actions/runs/38558796880)). CI attaches a copy of the
   disk image as an NVMe namespace and checksums the written sectors in that copy after QEMU exits.
-  Not yet done: interrupts, and the other storage paths.
+  I/O completions arrive as MSI-X interrupts on vector 0x50 (NVME-013 is `tested-T2`, run [38775764121](https://github.com/NeXuS4Dev/NOLX/actions/runs/38775764121)).
+  Not yet done: interrupts for the other drivers.
 
 - MSI and MSI-X rules (`crates/nolx-pci-core/src/msi.rs`): capability layouts, the message address
   and data for a local APIC, the MSI-X table entry and its placement in a BAR, host-tested
@@ -678,7 +679,7 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   operation runs the bring-up. BLK-034 is `tested-T2` (run [38704280940](https://github.com/NeXuS4Dev/NOLX/actions/runs/38704280940)).
   Not yet done: interrupts, and the storage paths for sleep states.
 
-Not yet done: PCIe ECAM, MSI/MSI-X programming in the kernel, and every driver below.
+Not yet done: PCIe ECAM, MSI/MSI-X in the other drivers (NVMe uses MSI-X, see below), and every driver below.
 
 - PCI/PCIe enumeration, BAR assignment, MSI/MSI-X, capability walking.
 - Storage: AHCI (SATA), NVMe, virtio-blk; block layer with partitions (GPT), request
