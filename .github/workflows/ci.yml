@@ -151,10 +151,10 @@ jobs:
         run: |
           set +e
           cargo clippy --release --target x86_64-unknown-none -p nolx-kernel \
-            --message-format=short -- -D warnings > /tmp/clippy.txt 2>&1
+            --message-format=short --color never -- -D warnings > /tmp/clippy.txt 2>&1
           status=$?
           tee -a /tmp/job.log < /tmp/clippy.txt
-          grep -v '^[[:space:]]*$' /tmp/clippy.txt | head -60 | while IFS= read -r line; do echo "::error::$line"; done
+          grep -v -E "^[[:space:]]*$|Checking |Compiling |Finished " /tmp/clippy.txt | head -60 | while IFS= read -r line; do echo "::error::$line"; done
           exit $status
       - name: Build the kernel
         run: make kernel 2>&1 | tee -a /tmp/job.log
