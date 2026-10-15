@@ -22,3 +22,9 @@ PWR-004 | NOLX M9 Sleep types: the first sleep type of the `_S3_` or `_S5_` pack
 PWR-005 | NOLX M9 PM1 sleep control: the sleep type sits in bits 12 to 10 and the go bit in bit 13, and a type that does not fit in three bits is refused | tested-T1 | nolx-power-core tests::the_pm1_word_places_the_type_and_the_go_bit
 
 All five rows are `tested-T1`: the host tests passed in CI (workflow 38607105889, host-test job).
+PWR-006 | NOLX M9 FADT fields: a Fixed ACPI Description Table with a valid checksum gives the DSDT address (the 64-bit field when a revision-2 table sets it, else the 32-bit field) and the PM1a and PM1b control ports | tested-T1 | nolx-power-core tests::a_fadt_gives_the_dsdt_and_the_pm1_control_ports, tests::a_revision_two_fadt_takes_the_64_bit_dsdt_when_it_is_set
+PWR-007 | NOLX M9 FADT refusal: a FADT with a bad checksum, the wrong signature, a cut-short length, no DSDT, or no 16-bit PM1a port is refused with its reason | tested-T1 | nolx-power-core tests::a_fadt_that_is_damaged_or_incomplete_is_refused_with_its_reason
+PWR-008 | NOLX M9 Sleep types in the kernel: the kernel reads the FADT and the DSDT at boot, reports the PM1a control port, and reads the S5 soft-off type from the DSDT's AML; it reports the S5 word it would write and enters no state | implemented | `.github/workflows/ci.yml` boot-smoke asserts `acpi: PM1a control block at 0x...` and `acpi: S5 sleep type N, soft-off word would be 0x..., not entered`; kernel/src/hal/acpi.rs
+
+Not wired: `_STA` and `_CRS` evaluation. Those are control methods, so reading them needs an AML interpreter, which the kernel does not have. PWR-001 and PWR-002 decide the bits and descriptors once the bytes are available. Entering S3 or S5 is also not wired: the kernel reports the words and stops there.
+

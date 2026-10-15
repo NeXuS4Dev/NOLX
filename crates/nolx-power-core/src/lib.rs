@@ -10,6 +10,8 @@
 //! The kernel finds the methods' bytes and runs nothing: these rules read the results. Scope: the
 //! resource descriptors a PC's devices use, not every descriptor the specification defines; and
 //! the sleep lookup finds a `_Sx_` name that is a literal package, not one computed at runtime.
+//! The FADT names the DSDT that holds the `_Sx_` packages and the PM1a control port the sleep type
+//! is written to; [`Fadt::parse`] decodes those fields.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -248,6 +250,107 @@ pub fn pm1_sleep_value(slp_typ: u8, enable: bool) -> Option<u16> {
     }
     let typ = u16::from(slp_typ) << 10;
     Some(typ | if enable { 1 << 13 } else { 0 })
+}
+
+/// The FADT's signature: the table that names the DSDT and the PM1 control block.
+pub const FADT_SIGNATURE: [u8; 4] = *b"FACP";
+/// The offset of the FADT revision byte.
+const FADT_REVISION_AT: usize = 8;
+/// The offset of the 32-bit DSDT address.
+const FADT_DSDT_AT: usize = 40;
+/// The offset of the PM1a control block's I/O port.
+const FADT_PM1A_CNT_AT: usize = 64;
+/// The offset of the PM1b control block's I/O port.
+const FADT_PM1B_CNT_AT: usize = 68;
+/// The offset of the 64-bit DSDT address, present from revision 2.
+const FADT_X_DSDT_AT: usize = 140;
+/// The shortest FADT that holds the PM1b field.
+const FADT_MIN_LENGTH: usize = 72;
+/// The shortest FADT that holds the 64-bit DSDT address.
+const FADT_X_DSDT_MIN_LENGTH: usize = 148;
+
+/// The fields of the Fixed ACPI Description Table the kernel needs to enter a sleep state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fadt {
+    /// The FADT revision.
+    pub revision: u8,
+    /// The physical address of the DSDT, the 64-bit field when the table has one.
+    pub dsdt: u64,
+    /// The I/O port of the PM1a control block, where the sleep type and go bit are written.
+    pub pm1a_control: u16,
+    /// The I/O port of the PM1b control block, when the platform has one.
+    pub pm1b_control: Option<u16>,
+}
+
+/// Why a FADT was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FadtError {
+    /// The declared length is shorter than the fields it must hold, or longer than the bytes given.
+    TooShort,
+    /// The signature is not `FACP`.
+    WrongSignature,
+    /// The bytes of the declared length do not sum to zero.
+    BadChecksum,
+    /// The table names no DSDT.
+    NoDsdt,
+    /// The PM1a control block is missing or is not a 16-bit I/O port.
+    NoPm1aControl,
+}
+
+impl Fadt {
+    /// Decode a FADT. The declared length must fit in `bytes`, the bytes of that length must sum
+    /// to zero, and the table must name a DSDT and a 16-bit PM1a control port.
+    ///
+    /// # Errors
+    /// The [`FadtError`] for the first check the table fails.
+    pub fn parse(bytes: &[u8]) -> Result<Self, FadtError> {
+        let header = bytes.get(..8).ok_or(FadtError::TooShort)?;
+        if header[..4] != FADT_SIGNATURE {
+            return Err(FadtError::WrongSignature);
+        }
+        let declared = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
+        if declared < FADT_MIN_LENGTH || declared > bytes.len() {
+            return Err(FadtError::TooShort);
+        }
+        let table = &bytes[..declared];
+        if table.iter().fold(0u8, |sum, &byte| sum.wrapping_add(byte)) != 0 {
+            return Err(FadtError::BadChecksum);
+        }
+        let revision = table[FADT_REVISION_AT];
+        let dsdt32 = u64::from(le32(table, FADT_DSDT_AT));
+        let dsdt64 = if revision >= 2 && declared >= FADT_X_DSDT_MIN_LENGTH {
+            le64(table, FADT_X_DSDT_AT)
+        } else {
+            0
+        };
+        let dsdt = if dsdt64 != 0 { dsdt64 } else { dsdt32 };
+        if dsdt == 0 {
+            return Err(FadtError::NoDsdt);
+        }
+        let pm1a_control = u16::try_from(le32(table, FADT_PM1A_CNT_AT))
+            .ok()
+            .filter(|&port| port != 0)
+            .ok_or(FadtError::NoPm1aControl)?;
+        let pm1b_control = u16::try_from(le32(table, FADT_PM1B_CNT_AT))
+            .ok()
+            .filter(|&port| port != 0);
+        Ok(Self {
+            revision,
+            dsdt,
+            pm1a_control,
+            pm1b_control,
+        })
+    }
+}
+
+fn le32(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+}
+
+fn le64(bytes: &[u8], at: usize) -> u64 {
+    let mut word = [0u8; 8];
+    word.copy_from_slice(&bytes[at..at + 8]);
+    u64::from_le_bytes(word)
 }
 
 #[cfg(test)]

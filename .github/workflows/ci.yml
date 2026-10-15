@@ -327,6 +327,8 @@ jobs:
             "hal: syscall/sysret fast path armed (STAR kernel 0x08/0x10, user 0x1b/0x23)" \
             "hal: 8259 PIC remapped to vectors 32..47; all IRQs masked" \
             "acpi: RSDP revision=" \
+            "acpi: PM1a control block at 0x" \
+            "acpi: S5 sleep type " \
             "hpet: counter enabled at" \
             "apic: x" \
             "apic: calibrated timer=" \
@@ -547,6 +549,16 @@ jobs:
           fi
           if ! grep -Fq 'e1000: bound and started through nolx-df' build/serial.log; then
             echo "the e1000 driver was not bound and started through the framework"
+            exit 1
+          fi
+          # ACPI sleep control: the FADT names the PM1a control port, and the DSDT names the S5
+          # soft-off type. The kernel reads both and enters neither state.
+          if ! grep -Eq 'acpi: PM1a control block at 0x[0-9a-f]+, DSDT at 0x[0-9a-f]+' build/serial.log; then
+            echo "the FADT's PM1a control block and DSDT were not reported"
+            exit 1
+          fi
+          if ! grep -Eq 'acpi: S5 sleep type [0-7], soft-off word would be 0x[0-9a-f]+, not entered' build/serial.log; then
+            echo "the S5 sleep type was not read from the DSDT"
             exit 1
           fi
           # Block queues: every read and write the kernel issued went through a device's queue,

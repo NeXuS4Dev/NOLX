@@ -35,6 +35,7 @@ pub mod virtio_volume;
 pub mod xhci;
 
 use nolx_hal_core::console::HalConsole;
+use nolx_power_core as power;
 
 /// `EFER`, the extended feature enable register.
 const MSR_EFER: u32 = 0xC000_0080;
@@ -126,6 +127,38 @@ pub fn init(console: &mut dyn HalConsole) {
             platform.madt.local_apics().len(),
             platform.madt.io_apics().len(),
         );
+        match platform.fadt {
+            Some(fadt) => {
+                let _ = writeln!(
+                    console,
+                    "acpi: PM1a control block at {:#x}, DSDT at {:#x}",
+                    fadt.pm1a_control, fadt.dsdt
+                );
+            }
+            None => {
+                let _ = writeln!(console, "acpi: no FADT; no sleep control block");
+            }
+        }
+        match platform.s5_sleep_type {
+            Some(sleep_type) => {
+                let word = power::pm1_sleep_value(sleep_type, true).unwrap_or(0);
+                let _ = writeln!(
+                    console,
+                    "acpi: S5 sleep type {sleep_type}, soft-off word would be {word:#x}, not entered"
+                );
+            }
+            None => {
+                let _ = writeln!(console, "acpi: S5 not described in the DSDT");
+            }
+        }
+        match platform.s3_sleep_type {
+            Some(sleep_type) => {
+                let _ = writeln!(console, "acpi: S3 sleep type {sleep_type}, not entered");
+            }
+            None => {
+                let _ = writeln!(console, "acpi: S3 not described in the DSDT");
+            }
+        }
         let hpet_frequency = match platform.hpet {
             Some(info) => match hpet::init(&info) {
                 Ok(frequency) => {
