@@ -14,6 +14,9 @@
 //! port, so the bytes read come from the disk, and CI checks the written sectors in that copy.
 
 use nolx_ahci_core::{self as ahci, CommandHeader};
+use super::blockdev;
+use nolx_block_core::devices::QueueError;
+use nolx_block_core::queue::{Direction, Request};
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
 use nolx_pci_core::{Bar, Bdf};
@@ -49,6 +52,8 @@ const ROUND_TRIP_BYTES: usize = ROUND_TRIP_SECTORS as usize * SECTOR_BYTES as us
 /// Why the probe stopped.
 #[derive(Debug)]
 pub enum Failure {
+    /// The block queue refused the request, or did not hand it back.
+    Queue(QueueError),
     /// No AHCI controller is on the PCI bus.
     NoController,
     /// BAR 5 is not a memory BAR, so the HBA registers cannot be reached.
@@ -229,6 +234,22 @@ struct Command {
 /// Issue `command` in slot 0 with its data at offset 0 of the data page, wait for the port, and
 /// check its task file. For a write the caller has already put the data in the page.
 fn transfer(port: &Port, page: &Dma, data: &Dma, command: Command) -> Result<(), Failure> {
+    let request = Request {
+        direction: if command.write {
+            Direction::Write
+        } else {
+            Direction::Read
+        },
+        lba: command.lba,
+        sectors: u32::from(command.sectors),
+    };
+    blockdev::run(blockdev::AHCI, request, || {
+        issue(port, page, data, command)
+    })
+}
+
+/// Issue the command in the port's slot 0 and wait for it. Called through [`transfer`].
+fn issue(port: &Port, page: &Dma, data: &Dma, command: Command) -> Result<(), Failure> {
     let bytes = u32::from(command.sectors) * SECTOR_BYTES;
     let header = ahci::encode_command_header(&CommandHeader {
         fis_dwords: 5,
@@ -326,5 +347,11 @@ impl Port<'_> {
         )?;
         self.write(ahci::PORT_CMD, self.read(ahci::PORT_CMD)? | ahci::CMD_FRE)?;
         self.write(ahci::PORT_CMD, self.read(ahci::PORT_CMD)? | ahci::CMD_ST)
+    }
+}
+
+impl From<QueueError> for Failure {
+    fn from(error: QueueError) -> Self {
+        Self::Queue(error)
     }
 }

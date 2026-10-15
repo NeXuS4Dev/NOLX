@@ -530,6 +530,12 @@ jobs:
             echo "the e1000 driver was not bound and started through the framework"
             exit 1
           fi
+          # Block queues: every read and write the kernel issued went through a device's queue,
+          # and each one completed. The count is at least one and the two numbers are equal.
+          if ! grep -Eq 'blockdev: ([1-9][0-9]*) requests dispatched, \1 completed' build/serial.log; then
+            echo "the block requests did not all go through the queues and complete"
+            exit 1
+          fi
           # MMIO windows: a device register range is mapped uncached through the window above the
           # direct map, and reads the same value as the direct map (the local APIC version).
           if ! grep -Eq 'mm: mmio: LAPIC 0x[0-9a-f]+ at 0x[0-9a-f]+: uncached=true, version 0x[0-9a-f]+ read through the window matches the direct map' build/serial.log; then

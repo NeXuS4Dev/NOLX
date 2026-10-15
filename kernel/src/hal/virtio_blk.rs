@@ -19,6 +19,9 @@
 
 use alloc::vec;
 use nolx_block_core::{self as gpt, GptError, Header};
+use super::blockdev;
+use nolx_block_core::devices::QueueError;
+use nolx_block_core::queue::{Direction, Request};
 use nolxfs::on_disk::FsError;
 
 use super::dma::Dma;
@@ -55,6 +58,8 @@ const ROUND_TRIP_BYTES: usize = ROUND_TRIP_SECTORS as usize * virtio::SECTOR_BYT
 /// Why the probe stopped.
 #[derive(Debug)]
 pub enum Failure {
+    /// The block queue refused the request, or did not hand it back.
+    Queue(QueueError),
     /// No virtio block device is on the PCI bus.
     NoDevice,
     /// The device does not expose a capability the driver needs.
@@ -412,6 +417,22 @@ impl Disk {
     /// Run one request of `len` bytes at `sector` and wait for the device to complete it. For a
     /// write, the data must already be in the request page; for a read, it is there afterwards.
     fn transfer(&mut self, kind: u32, sector: u64, len: u32) -> Result<(), Failure> {
+        let direction = if kind == virtio::BLK_T_OUT {
+            Direction::Write
+        } else {
+            Direction::Read
+        };
+        let request = Request {
+            direction,
+            lba: sector,
+            sectors: len / virtio::SECTOR_BYTES as u32,
+        };
+        blockdev::run(blockdev::VIRTIO, request, || self.issue(kind, sector, len))
+    }
+
+    /// Issue one request on the virtio queue and wait for the device. Called through
+    /// [`Disk::transfer`], which routes it through the block queue.
+    fn issue(&mut self, kind: u32, sector: u64, len: u32) -> Result<(), Failure> {
         let request = &self.request;
         request.write(REQUEST_HEADER, &virtio::block_request_header(kind, sector));
         // A status byte the device never writes stays at this value, which is not `BLK_S_OK`.
@@ -491,4 +512,10 @@ fn setup_queue(common: &Region) -> Result<Queue, Failure> {
         layout,
         submitted: 0,
     })
+}
+
+impl From<QueueError> for Failure {
+    fn from(error: QueueError) -> Self {
+        Self::Queue(error)
+    }
 }

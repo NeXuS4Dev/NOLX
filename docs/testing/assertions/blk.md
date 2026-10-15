@@ -42,3 +42,4 @@ BLK-031 | NOLX M9 Per-device queues, in-flight limit: a device at its limit is n
 BLK-032 | NOLX M9 Per-device queues, back-pressure: a full queue refuses a request it cannot merge on its own device only, an invalid request is refused, and other devices keep their room | tested-T1 | nolx-block-core devices::tests::a_full_queue_refuses_its_own_device_only
 
 BLK-028 to BLK-032 are `tested-T1`: the host tests passed in CI (workflow 38619742873, host-test job).
+BLK-033 | NOLX M9 Kernel request path: every read and write the kernel issues to the virtio, AHCI, and NVMe disks is submitted to that device's queue, dispatched, run, and completed; the boot report shows the same number dispatched as completed, at least one | implemented | `.github/workflows/ci.yml` boot-smoke asserts `blockdev: N requests dispatched, N completed`; kernel/src/hal/blockdev.rs; kernel/src/hal/virtio_blk.rs, ahci.rs, nvme.rs

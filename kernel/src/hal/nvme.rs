@@ -14,6 +14,9 @@
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
 use nolx_nvme_core::{self as nvme, Sqe};
+use super::blockdev;
+use nolx_block_core::devices::QueueError;
+use nolx_block_core::queue::{Direction, Request};
 use nolx_pci_core::{Bar, Bdf, ConfigSpace};
 use nolx_virtio_core::crc32;
 
@@ -60,6 +63,8 @@ const POLL_LIMIT: u32 = 1_000_000;
 /// Why the probe stopped.
 #[derive(Debug)]
 pub enum Failure {
+    /// The block queue refused the request, or did not hand it back.
+    Queue(QueueError),
     /// No NVMe controller is on the PCI bus.
     NoController,
     /// BAR 0 is not a memory BAR, so the controller registers cannot be reached.
@@ -222,7 +227,12 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     data.write(0, &[0u8; SECTOR_BYTES]);
     let command = nvme::read_write(false, next_cid(&mut cid), NSID, 0, 1, data.address(0))
         .ok_or(Failure::Encoding)?;
-    execute(&regs, &mut io, &command)?;
+    let read = Request {
+        direction: Direction::Read,
+        lba: 0,
+        sectors: 1,
+    };
+    execute_io(&regs, &mut io, &command, read)?;
     let mut sector = [0u8; SECTOR_BYTES];
     data.read(0, &mut sector);
     if sector[..SECTOR_PATTERN.len()] != *SECTOR_PATTERN {
@@ -247,7 +257,12 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
         data.address(0),
     )
     .ok_or(Failure::Encoding)?;
-    execute(&regs, &mut io, &command)?;
+    let write = Request {
+        direction: Direction::Write,
+        lba: ROUND_TRIP_SECTOR,
+        sectors: u32::from(ROUND_TRIP_SECTORS),
+    };
+    execute_io(&regs, &mut io, &command, write)?;
     data.write(0, &[0u8; ROUND_TRIP_BYTES]);
     let command = nvme::read_write(
         false,
@@ -258,7 +273,12 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
         data.address(0),
     )
     .ok_or(Failure::Encoding)?;
-    execute(&regs, &mut io, &command)?;
+    let read_back = Request {
+        direction: Direction::Read,
+        lba: ROUND_TRIP_SECTOR,
+        sectors: u32::from(ROUND_TRIP_SECTORS),
+    };
+    execute_io(&regs, &mut io, &command, read_back)?;
     let mut back = [0u8; ROUND_TRIP_BYTES];
     data.read(0, &mut back);
     if back != written {
@@ -318,6 +338,16 @@ fn execute(regs: &Region, queue: &mut Queue, command: &Sqe) -> Result<(), Failur
 
 /// The next command identifier. The driver has one command outstanding, so identifiers only need
 /// to differ from the last one.
+/// Run one I/O command on the I/O queue, through the block queue.
+fn execute_io(
+    regs: &Region,
+    queue: &mut Queue,
+    command: &Sqe,
+    request: Request,
+) -> Result<(), Failure> {
+    blockdev::run(blockdev::NVME, request, || execute(regs, queue, command))
+}
+
 fn next_cid(counter: &mut u16) -> u16 {
     let cid = *counter;
     *counter = counter.wrapping_add(1);
@@ -374,4 +404,10 @@ fn poll(
         core::hint::spin_loop();
     }
     Err(Failure::Timeout(step))
+}
+
+impl From<QueueError> for Failure {
+    fn from(error: QueueError) -> Self {
+        Self::Queue(error)
+    }
 }
