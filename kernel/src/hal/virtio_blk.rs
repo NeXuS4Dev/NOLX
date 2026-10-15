@@ -157,7 +157,11 @@ const DISPATCH: Dispatch = Dispatch {
 /// it. The bring-up's output is replayed on the console. Failure is reported and does not stop boot.
 pub fn probe(console: &mut dyn HalConsole) {
     let Some((_, id)) = find_device() else {
-        let _ = writeln!(console, "virtio-blk: not brought up: {:?}", Failure::NoDevice);
+        let _ = writeln!(
+            console,
+            "virtio-blk: not brought up: {:?}",
+            Failure::NoDevice
+        );
         return;
     };
     let mut registry: Registry<1, 1> = Registry::new();
@@ -167,7 +171,10 @@ pub fn probe(console: &mut dyn HalConsole) {
         ops: DISPATCH,
     };
     if let Err(error) = driver_start::attach(&mut registry, driver, id) {
-        let _ = writeln!(console, "virtio-blk: framework refused the device: {error:?}");
+        let _ = writeln!(
+            console,
+            "virtio-blk: framework refused the device: {error:?}"
+        );
     }
     let state = STATE.lock();
     state.log.replay(console);

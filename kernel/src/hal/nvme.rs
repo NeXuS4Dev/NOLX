@@ -122,7 +122,11 @@ static STATE: IrqMutex<State> = IrqMutex::new(State {
 });
 
 /// The match rule: the controller's class, subclass, and programming interface.
-static MATCHES: &[Match] = &[Match::by_class(NVME_CLASS, NVME_SUBCLASS, Some(NVME_PROG_IF))];
+static MATCHES: &[Match] = &[Match::by_class(
+    NVME_CLASS,
+    NVME_SUBCLASS,
+    Some(NVME_PROG_IF),
+)];
 
 /// The driver's dispatch table. Probe accepts any device the match rule selects.
 const DISPATCH: Dispatch = Dispatch {
