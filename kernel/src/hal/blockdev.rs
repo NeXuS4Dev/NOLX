@@ -7,7 +7,6 @@
 //! submitted. The queue lock is never held while a request runs: a request may poll the device for
 //! a long time, and the lock disables interrupts.
 
-use core::fmt::Write;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use nolx_block_core::devices::{DeviceQueues, QueueError};
