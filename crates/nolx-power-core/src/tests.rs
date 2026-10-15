@@ -163,7 +163,9 @@ fn fadt(length: usize, revision: u8, dsdt32: u32, x_dsdt: u64, pm1a: u32, pm1b: 
     bytes[64..68].copy_from_slice(&pm1a.to_le_bytes());
     bytes[68..72].copy_from_slice(&pm1b.to_le_bytes());
     bytes[140..148].copy_from_slice(&x_dsdt.to_le_bytes());
-    let sum = bytes[..length].iter().fold(0u8, |sum, &byte| sum.wrapping_add(byte));
+    let sum = bytes[..length]
+        .iter()
+        .fold(0u8, |sum, &byte| sum.wrapping_add(byte));
     bytes[9] = 0u8.wrapping_sub(sum);
     bytes
 }
@@ -172,11 +174,20 @@ fn fadt(length: usize, revision: u8, dsdt32: u32, x_dsdt: u64, pm1a: u32, pm1b: 
 fn a_fadt_gives_the_dsdt_and_the_pm1_control_ports() {
     let bytes = fadt(116, 1, 0x000E_0000, 0, 0x604, 0);
     let table = Fadt::parse(&bytes[..116]).expect("a valid revision-1 FADT");
-    assert_eq!(table.dsdt, 0x000E_0000, "a revision-1 table uses the 32-bit DSDT");
+    assert_eq!(
+        table.dsdt, 0x000E_0000,
+        "a revision-1 table uses the 32-bit DSDT"
+    );
     assert_eq!(table.pm1a_control, 0x604);
-    assert_eq!(table.pm1b_control, None, "a zero PM1b port means no second block");
+    assert_eq!(
+        table.pm1b_control, None,
+        "a zero PM1b port means no second block"
+    );
     let with_b = fadt(116, 1, 0x1000, 0, 0x604, 0x608);
-    assert_eq!(Fadt::parse(&with_b[..116]).unwrap().pm1b_control, Some(0x608));
+    assert_eq!(
+        Fadt::parse(&with_b[..116]).unwrap().pm1b_control,
+        Some(0x608)
+    );
 }
 
 #[test]
@@ -200,7 +211,11 @@ fn a_fadt_that_is_damaged_or_incomplete_is_refused_with_its_reason() {
     let mut wrong = good;
     wrong[..4].copy_from_slice(b"RSDT");
     assert_eq!(Fadt::parse(&wrong[..116]), Err(FadtError::WrongSignature));
-    assert_eq!(Fadt::parse(&good[..100]), Err(FadtError::TooShort), "cut before the declared length");
+    assert_eq!(
+        Fadt::parse(&good[..100]),
+        Err(FadtError::TooShort),
+        "cut before the declared length"
+    );
     let no_dsdt = fadt(116, 1, 0, 0, 0x604, 0);
     assert_eq!(Fadt::parse(&no_dsdt[..116]), Err(FadtError::NoDsdt));
     let no_pm1a = fadt(116, 1, 0x1000, 0, 0, 0);
@@ -212,4 +227,3 @@ fn a_fadt_that_is_damaged_or_incomplete_is_refused_with_its_reason() {
         "a port above 0xFFFF is not an I/O port"
     );
 }
-
