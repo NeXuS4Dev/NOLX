@@ -665,6 +665,11 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   (run [38630855644](https://github.com/NeXuS4Dev/NOLX/actions/runs/38630855644)). Not yet done: receive
   checks, interrupts, and the network stack above the driver.
 
+- ACPI in the kernel (`kernel/src/hal/acpi.rs`): the FADT gives the PM1a control port and the DSDT; the
+  S5 soft-off type is read from the DSDT's AML, and the kernel reports the word it would write. PWR-008
+  is `tested-T2` (run [38730057305](https://github.com/NeXuS4Dev/NOLX/actions/runs/38730057305)). Not yet
+  done: `_STA` and `_CRS` evaluation, which needs an AML interpreter, and entering a sleep state.
+
 - Block request path in the kernel (`kernel/src/hal/blockdev.rs`): every virtio-blk, AHCI, and NVMe
   read and write goes through a per-device queue, and the boot report prints the count dispatched and
   completed. BLK-033 is `tested-T2` (run [38690959084](https://github.com/NeXuS4Dev/NOLX/actions/runs/38690959084)).

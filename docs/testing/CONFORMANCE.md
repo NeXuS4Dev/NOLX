@@ -11,13 +11,13 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | Status | Assertions | Cumulative verified at or above status |
 |---|---|---|
 | `unimplemented` | 0 | 100.0% |
-| `implemented` | 6 | 100.0% |
-| `tested-T1` | 228 | 97.9% |
+| `implemented` | 5 | 100.0% |
+| `tested-T1` | 228 | 98.3% |
 | `pending-T2` | 0 | — |
-| `tested-T2` | 57 | 19.6% |
+| `tested-T2` | 58 | 19.9% |
 | `tested-T3` | 0 | 0.0% |
 
-**285 of 291 assertions have a passing automated test; 0 are awaiting T2 results.**
+**286 of 291 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
@@ -38,7 +38,7 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | nxfs | 15 | 15 | 14 | 0 | 1 | 0 |
 | obj | 14 | 14 | 9 | 0 | 5 | 0 |
 | pci | 13 | 13 | 11 | 0 | 2 | 0 |
-| power | 8 | 8 | 7 | 0 | 0 | 0 |
+| power | 8 | 8 | 7 | 0 | 1 | 0 |
 | ps2 | 7 | 7 | 7 | 0 | 0 | 0 |
 | usb | 8 | 8 | 6 | 0 | 2 | 0 |
 | vfs | 48 | 48 | 46 | 0 | 2 | 0 |
@@ -47,7 +47,7 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 
 None.
 
-## Implemented but untested (6)
+## Implemented but untested (5)
 
 | ID | Specification reference |
 |---|---|
@@ -56,7 +56,6 @@ None.
 | HAL-019 | APIC arithmetic: x2APIC MSRs, compressed TPR priority classes, timer divisors, and HPET-based counter calibration are checked |
 | HAL-020 | HPET clocksource: 32-bit MMIO reads and wrap extension produce monotonic nanoseconds |
 | HAL-021 | I/O APIC routes: GSI windows and ISA overrides are validated, redirections start masked, and NMI sources use MADT polarity/trigger flags |
-| PWR-008 | NOLX M9 Sleep types in the kernel: the kernel reads the FADT and the DSDT at boot, reports the PM1a control port, and reads the S5 soft-off type from the DSDT's AML; it reports the S5 word it would write and enters no state |
 
 ## Pending T2 verification (0)
 
@@ -328,7 +327,7 @@ None.
 | PWR-005 | power | NOLX M9 PM1 sleep control: the sleep type sits in bits 12 to 10 and the go bit in bit 13, and a type that does not fit in three bits is refused | `tested-T1` | nolx-power-core tests::the_pm1_word_places_the_type_and_the_go_bit |
 | PWR-006 | power | NOLX M9 FADT fields: a Fixed ACPI Description Table with a valid checksum gives the DSDT address (the 64-bit field when a revision-2 table sets it, else the 32-bit field) and the PM1a and PM1b control ports | `tested-T1` | nolx-power-core tests::a_fadt_gives_the_dsdt_and_the_pm1_control_ports, tests::a_revision_two_fadt_takes_the_64_bit_dsdt_when_it_is_set |
 | PWR-007 | power | NOLX M9 FADT refusal: a FADT with a bad checksum, the wrong signature, a cut-short length, no DSDT, or no 16-bit PM1a port is refused with its reason | `tested-T1` | nolx-power-core tests::a_fadt_that_is_damaged_or_incomplete_is_refused_with_its_reason |
-| PWR-008 | power | NOLX M9 Sleep types in the kernel: the kernel reads the FADT and the DSDT at boot, reports the PM1a control port, and reads the S5 soft-off type from the DSDT's AML; it reports the S5 word it would write and enters no state | `implemented` | `.github/workflows/ci.yml` boot-smoke asserts `acpi: PM1a control block at 0x...` and `acpi: S5 sleep type N, soft-off word would be 0x..., not entered`; kernel/src/hal/acpi.rs |
+| PWR-008 | power | NOLX M9 Sleep types in the kernel: the kernel reads the FADT and the DSDT at boot, reports the PM1a control port, and reads the S5 soft-off type from the DSDT's AML; it reports the S5 word it would write and enters no state | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `acpi: PM1a control block at 0x...` and `acpi: S5 sleep type N, soft-off word would be 0x..., not entered`; kernel/src/hal/acpi.rs |
 | UN-001 | vfs | XSH unlink: an entry is removed but an open file remains accessible until the last descriptor closes | `tested-T1` | crates/nolx-vfs vfs::tests::un001_unlink_removes_entry_while_open_file_remains_accessible_until_last_close |
 | UN-002 | vfs | XSH link: creating a hard link to a directory fails with EPERM unless privileged | `tested-T1` | crates/nolx-vfs vfs::tests::un002_hard_link_to_directory_fails_with_eperm |
 | UN-003 | vfs | XSH rename: renaming a directory onto one of its own descendants fails with EINVAL | `tested-T1` | crates/nolx-vfs vfs::tests::un003_rename_directory_into_own_descendant_fails_with_einval |
