@@ -154,7 +154,7 @@ jobs:
             --message-format=short -- -D warnings > /tmp/clippy.txt 2>&1
           status=$?
           tee -a /tmp/job.log < /tmp/clippy.txt
-          grep -E ': (error|warning)' /tmp/clippy.txt | head -40 | while IFS= read -r line; do echo "::error::$line"; done
+          grep -v '^[[:space:]]*$' /tmp/clippy.txt | head -60 | while IFS= read -r line; do echo "::error::$line"; done
           exit $status
       - name: Build the kernel
         run: make kernel 2>&1 | tee -a /tmp/job.log
