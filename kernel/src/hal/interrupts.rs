@@ -32,6 +32,17 @@ extern "C" fn nolx_interrupt_dispatch(frame_pointer: *mut InterruptFrame) -> *mu
         return frame_pointer;
     }
 
+    if vector == super::nvme::COMPLETION_VECTOR {
+        // An NVMe I/O completion on its MSI-X entry: count it, then send the local APIC EOI.
+        let previous = cpu::raise_ipl(Ipl::DEVICE_MIN);
+        super::nvme::on_completion_interrupt();
+        apic::end_of_interrupt();
+        if let Some(previous_ipl) = previous {
+            cpu::restore_ipl(previous_ipl);
+        }
+        return frame_pointer;
+    }
+
     if apic::is_enabled() && apic::handles_vector(vector) {
         // Interrupt gates clear IF. APIC TPR and the per-CPU software IPL are both raised
         // until after the local APIC EOI, then restored in that order.

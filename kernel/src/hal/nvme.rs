@@ -19,15 +19,18 @@ use nolx_df_core::{DeviceId, Dispatch, Driver, Match, Registry};
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
 use nolx_nvme_core::{self as nvme, Sqe};
-use nolx_pci_core::{Bar, Bdf, ConfigSpace};
+use nolx_pci_core::{msi, Bar, Bdf, ConfigSpace};
 use nolx_virtio_core::crc32;
 
+use super::apic;
+use super::cpu::interrupts_enabled;
 use super::dma::Dma;
 use super::pci::LegacyPorts;
 use super::virtio_blk::fill_pattern;
 use crate::mm::mmio::{self, Region};
 use crate::sync::IrqMutex;
-use core::sync::atomic::{fence, Ordering};
+use core::arch::asm;
+use core::sync::atomic::{fence, AtomicUsize, Ordering};
 
 /// NVMe class code: mass storage, non-volatile memory, NVM Express interface.
 const NVME_CLASS: u8 = 0x01;
@@ -63,6 +66,18 @@ const ROUND_TRIP_BYTES: usize = ROUND_TRIP_SECTORS as usize * SECTOR_BYTES;
 /// How many times a bounded wait looks before it gives up.
 const POLL_LIMIT: u32 = 1_000_000;
 
+/// The interrupt vector the I/O queue's completions arrive on. It is delivered through MSI-X table
+/// entry [`MSIX_ENTRY`].
+pub const COMPLETION_VECTOR: u8 = 0x50;
+/// The MSI-X table entry for the I/O completion queue. Entry 0 stays masked: the admin queue also
+/// signals on it, and the driver counts only I/O completions.
+const MSIX_ENTRY: u16 = 1;
+
+/// Completion interrupts received since boot. Written by the interrupt handler.
+static COMPLETION_INTERRUPTS: AtomicUsize = AtomicUsize::new(0);
+/// I/O commands submitted through [`execute_io`]. Each one should produce one interrupt.
+static IO_SUBMITTED: AtomicUsize = AtomicUsize::new(0);
+
 /// Why the probe stopped.
 #[derive(Debug)]
 pub enum Failure {
@@ -94,6 +109,12 @@ pub enum Failure {
     Pattern,
     /// The round trip read back different bytes from the ones written.
     RoundTrip,
+    /// The controller has no MSI-X capability.
+    NoMsix,
+    /// The MSI-X table or pending-bit array is not in BAR 0 inside the mapped registers.
+    MsixLayout,
+    /// Fewer completion interrupts arrived than I/O commands were submitted.
+    Interrupts { delivered: usize, expected: usize },
 }
 
 impl From<MmioError> for Failure {
@@ -276,11 +297,13 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     // One I/O queue pair: the completion queue first, since the submission queue names it.
     let io_cq = Dma::new().ok_or(Failure::Memory)?;
     let io_sq = Dma::new().ok_or(Failure::Memory)?;
-    let command = nvme::create_io_cq(
+    enable_msix(&regs, bdf)?;
+    let command = nvme::create_io_cq_msix(
         next_cid(&mut cid),
         IO_QUEUE,
         QUEUE_ENTRIES,
         io_cq.address(0),
+        MSIX_ENTRY,
     )
     .ok_or(Failure::Encoding)?;
     execute(&regs, &mut admin, &command)?;
@@ -362,7 +385,74 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
         console,
         "nvme: wrote {ROUND_TRIP_SECTORS} sectors at {ROUND_TRIP_SECTOR}, read back, crc32 {checksum:#010x} matches the written data"
     );
+
+    // Every I/O command raised one completion interrupt on the I/O queue's entry.
+    let expected = IO_SUBMITTED.load(Ordering::Relaxed);
+    let delivered = wait_for_completions(expected);
+    let _ = writeln!(
+        console,
+        "nvme: msi-x completion interrupts: {delivered} of {expected} I/O commands, vector {COMPLETION_VECTOR:#x}"
+    );
+    if delivered != expected {
+        return Err(Failure::Interrupts {
+            delivered,
+            expected,
+        });
+    }
     Ok(())
+}
+
+/// Enable MSI-X on the controller and program the I/O queue's table entry: the message goes to this
+/// processor's local APIC carrying [`COMPLETION_VECTOR`]. Entry 0 is left masked.
+fn enable_msix(regs: &Region, bdf: Bdf) -> Result<(), Failure> {
+    let list = nolx_pci_core::capabilities(&mut LegacyPorts, bdf);
+    let cap = list.find(msi::CAP_MSI_X).ok_or(Failure::NoMsix)?;
+    let header = LegacyPorts.read_u32(bdf, cap.offset);
+    let table = LegacyPorts.read_u32(bdf, cap.offset + 4);
+    let pba = LegacyPorts.read_u32(bdf, cap.offset + 8);
+    let control = (header >> 16) as u16;
+    let msix = msi::parse_msix(control, table, pba);
+    if msix.table_bar != 0 || msix.pba_bar != 0 || !msi::msix_fits(&msix, REGISTERS_BYTES) {
+        return Err(Failure::MsixLayout);
+    }
+
+    let apic_id = u8::try_from(apic::current_apic_id()).map_err(|_| Failure::Encoding)?;
+    let address = u64::from(msi::message_address(apic_id));
+    let entry = msi::msix_entry(address, COMPLETION_VECTOR, false).ok_or(Failure::Encoding)?;
+    let at = u64::from(msix.table_offset) + u64::from(MSIX_ENTRY) * msi::MSIX_ENTRY_BYTES;
+    for (index, word) in entry.chunks_exact(4).enumerate() {
+        let value = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+        regs.write32(at + 4 * index as u64, value)?;
+    }
+
+    // Enable MSI-X with the whole function unmasked, keeping the rest of the header dword.
+    let enabled = msi::msix_enable(control);
+    LegacyPorts.write_u32(bdf, cap.offset, (u32::from(enabled) << 16) | (header & 0xFFFF));
+    Ok(())
+}
+
+/// Count one completion interrupt. Called from the interrupt handler on [`COMPLETION_VECTOR`].
+pub fn on_completion_interrupt() {
+    COMPLETION_INTERRUPTS.fetch_add(1, Ordering::Release);
+}
+
+/// Let completion interrupts through: they stay pending while IF is clear. Waits until `expected`
+/// have arrived or the bounded wait runs out, restores IF, and returns how many arrived.
+fn wait_for_completions(expected: usize) -> usize {
+    let was_enabled = interrupts_enabled();
+    // SAFETY: `sti` sets IF and changes nothing else. The IDT, the local APIC, and the completion
+    // vector are installed before the drivers run.
+    unsafe { asm!("sti", options(nomem, nostack)) };
+    let mut spins = 0u32;
+    while COMPLETION_INTERRUPTS.load(Ordering::Acquire) < expected && spins < POLL_LIMIT {
+        core::hint::spin_loop();
+        spins += 1;
+    }
+    if !was_enabled {
+        // SAFETY: `cli` clears IF, which it was clear before this call.
+        unsafe { asm!("cli", options(nomem, nostack)) };
+    }
+    COMPLETION_INTERRUPTS.load(Ordering::Acquire)
 }
 
 /// Submit `command` on `queue`, ring its doorbell, and wait for its completion. The command's
@@ -418,6 +508,7 @@ fn execute_io(
     command: &Sqe,
     request: Request,
 ) -> Result<(), Failure> {
+    IO_SUBMITTED.fetch_add(1, Ordering::Relaxed);
     blockdev::run(blockdev::NVME, request, || execute(regs, queue, command))
 }
 

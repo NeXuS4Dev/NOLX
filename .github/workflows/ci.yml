@@ -513,6 +513,12 @@ jobs:
             echo "the NVMe read did not return the disk image's sector 0"
             exit 1
           fi
+          # NVMe completions arrive as MSI-X interrupts: every I/O command raised one on the
+          # I/O queue's entry, and the count matches the number of commands submitted.
+          if ! grep -Eq 'nvme: msi-x completion interrupts: ([1-9][0-9]*) of \1 I/O commands, vector 0x50' build/serial.log; then
+            echo "the NVMe completions did not arrive as MSI-X interrupts, one per command"
+            exit 1
+          fi
           if ! grep -Eq 'nvme: wrote 4 sectors at 1600, read back, crc32 0x[0-9a-f]{8} matches the written data' build/serial.log; then
             echo "the NVMe round trip did not verify"
             exit 1

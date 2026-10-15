@@ -159,6 +159,31 @@ pub fn create_io_cq(cid: u16, queue: u16, entries: u16, prp1: u64) -> Option<Sqe
     ))
 }
 
+/// The number of MSI-X table entries an NVMe controller's table can name.
+pub const MSIX_VECTOR_LIMIT: u16 = 2048;
+
+/// A Create I/O Completion Queue command with interrupts on: the queue's completions are signalled
+/// on MSI-X table entry `vector`. Bit 1 is the interrupts-enabled flag and bit 0 the physically
+/// contiguous flag; the vector sits in bits 31:16. Returns `None` for a queue size the controller
+/// refuses, or a vector past the table.
+#[must_use]
+pub fn create_io_cq_msix(cid: u16, queue: u16, entries: u16, prp1: u64, vector: u16) -> Option<Sqe> {
+    queue_size(entries)?;
+    if vector >= MSIX_VECTOR_LIMIT {
+        return None;
+    }
+    let cdw10 = u32::from(queue) | (u32::from(entries - 1) << 16);
+    let cdw11 = 0b11 | (u32::from(vector) << 16);
+    Some(sqe(
+        OP_CREATE_IO_CQ,
+        cid,
+        0,
+        prp1,
+        0,
+        [cdw10, cdw11, 0, 0, 0, 0],
+    ))
+}
+
 /// A Create I/O Submission Queue command for queue `queue` of `entries` entries, bound to
 /// completion queue `completion`, physically contiguous.
 #[must_use]
