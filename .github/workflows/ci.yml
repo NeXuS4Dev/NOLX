@@ -146,9 +146,16 @@ jobs:
           targets: x86_64-unknown-none
       - uses: Swatinem/rust-cache@v2
       - name: Clippy the kernel for its own target
+        # Each warning is also printed as an error annotation, so the lint shows on the run
+        # without opening the log. The step still fails on any warning.
         run: |
-          cargo clippy --release --target x86_64-unknown-none -p nolx-kernel -- -D warnings \
-            2>&1 | tee /tmp/job.log
+          set +e
+          cargo clippy --release --target x86_64-unknown-none -p nolx-kernel \
+            --message-format=short -- -D warnings > /tmp/clippy.txt 2>&1
+          status=$?
+          tee -a /tmp/job.log < /tmp/clippy.txt
+          grep -E ': (error|warning)' /tmp/clippy.txt | head -40 | while IFS= read -r line; do echo "::error::$line"; done
+          exit $status
       - name: Build the kernel
         run: make kernel 2>&1 | tee -a /tmp/job.log
       - name: Validate the resulting image
