@@ -391,9 +391,9 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
         "nvme: wrote {ROUND_TRIP_SECTORS} sectors at {ROUND_TRIP_SECTOR}, read back, crc32 {checksum:#010x} matches the written data"
     );
 
-    // Every I/O command raised one completion interrupt on the I/O queue's entry.
+    // Every I/O command's interrupt was taken in turn, so the two counts are equal.
     let expected = IO_SUBMITTED.load(Ordering::Relaxed);
-    let delivered = wait_for_completions(expected);
+    let delivered = COMPLETION_INTERRUPTS.load(Ordering::Acquire);
     let _ = writeln!(
         console,
         "nvme: msi-x completion interrupts: {delivered} of {expected} I/O commands, vector {COMPLETION_VECTOR:#x}"
@@ -517,8 +517,20 @@ fn execute_io(
     command: &Sqe,
     request: Request,
 ) -> Result<(), Failure> {
-    IO_SUBMITTED.fetch_add(1, Ordering::Relaxed);
-    blockdev::run(blockdev::NVME, request, || execute(regs, queue, command))
+    let submitted = IO_SUBMITTED.fetch_add(1, Ordering::Relaxed) + 1;
+    blockdev::run(blockdev::NVME, request, || {
+        execute(regs, queue, command)?;
+        // Take this command's interrupt before the next command is submitted. The local APIC
+        // keeps one pending bit per vector, so interrupts that queue up unserviced merge.
+        let delivered = wait_for_completions(submitted);
+        if delivered < submitted {
+            return Err(Failure::Interrupts {
+                delivered,
+                expected: submitted,
+            });
+        }
+        Ok(())
+    })
 }
 
 fn next_cid(counter: &mut u16) -> u16 {
