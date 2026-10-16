@@ -333,8 +333,12 @@ fn probe_ecam(console: &mut dyn HalConsole, inventory: &nolx_pci_core::Inventory
         let region = mapping.region;
         let (base, _) = mapping.window.physical_range();
         let offset = physical - base;
-        let expected = u32::from(info.vendor_id) | (u32::from(info.device_id) << 16);
-        if region.read32(offset) != Ok(expected) {
+        // Keep the cross-check independent of the newly selected native transport:
+        // `inventory` itself now comes from ECAM, so comparing it only to ECAM
+        // would be circular and would no longer prove PCI-018's legacy equivalence.
+        let expected = LegacyPorts.read_u32(info.bdf, 0);
+        let discovered = u32::from(info.vendor_id) | (u32::from(info.device_id) << 16);
+        if expected != discovered || region.read32(offset) != Ok(expected) {
             refused += 1;
             continue;
         }
