@@ -11,15 +11,16 @@
 //! writes dwords through the legacy mechanism (`0xCF8` address, `0xCFC` data). Everything else
 //! is written against that trait, so a test can model a whole machine in a few lines.
 //!
-//! Scope of this module: legacy configuration access, and the MSI and MSI-X rules in [`msi`].
-//! PCIe extended configuration space (offsets 0x100 and up, via MMCONFIG/ECAM) is later M9 work
-//! and is not claimed here. The kernel programs the registers and table the rules describe.
+//! Scope: legacy configuration access, MSI/MSI-X rules in [`msi`], and validated PCIe
+//! ECAM address calculations in [`ecam`]. The kernel still uses legacy configuration
+//! ports for drivers, with a read-only ECAM boot probe using MCFG discovery.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+pub mod ecam;
 pub mod msi;
 
 /// I/O port holding the configuration address register.

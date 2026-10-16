@@ -688,7 +688,31 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   operation runs the bring-up. BLK-034 is `tested-T2` (run [38704280940](https://github.com/NeXuS4Dev/NOLX/actions/runs/38704280940)).
   Not yet done: interrupts, and the storage paths for sleep states.
 
-Not yet done: PCIe ECAM, MSI/MSI-X in the other drivers (NVMe uses MSI-X, see below), and every driver below.
+### M9 continuation — 2026-10-16: ECAM address groundwork
+
+`crates/nolx-pci-core/src/ecam.rs` now models a validated MCFG allocation and
+resolves byte/word/dword accesses across the full 4 KiB function space. It checks
+segment and bus membership, device/function bounds, alignment, and physical-address
+overflow. Nonzero starting buses retain the bus-zero-relative MCFG base. Five unit
+tests cover those rules, including an exhaustive function-page uniqueness check.
+These tests have **not been executed here**: this sandbox has no Rust toolchain.
+PCI-014 to PCI-016 are therefore only `implemented`, not `tested-T1`.
+
+Continuation in the same session: `nolx-hal-core::acpi::mcfg` now parses checksummed
+MCFG tables with a 32-allocation capacity, rejecting malformed records, bus overlaps
+and physical aliases. ACPI discovery retains the validated table. The PCI boot report
+now maps individual segment-zero function pages uncached, compares their identities
+to legacy discovery, and reads offset 0x100. Drivers still use legacy configuration
+ports for all writes; absent/refused MCFG mappings leave that behavior unchanged.
+`check-pci-ecam.sh` adds Q35 identity/extended-header checks and an i440FX fallback
+boot to CI. PCI-017 is `implemented`; PCI-018 is `pending-T2`. Neither the new Rust
+tests nor these QEMU boots have been run in this sandbox (Rust and QEMU are absent).
+
+Next: run formatting, host tests for `nolx-pci-core` and `nolx-hal-core`, the kernel
+build, and `scripts/check-pci-ecam.sh`. Only then promote the assertions. Full ECAM
+transport selection for drivers and multi-segment enumeration remain future work.
+
+Not yet done: PCIe ECAM kernel access, MSI/MSI-X in the other drivers (NVMe uses MSI-X, see below), and every driver below.
 
 - PCI/PCIe enumeration, BAR assignment, MSI/MSI-X, capability walking.
 - Storage: AHCI (SATA), NVMe, virtio-blk; block layer with partitions (GPT), request

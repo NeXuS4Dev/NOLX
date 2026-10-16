@@ -3,6 +3,8 @@
 //! The kernel owns the physical-memory reads. This module only validates byte slices, so
 //! firmware-table layouts and malformed-input handling can be exercised by host tests.
 
+pub mod mcfg;
+
 const SDT_HEADER_LEN: usize = 36;
 const RSDP_V1_LEN: usize = 20;
 const RSDP_V2_MIN_LEN: usize = 36;
@@ -33,7 +35,7 @@ pub enum AcpiError {
     InvalidLength,
     /// A variable-length MADT entry was malformed.
     InvalidEntry,
-    /// A parsed MADT exceeded a fixed-capacity record array.
+    /// A parsed firmware table exceeded a fixed-capacity record array.
     TooManyEntries,
     /// The supplied SDT was not an RSDT or XSDT.
     NotRootTable,

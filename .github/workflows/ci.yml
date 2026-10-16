@@ -613,6 +613,9 @@ jobs:
               raise SystemExit("wall clock did not advance from its RTC/monotonic anchor")
           PY
 
+      - name: Exercise PCIe ECAM and legacy-only configuration
+        run: scripts/check-pci-ecam.sh 2>&1 | tee -a /tmp/job.log
+
       - name: Exercise the PIC/PIT fallback without local APIC support
         run: scripts/check-hal-pit-fallback.sh 2>&1 | tee -a /tmp/job.log
 
@@ -643,6 +646,7 @@ jobs:
           path: |
             build/serial.log
             build/hal-*.serial.log
+            build/pci-*.serial.log
       # Posted on success as well as failure. The artifact above is the archive of
       # record, but it is not reachable from everywhere this project is developed; the
       # comment is.
