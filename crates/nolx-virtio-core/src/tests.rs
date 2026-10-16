@@ -406,4 +406,3 @@ fn the_queue_msix_vector_sits_between_the_queue_size_and_the_enable_flag() {
     assert_eq!(common::QUEUE_MSIX_VECTOR, common::QUEUE_SIZE + 2);
     assert_eq!(common::QUEUE_ENABLE, common::QUEUE_MSIX_VECTOR + 2);
 }
-

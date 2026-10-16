@@ -93,7 +93,11 @@ pub fn enable(bdf: Bdf, bars: &BarSet, entry: u16, vector: u8) -> Result<(), Err
 
     // Enable MSI-X with the whole function unmasked, keeping the rest of the header dword.
     let enabled = msi::msix_enable(control);
-    LegacyPorts.write_u32(bdf, cap.offset, (u32::from(enabled) << 16) | (header & 0xFFFF));
+    LegacyPorts.write_u32(
+        bdf,
+        cap.offset,
+        (u32::from(enabled) << 16) | (header & 0xFFFF),
+    );
     Ok(())
 }
 
