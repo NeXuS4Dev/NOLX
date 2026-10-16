@@ -14,13 +14,26 @@ M9 to the already implemented boot probes. Check items only with executable evid
       prove per-request interrupt delivery and on-disk checksums.
 - [ ] Complete network-device interrupt routing (82540EM lacks MSI; use its supported
       INTx path or explicitly add an MSI-capable adapter, rather than claiming unsupported MSI).
+- [ ] Assign unconfigured BARs and bridge resource windows without overlaps, rather than
+      depending exclusively on firmware-assigned addresses.
+- [ ] Bind supported devices beyond the current one-device, segment-zero boot probes.
 - [ ] Finish driver lifecycle/resource ownership beyond one-shot framework boot callbacks.
+
+## Storage integration
+
+- [ ] Run file-level format/write/commit/remount/read/checksum tests through **each**
+      storage backend. Current AHCI/NVMe jobs verify sectors; the NOLXFS volume adapter
+      and persisted file test still use virtio only. Sector checksums are not a substitute
+      for the roadmap's written-file requirement.
+- [ ] Preserve per-device queues and merging when generic filesystem I/O reaches AHCI/NVMe.
 
 ## Input
 
 - [x] PS/2 controller initialization, keyboard and mouse IRQ paths.
 - [ ] xHCI command/event/transfer rings, slots, addressing and device enumeration.
 - [ ] HID boot keyboard/mouse reports delivered to bounded input event objects.
+- [ ] USB disconnect/hotplug cleanup and endpoint/ring ownership; do not leak controller
+      resources or leave DMA active after device removal.
 - [x] Inject PS/2 keyboard/mouse events under QEMU and assert delivered event contents.
       USB injection remains part of the unchecked HID/xHCI gates above.
 
@@ -66,7 +79,8 @@ self-test peer; this is not a configurable IP/socket stack. Input FIFO delivery 
 but HID enumeration and public input-device objects remain open. Driver registries still
 use one-shot boot callbacks rather than a persistent system-wide lifecycle.
 
-Follow-up adds an AHCI no-local-APIC polling fallback plus a PIC/PIT disk checksum test;
-its evidence is tracked separately as AHCI-013. The old PCI-014…018 checkpoint alone
+The AHCI no-local-APIC polling fallback plus PIC/PIT disk checksum test is also verified:
+run [38954085871](https://github.com/NeXuS4Dev/NOLX/actions/runs/38954085871) on `c8431f0`
+passed all nine jobs; AHCI-013 is `tested-T2`. The old PCI-014…018 checkpoint alone
 was read-only; the checked transport gates above are backed by the new tests, not that
 older evidence. **Do not mark M9 done from this partial gate list.**

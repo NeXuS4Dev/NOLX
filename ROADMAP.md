@@ -745,7 +745,9 @@ unfinished work rather than treating green existing tests as proof of completion
 - AHCI programs a single MSI on vector 0x52. The handler acknowledges port/HBA causes
   before APIC EOI; all three disk commands prove interrupt delivery and retain on-disk
   checksum verification. A follow-up preserves polling when no local APIC exists and
-  adds an AHCI disk to the PIC/PIT fallback boot (AHCI-013).
+  adds an AHCI disk to the PIC/PIT fallback boot (AHCI-013, `tested-T2` in run
+  [38954085871](https://github.com/NeXuS4Dev/NOLX/actions/runs/38954085871) on `c8431f0`,
+  all nine jobs passed).
 - e1000 retains RX buffers in a fixed array, enables its supported active-low/level INTx
   route, acknowledges ICR and recycles descriptors into a bounded FIFO without allocating
   or printing in the ISR. A real ARP request/reply with QEMU's user-network gateway checks
@@ -765,8 +767,10 @@ An initial workflow scalar quoting error was fixed. Another run found the RX own
 vector retained 64 heap bytes, violating the existing heap self-test baseline; replacing it
 with a fixed array removed the allocation. The heap assertion was not weakened.
 
-Not yet done: xHCI enumeration and HID transfer paths, virtio-net, AML namespace/method
-execution and resource-driven routing, S3/S5 and driver power/lifecycle integration.
+Not yet done: unassigned BAR/bridge resource allocation, persistent/multi-device binding,
+file-level NOLXFS verification through AHCI/NVMe (currently virtio-only), xHCI enumeration
+and HID transfer/hotplug paths, virtio-net, AML namespace/method execution and
+resource-driven routing, S3/S5 and driver power/lifecycle integration.
 The complete unchecked gates remain in the linked checklist.
 
 - PCI/PCIe enumeration, BAR assignment, MSI/MSI-X, capability walking.

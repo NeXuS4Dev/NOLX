@@ -12,18 +12,18 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 |---|---|---|
 | `unimplemented` | 0 | 100.0% |
 | `implemented` | 5 | 100.0% |
-| `tested-T1` | 240 | 98.1% |
-| `pending-T2` | 1 | — |
-| `tested-T2` | 67 | 21.4% |
+| `tested-T1` | 240 | 98.4% |
+| `pending-T2` | 0 | — |
+| `tested-T2` | 68 | 21.7% |
 | `tested-T3` | 0 | 0.0% |
 
-**307 of 313 assertions have a passing automated test; 1 are awaiting T2 results.**
+**308 of 313 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
 | Area | Assertions | Implemented | Tested (T1) | Pending (T2) | Tested (T2) | Tested (T3) |
 |---|---|---|---|---|---|---|
-| ahci | 13 | 13 | 8 | 1 | 4 | 0 |
+| ahci | 13 | 13 | 8 | 0 | 5 | 0 |
 | blk | 36 | 36 | 27 | 0 | 8 | 0 |
 | df | 7 | 7 | 7 | 0 | 0 | 0 |
 | drv | 21 | 21 | 16 | 0 | 5 | 0 |
@@ -57,11 +57,9 @@ None.
 | HAL-020 | HPET clocksource: 32-bit MMIO reads and wrap extension produce monotonic nanoseconds |
 | HAL-021 | I/O APIC routes: GSI windows and ISA overrides are validated, redirections start masked, and NMI sources use MADT polarity/trigger flags |
 
-## Pending T2 verification (1)
+## Pending T2 verification (0)
 
-| ID | Specification reference | Configured test |
-|---|---|---|
-| AHCI-013 | NOLX M9 AHCI no-APIC fallback: keep HBA/port interrupt enables clear and finish checksummed disk reads/writes through polling while PIC/PIT delivers timer ticks | scripts/check-hal-pit-fallback.sh boots an AHCI disk with `-cpu qemu64,-apic`, asserts fallback/start markers and checksums the written sectors after QEMU exits |
+None.
 
 ## All assertions
 
@@ -79,7 +77,7 @@ None.
 | AHCI-010 | ahci | NOLX M9 Write command FIS: WRITE DMA EXT uses command 0x35 with the same 48-bit address and sector-count layout as READ DMA EXT, and only the command byte differs | `tested-T1` | nolx-ahci-core tests::write_dma_ext_fis_names_the_write_command_and_the_same_address_layout |
 | AHCI-011 | ahci | NOLX M9 Polled round trip: a 2 KiB pattern is written to sectors 1600 to 1603 through command slot 0, the buffer is cleared, the sectors are read back, and the bytes are checked by CRC-32; CI checksums the same sectors in the SATA disk copy after QEMU exits | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `ahci: wrote 4 sectors at 1600, read back, crc32 0x... matches the written data` and the step "The AHCI written sectors are on the SATA disk copy" checks the copy; kernel/src/hal/ahci.rs bring_up and transfer; workflow [38523473276](https://github.com/NeXuS4Dev/NOLX/actions/runs/38523473276) passed all six jobs. |
 | AHCI-012 | ahci | NOLX M9 AHCI MSI completion: port D2H register-FIS causes and HBA causes are acknowledged before APIC EOI; every disk command waits for its completion interrupt | `tested-T2` | boot-smoke and storage-backends require `ahci: MSI completion interrupts: 3 of 3 commands, vector 0x52`, plus persistent disk checksums; CI run [38953420334](https://github.com/NeXuS4Dev/NOLX/actions/runs/38953420334) on `492d7a5` passed all nine jobs |
-| AHCI-013 | ahci | NOLX M9 AHCI no-APIC fallback: keep HBA/port interrupt enables clear and finish checksummed disk reads/writes through polling while PIC/PIT delivers timer ticks | `pending-T2` | scripts/check-hal-pit-fallback.sh boots an AHCI disk with `-cpu qemu64,-apic`, asserts fallback/start markers and checksums the written sectors after QEMU exits |
+| AHCI-013 | ahci | NOLX M9 AHCI no-APIC fallback: keep HBA/port interrupt enables clear and finish checksummed disk reads/writes through polling while PIC/PIT delivers timer ticks | `tested-T2` | scripts/check-hal-pit-fallback.sh boots an AHCI disk with `-cpu qemu64,-apic`, asserts fallback/start markers and checksums the written sectors after QEMU exits; CI run [38954085871](https://github.com/NeXuS4Dev/NOLX/actions/runs/38954085871) on `c8431f0` passed all nine jobs |
 | BLK-001 | blk | NOLX M9 GPT: CRC-32 is the IEEE form whose check value for `123456789` is `0xCBF43926` | `tested-T1` | nolx-block-core tests::crc32_matches_the_standard_check_value |
 | BLK-002 | blk | NOLX M9 GPT: A primary header in LBA 1 with the signature `EFI PART`, revision 1.0, a valid header CRC over its bytes with the CRC field zeroed, and a matching own-LBA field is read, and its fields are reported as stored | `tested-T1` | nolx-block-core tests::a_valid_primary_header_is_read |
 | BLK-003 | blk | NOLX M9 GPT: The backup header at the last LBA is read against its own LBA, and the table it names passes its CRC | `tested-T1` | nolx-block-core tests::the_backup_header_is_read_at_its_own_lba_and_its_table_verifies |
