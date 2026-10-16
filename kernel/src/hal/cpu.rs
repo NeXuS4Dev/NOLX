@@ -258,8 +258,9 @@ impl InterruptGuard {
         self.enabled = false;
         // SAFETY: ring-0 caller holds IF clear through this guard and promises an
         // armed interrupt source. STI's interrupt shadow covers the adjacent HLT.
-        // The consumed guard must not restore IF a second time on return.
-        unsafe { asm!("sti", "hlt", options(nomem, nostack)) };
+        // The consumed guard must not restore IF a second time on return. Keep
+        // the compiler memory clobber so protected writes precede the wakeup.
+        unsafe { asm!("sti", "hlt", options(nostack)) };
     }
 }
 
