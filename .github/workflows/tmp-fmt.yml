@@ -1,6 +1,8 @@
 name: tmp-fmt
 on:
-  workflow_dispatch:
+  push:
+    branches: [arena/d71a2d5c-nolx]
+    paths: ['.github/workflows/tmp-fmt.yml']
 permissions:
   contents: write
 jobs:
