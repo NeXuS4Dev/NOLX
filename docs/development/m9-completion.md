@@ -224,3 +224,10 @@ missing invariants; conformance 324 assertions / zero problems. All six lifecycl
 six native virtio-net configurations, three independent filesystem backends, host mounts,
 reboots and nine malformed-media refusals passed. Lifecycle storage cycles additionally prove
 that malformed, out-of-capacity and overflowing retained requests dispatch zero commands.
+
+CI run [38968513895](https://github.com/NeXuS4Dev/NOLX/actions/runs/38968513895) on
+`66c5d8e` passed **all twelve jobs**, including the new six-fixture lifecycle job, complete
+boot smoke, three storage persistence/corruption jobs, native virtio-net and actual S5/refusal.
+DF-008/009 record only the newly proven healthy native lifecycle/reentry properties as T2;
+DF-010 records stable identity as T1. The updated database has 327 assertions / zero problems.
+No PR was opened; the full lifecycle and M9 completion gates remain unchecked as described above.
