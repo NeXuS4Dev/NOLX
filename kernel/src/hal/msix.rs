@@ -17,7 +17,7 @@ use crate::mm::PAGE_SHIFT;
 
 /// The page size the table's window is rounded to.
 const PAGE: u64 = 1 << PAGE_SHIFT;
-/// The most polls a wait for a delivery makes before it gives up.
+/// Clockless fallback ceiling; with HPET also allow asynchronous delivery up to two seconds.
 const WAIT_LIMIT: u32 = 1_000_000;
 
 /// Why MSI-X could not be set up for a function.
@@ -121,10 +121,26 @@ pub fn wait_for_interrupts(counter: &AtomicUsize, expected: usize) -> usize {
     // SAFETY: `sti` sets IF and changes nothing else. The IDT, the local APIC, and the driver's
     // vector are installed before the drivers run.
     unsafe { asm!("sti", options(nomem, nostack)) };
-    let mut spins = 0u32;
-    while counter.load(Ordering::Acquire) < expected && spins < WAIT_LIMIT {
+    let clock = super::hpet::counter().zip(super::hpet::frequency_hz());
+    for spins in 0..WAIT_LIMIT * 100 {
+        if counter.load(Ordering::Acquire) >= expected {
+            break;
+        }
+        // Interrupt delivery is asynchronous with the device's completion-memory write.
+        // A CPU-speed-only spin budget can expire under host scheduling pressure even
+        // though the command completed successfully. Retain a hard bound in every case.
+        if spins % 1024 == 0 {
+            match (clock, super::hpet::counter()) {
+                (Some((start, frequency)), Some(now)) => {
+                    if super::hpet::elapsed_ticks(start, now) >= frequency.saturating_mul(2) {
+                        break;
+                    }
+                }
+                _ if spins >= WAIT_LIMIT => break,
+                _ => {}
+            }
+        }
         core::hint::spin_loop();
-        spins += 1;
     }
     if !was_enabled {
         // SAFETY: `cli` clears IF, which it was clear before this call.

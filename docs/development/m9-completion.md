@@ -103,7 +103,7 @@ Nine new portable tests cover partition bounds/overflow, block mapping, error pr
 cache-flush forwarding, ATA identification, and native flush request encodings.
 
 This closes the filesystem-test gap, **not the milestone**. Persistent controller lifecycle,
-multi-device binding, BAR allocation, USB HID, virtio-net, AML and power remain open.
+multi-device binding, BAR allocation, USB HID, AML and power remain open.
 CI now applies the file, host-mount, reboot and malformed-media checks to every storage
 backend. Do not treat a local result as a CI result; final CI evidence is recorded separately.
 
@@ -130,3 +130,16 @@ is configured; its result must be recorded before promoting the new network asse
 
 The public frame operations are an interface-driver transport, not a POSIX socket/IP stack.
 The shared persistent framework lifecycle and multi-adapter/segment binding gates remain open.
+
+Native virtio-net CI run [38960237622](https://github.com/NeXuS4Dev/NOLX/actions/runs/38960237622) on `bebe438` passed **all ten jobs**.
+The stricter network test on `1cdc218` additionally waits for the complete memory selftests
+and requires the unchanged `in use 0 -> 0 bytes, integrity ok` heap assertion; all six
+network boots passed locally and in that run's network job. NET-015/016 are `tested-T2`.
+Both overlapping host test commands now pass 688 tests each, with zero failures.
+
+A later `1cdc218` NVMe matrix boot failed during filesystem reads under CI load; the
+filesystem boundary previously collapsed all native failures into `Io(5)`. The investigation
+now preserves NVMe timeout/interrupt/status/identifier categories and changes the shared
+completion-interrupt wait from a CPU-speed-only spin count to a bounded two-second HPET
+budget (still with a hard iteration ceiling and clockless fallback). Per-command interrupt
+assertions remain mandatory. Full CI must pass again before treating this as verified.

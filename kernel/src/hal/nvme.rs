@@ -575,6 +575,18 @@ struct Disk {
     data: Dma,
     cid: u16,
 }
+/// Preserve useful controller failure classes across the filesystem's device-error boundary.
+fn filesystem_io_error(error: Failure) -> nolxfs::DevError {
+    let status = match error {
+        Failure::Timeout(_) => 110,
+        Failure::Interrupts { .. } => 4,
+        Failure::Identifier => 71,
+        Failure::Status(status) => 0x10000 | u32::from(status),
+        Failure::Queue(_) => 16,
+        _ => 5,
+    };
+    nolxfs::DevError::Io(status)
+}
 impl Disk {
     fn transfer(&mut self, write: bool, lba: u64, len: usize) -> Result<(), nolxfs::DevError> {
         let sectors = (len / 512) as u16;
@@ -596,16 +608,16 @@ impl Disk {
             lba,
             sectors: u32::from(sectors),
         };
-        execute_io(&self.regs, &mut self.io, &command, request).map_err(|_| nolxfs::DevError::Io(5))
+        execute_io(&self.regs, &mut self.io, &command, request).map_err(filesystem_io_error)
     }
 }
 impl super::storage_volume::SectorDisk for Disk {
     fn flush(&mut self) -> Result<(), nolxfs::DevError> {
         let command = nvme::flush(next_cid(&mut self.cid), NSID);
         let expected = IO_SUBMITTED.fetch_add(1, Ordering::Relaxed) + 1;
-        execute(&self.regs, &mut self.io, &command).map_err(|_| nolxfs::DevError::Io(5))?;
+        execute(&self.regs, &mut self.io, &command).map_err(filesystem_io_error)?;
         if msix::wait_for_interrupts(&COMPLETION_INTERRUPTS, expected) < expected {
-            return Err(nolxfs::DevError::Io(5));
+            return Err(nolxfs::DevError::Io(4));
         }
         Ok(())
     }

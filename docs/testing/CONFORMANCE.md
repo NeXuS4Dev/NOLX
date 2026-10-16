@@ -12,12 +12,12 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 |---|---|---|
 | `unimplemented` | 0 | 100.0% |
 | `implemented` | 5 | 100.0% |
-| `tested-T1` | 243 | 97.8% |
-| `pending-T2` | 2 | — |
-| `tested-T2` | 70 | 21.9% |
+| `tested-T1` | 243 | 98.4% |
+| `pending-T2` | 0 | — |
+| `tested-T2` | 72 | 22.5% |
 | `tested-T3` | 0 | 0.0% |
 
-**313 of 320 assertions have a passing automated test; 2 are awaiting T2 results.**
+**315 of 320 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
@@ -33,7 +33,7 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | hal | 25 | 25 | 11 | 0 | 10 | 0 |
 | io | 5 | 5 | 4 | 0 | 1 | 0 |
 | mm | 34 | 34 | 23 | 0 | 11 | 0 |
-| net | 11 | 11 | 9 | 2 | 0 | 0 |
+| net | 11 | 11 | 9 | 0 | 2 | 0 |
 | nvme | 13 | 13 | 9 | 0 | 4 | 0 |
 | nxfs | 15 | 15 | 14 | 0 | 1 | 0 |
 | obj | 14 | 14 | 9 | 0 | 5 | 0 |
@@ -57,12 +57,9 @@ None.
 | HAL-020 | HPET clocksource: 32-bit MMIO reads and wrap extension produce monotonic nanoseconds |
 | HAL-021 | I/O APIC routes: GSI windows and ISA overrides are validated, redirections start masked, and NMI sources use MADT polarity/trigger flags |
 
-## Pending T2 verification (2)
+## Pending T2 verification (0)
 
-| ID | Specification reference | Configured test |
-|---|---|---|
-| NET-015 | NOLX M9 Native virtio-net queues and MSI-X: bind through nolx-df, retain RX/TX queues and DMA, recycle receive descriptors, and take two RX and two TX completion interrupts on separate vectors | scripts/check-virtio-net.py; local QEMU 11.0.2 passes transitional/modern-only on pc/Q35, absent/no-APIC cases; dedicated virtio-network CI job configured |
-| NET-016 | NOLX M9 Real network bytes: capture two exact transmitted Ethernet ARP requests and two externally supplied gateway replies independently on the host | scripts/check-virtio-net.py parses QEMU filter-dump pcap and compares source/destination MACs, protocol fields and IPv4 addresses; local QEMU passes, CI evidence pending |
+None.
 
 ## All assertions
 
@@ -242,8 +239,8 @@ None.
 | NET-007 | net | NOLX M9 ARP reachability: minimum Ethernet ARP requests use network byte order and valid replies must match hardware/protocol/opcode, both MACs and both IPv4 endpoints; malformed or unrelated packets are refused | `tested-T1` | nolx-net-core arp::tests (local Rust 1.88: 3 passed) |
 | NET-008 | net | NOLX M9 receive queue: bounded FIFO copies frames, preserves order across wrap, refuses overflow without overwriting unread packets, validates frame sizes and handles zero capacity | `tested-T1` | nolx-net-core queue::tests (local Rust 1.88: 2 passed) |
 | NET-014 | net | NOLX M9 Modern virtio-net transport: negotiate VERSION_1 and MAC only; refuse unavailable MAC/modern transport, offload flags, oversized/truncated frames and multi-buffer RX headers | `tested-T1` | nolx-virtio-core net::tests, passed locally with Rust 1.88.0 on 2026-10-16 |
-| NET-015 | net | NOLX M9 Native virtio-net queues and MSI-X: bind through nolx-df, retain RX/TX queues and DMA, recycle receive descriptors, and take two RX and two TX completion interrupts on separate vectors | `pending-T2` | scripts/check-virtio-net.py; local QEMU 11.0.2 passes transitional/modern-only on pc/Q35, absent/no-APIC cases; dedicated virtio-network CI job configured |
-| NET-016 | net | NOLX M9 Real network bytes: capture two exact transmitted Ethernet ARP requests and two externally supplied gateway replies independently on the host | `pending-T2` | scripts/check-virtio-net.py parses QEMU filter-dump pcap and compares source/destination MACs, protocol fields and IPv4 addresses; local QEMU passes, CI evidence pending |
+| NET-015 | net | NOLX M9 Native virtio-net queues and MSI-X: bind through nolx-df, retain RX/TX queues and DMA, recycle receive descriptors, and take two RX and two TX completion interrupts on separate vectors | `tested-T2` | scripts/check-virtio-net.py; CI run [38960237622](https://github.com/NeXuS4Dev/NOLX/actions/runs/38960237622) on bebe438 passed all ten jobs; stricter complete-memory/zero-heap-leak assertions also passed in the network job on 1cdc218 |
+| NET-016 | net | NOLX M9 Real network bytes: capture two exact transmitted Ethernet ARP requests and two externally supplied gateway replies independently on the host | `tested-T2` | scripts/check-virtio-net.py parses QEMU filter-dump pcap and compares source/destination MACs, protocol fields and IPv4 addresses; CI run [38960237622](https://github.com/NeXuS4Dev/NOLX/actions/runs/38960237622) passed the hardware job on pc/Q35, modern/transitional, absent/no-APIC variants |
 | NIC-001 | e1000 | NOLX M9 Register map and device identity: the control, status, interrupt, receive and transmit ring, and receive address registers sit at their offsets, and the device is the 82540EM (8086:100E) | `tested-T1` | nolx-e1000-core tests::the_register_offsets_are_the_e1000_map |
 | NIC-002 | e1000 | NOLX M9 EEPROM and MAC address: an EEPROM read names its word and returns data only once done; the MAC address is three little-endian words, and the receive address registers hold it with the valid bit | `tested-T1` | nolx-e1000-core tests::an_eeprom_read_names_its_word_and_returns_data_once_done, tests::the_mac_address_comes_from_three_little_endian_words, tests::the_receive_address_registers_hold_the_mac_with_the_valid_bit |
 | NIC-003 | e1000 | NOLX M9 Ring sizing: a ring is a multiple of eight descriptors between 8 and 4096, so its byte length is aligned to 128; other counts are refused | `tested-T1` | nolx-e1000-core tests::a_ring_is_a_multiple_of_eight_descriptors_within_the_limits |
