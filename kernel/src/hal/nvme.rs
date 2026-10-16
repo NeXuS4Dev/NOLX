@@ -13,23 +13,21 @@
 
 use super::blockdev;
 use super::driver_start::{self, Log};
+use super::msix;
 use nolx_block_core::devices::QueueError;
 use nolx_block_core::queue::{Direction, Request};
 use nolx_df_core::{DeviceId, Dispatch, Driver, Match, Registry};
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
 use nolx_nvme_core::{self as nvme, Sqe};
-use nolx_pci_core::{msi, Bar, Bdf, ConfigSpace};
+use nolx_pci_core::{Bar, Bdf, ConfigSpace};
 use nolx_virtio_core::crc32;
 
-use super::apic;
-use super::cpu::interrupts_enabled;
 use super::dma::Dma;
 use super::pci::LegacyPorts;
 use super::virtio_blk::fill_pattern;
 use crate::mm::mmio::{self, Region};
 use crate::sync::IrqMutex;
-use core::arch::asm;
 use core::sync::atomic::{fence, AtomicUsize, Ordering};
 
 /// NVMe class code: mass storage, non-volatile memory, NVM Express interface.
@@ -109,10 +107,8 @@ pub enum Failure {
     Pattern,
     /// The round trip read back different bytes from the ones written.
     RoundTrip,
-    /// The controller has no MSI-X capability.
-    NoMsix,
-    /// The MSI-X table or pending-bit array is not in BAR 0 inside the mapped registers.
-    MsixLayout,
+    /// MSI-X could not be set up for the controller.
+    Msix(msix::Error),
     /// Fewer completion interrupts arrived than I/O commands were submitted.
     Interrupts {
         /// Completion interrupts that arrived.
@@ -302,7 +298,7 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     // One I/O queue pair: the completion queue first, since the submission queue names it.
     let io_cq = Dma::new().ok_or(Failure::Memory)?;
     let io_sq = Dma::new().ok_or(Failure::Memory)?;
-    enable_msix(&regs, bdf)?;
+    msix::enable(bdf, &bars, MSIX_ENTRY, COMPLETION_VECTOR)?;
     let command = nvme::create_io_cq_msix(
         next_cid(&mut cid),
         IO_QUEUE,
@@ -407,61 +403,9 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     Ok(())
 }
 
-/// Enable MSI-X on the controller and program the I/O queue's table entry: the message goes to this
-/// processor's local APIC carrying [`COMPLETION_VECTOR`]. Entry 0 is left masked.
-fn enable_msix(regs: &Region, bdf: Bdf) -> Result<(), Failure> {
-    let list = nolx_pci_core::capabilities(&mut LegacyPorts, bdf);
-    let cap = list.find(msi::CAP_MSI_X).ok_or(Failure::NoMsix)?;
-    let header = LegacyPorts.read_u32(bdf, cap.offset);
-    let table = LegacyPorts.read_u32(bdf, cap.offset + 4);
-    let pba = LegacyPorts.read_u32(bdf, cap.offset + 8);
-    let control = (header >> 16) as u16;
-    let msix = msi::parse_msix(control, table, pba);
-    if msix.table_bar != 0 || msix.pba_bar != 0 || !msi::msix_fits(&msix, REGISTERS_BYTES) {
-        return Err(Failure::MsixLayout);
-    }
-
-    let apic_id = u8::try_from(apic::current_apic_id()).map_err(|_| Failure::Encoding)?;
-    let address = u64::from(msi::message_address(apic_id));
-    let entry = msi::msix_entry(address, COMPLETION_VECTOR, false).ok_or(Failure::Encoding)?;
-    let at = u64::from(msix.table_offset) + u64::from(MSIX_ENTRY) * msi::MSIX_ENTRY_BYTES;
-    for (index, word) in entry.chunks_exact(4).enumerate() {
-        let value = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
-        regs.write32(at + 4 * index as u64, value)?;
-    }
-
-    // Enable MSI-X with the whole function unmasked, keeping the rest of the header dword.
-    let enabled = msi::msix_enable(control);
-    LegacyPorts.write_u32(
-        bdf,
-        cap.offset,
-        (u32::from(enabled) << 16) | (header & 0xFFFF),
-    );
-    Ok(())
-}
-
 /// Count one completion interrupt. Called from the interrupt handler on [`COMPLETION_VECTOR`].
 pub fn on_completion_interrupt() {
     COMPLETION_INTERRUPTS.fetch_add(1, Ordering::Release);
-}
-
-/// Let completion interrupts through: they stay pending while IF is clear. Waits until `expected`
-/// have arrived or the bounded wait runs out, restores IF, and returns how many arrived.
-fn wait_for_completions(expected: usize) -> usize {
-    let was_enabled = interrupts_enabled();
-    // SAFETY: `sti` sets IF and changes nothing else. The IDT, the local APIC, and the completion
-    // vector are installed before the drivers run.
-    unsafe { asm!("sti", options(nomem, nostack)) };
-    let mut spins = 0u32;
-    while COMPLETION_INTERRUPTS.load(Ordering::Acquire) < expected && spins < POLL_LIMIT {
-        core::hint::spin_loop();
-        spins += 1;
-    }
-    if !was_enabled {
-        // SAFETY: `cli` clears IF, which it was clear before this call.
-        unsafe { asm!("cli", options(nomem, nostack)) };
-    }
-    COMPLETION_INTERRUPTS.load(Ordering::Acquire)
 }
 
 /// Submit `command` on `queue`, ring its doorbell, and wait for its completion. The command's
@@ -508,8 +452,6 @@ fn execute(regs: &Region, queue: &mut Queue, command: &Sqe) -> Result<(), Failur
     }
 }
 
-/// The next command identifier. The driver has one command outstanding, so identifiers only need
-/// to differ from the last one.
 /// Run one I/O command on the I/O queue, through the block queue.
 fn execute_io(
     regs: &Region,
@@ -522,7 +464,7 @@ fn execute_io(
         execute(regs, queue, command)?;
         // Take this command's interrupt before the next command is submitted. The local APIC
         // keeps one pending bit per vector, so interrupts that queue up unserviced merge.
-        let delivered = wait_for_completions(submitted);
+        let delivered = msix::wait_for_interrupts(&COMPLETION_INTERRUPTS, submitted);
         if delivered < submitted {
             return Err(Failure::Interrupts {
                 delivered,
@@ -533,6 +475,8 @@ fn execute_io(
     })
 }
 
+/// The next command identifier. The driver has one command outstanding, so identifiers only need
+/// to differ from the last one.
 fn next_cid(counter: &mut u16) -> u16 {
     let cid = *counter;
     *counter = counter.wrapping_add(1);
@@ -605,5 +549,11 @@ fn poll(
 impl From<QueueError> for Failure {
     fn from(error: QueueError) -> Self {
         Self::Queue(error)
+    }
+}
+
+impl From<msix::Error> for Failure {
+    fn from(error: msix::Error) -> Self {
+        Self::Msix(error)
     }
 }

@@ -519,6 +519,11 @@ jobs:
             echo "the NVMe completions did not arrive as MSI-X interrupts, one per command"
             exit 1
           fi
+          # virtio-blk completions arrive as MSI-X interrupts on vector 0x51, one per request.
+          if ! grep -Eq 'virtio-blk: msi-x completion interrupts: ([1-9][0-9]*) of \1 requests, vector 0x51' build/serial.log; then
+            echo "the virtio-blk completions did not arrive as MSI-X interrupts, one per request"
+            exit 1
+          fi
           if ! grep -Eq 'nvme: wrote 4 sectors at 1600, read back, crc32 0x[0-9a-f]{8} matches the written data' build/serial.log; then
             echo "the NVMe round trip did not verify"
             exit 1

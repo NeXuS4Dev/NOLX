@@ -23,6 +23,7 @@ pub mod hpet;
 pub mod interrupts;
 pub mod ioapic;
 pub mod multiboot;
+pub mod msix;
 pub mod nvme;
 pub mod pci;
 pub mod pic;

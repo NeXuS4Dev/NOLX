@@ -400,3 +400,10 @@ fn crc32_matches_the_standard_check_value() {
     assert_eq!(crc32(b""), 0);
     assert_ne!(crc32(b"abc"), crc32(b"abd"), "a one-bit change is seen");
 }
+
+#[test]
+fn the_queue_msix_vector_sits_between_the_queue_size_and_the_enable_flag() {
+    assert_eq!(common::QUEUE_MSIX_VECTOR, common::QUEUE_SIZE + 2);
+    assert_eq!(common::QUEUE_ENABLE, common::QUEUE_MSIX_VECTOR + 2);
+}
+

@@ -49,5 +49,6 @@ BLK-034 | NOLX M9 Storage drivers in the framework: the virtio-blk, AHCI, and NV
 
 BLK-034 is `tested-T2`: the boot-smoke markers passed in CI (workflow 38704280940).
 BLK-035 | NOLX M9 Storage backends at T2: the kernel boots to its end with virtio-blk, AHCI, or NVMe as the only storage the kernel can find; the driver binds through nolx-df, the other two controllers are absent, the written sectors are checksummed by the kernel and the same sectors of the disk image match; the NOLXFS file check applies to the virtio backend | tested-T2 | `.github/workflows/ci.yml` job `storage-backends` (matrix virtio, ahci, nvme)
+BLK-036 | NOLX M9 virtio-blk completions by MSI-X: the device's queue_msix_vector is set to table entry 1 and read back before the queue is enabled; each request's completion arrives as an interrupt on vector 0x51, and the driver takes that interrupt before it submits the next request, so the boot prints as many interrupts as requests | implemented | `.github/workflows/ci.yml` boot-smoke asserts `virtio-blk: msi-x completion interrupts: N of N requests, vector 0x51`; kernel/src/hal/virtio_blk.rs issue
 
 BLK-035 is `tested-T2`: the three single-backend boots passed in CI (workflow 38884801713).

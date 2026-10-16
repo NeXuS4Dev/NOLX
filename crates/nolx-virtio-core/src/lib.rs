@@ -80,6 +80,9 @@ pub mod common {
     pub const QUEUE_SELECT: u8 = 22;
     /// `queue_size` of the selected queue, 16 bits.
     pub const QUEUE_SIZE: u8 = 24;
+    /// `queue_msix_vector` of the selected queue, 16 bits: the MSI-X table entry the queue's
+    /// interrupts use, or `0xFFFF` for none.
+    pub const QUEUE_MSIX_VECTOR: u8 = 26;
     /// `queue_enable` of the selected queue, 16 bits.
     pub const QUEUE_ENABLE: u8 = 28;
     /// `queue_notify_off` of the selected queue, 16 bits.

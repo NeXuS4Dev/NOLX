@@ -19,6 +19,7 @@
 
 use super::blockdev;
 use super::driver_start::{self, Log};
+use super::msix;
 use alloc::vec;
 use nolx_block_core::devices::QueueError;
 use nolx_block_core::queue::{Direction, Request};
@@ -29,7 +30,7 @@ use super::dma::Dma;
 use crate::hal::pci::LegacyPorts;
 use crate::mm::mmio::{self, Region};
 use crate::sync::IrqMutex;
-use core::sync::atomic::{fence, Ordering};
+use core::sync::atomic::{fence, AtomicUsize, Ordering};
 use nolx_df_core::{DeviceId, Dispatch, Driver, Match, Registry};
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
@@ -63,6 +64,17 @@ const ROUND_TRIP_BYTES: usize = ROUND_TRIP_SECTORS as usize * virtio::SECTOR_BYT
 pub enum Failure {
     /// The block queue refused the request, or did not hand it back.
     Queue(QueueError),
+    /// MSI-X could not be set up for the device.
+    Msix(msix::Error),
+    /// The device did not accept the MSI-X vector for the queue.
+    NoVector,
+    /// Fewer completion interrupts arrived than requests were submitted.
+    Interrupts {
+        /// Completion interrupts that arrived.
+        delivered: usize,
+        /// Requests submitted.
+        expected: usize,
+    },
     /// No virtio block device is on the PCI bus.
     NoDevice,
     /// The device does not expose a capability the driver needs.
@@ -235,7 +247,8 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     common.write8(at(common::DEVICE_STATUS), virtio::INIT_STATUS_SEQUENCE[2])?;
     virtio::check_features_ok(common.read8(at(common::DEVICE_STATUS))?)?;
 
-    let queue = setup_queue(&common)?;
+    msix::enable(bdf, &bars, MSIX_ENTRY, COMPLETION_VECTOR)?;
+    let queue = setup_queue(&common, MSIX_ENTRY)?;
     common.write8(at(common::DEVICE_STATUS), virtio::INIT_STATUS_SEQUENCE[3])?;
 
     let sectors = virtio::capacity_sectors(config.read32(0)?, config.read32(4)?);
@@ -269,6 +282,19 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
 
     let volume = read_partitions(&mut disk, sectors, console)?;
     round_trip(&mut disk, console)?;
+    // Every request's completion interrupt was taken before the next request, so the counts match.
+    let expected = REQUESTS_SUBMITTED.load(Ordering::Relaxed);
+    let delivered = COMPLETION_INTERRUPTS.load(Ordering::Acquire);
+    let _ = writeln!(
+        console,
+        "virtio-blk: msi-x completion interrupts: {delivered} of {expected} requests, vector {COMPLETION_VECTOR:#x}"
+    );
+    if delivered != expected {
+        return Err(Failure::Interrupts {
+            delivered,
+            expected,
+        });
+    }
     match volume {
         Some((first, last)) => super::virtio_volume::run(disk, first, last - first + 1, console),
         None => {
@@ -523,6 +549,7 @@ impl Disk {
     /// Issue one request on the virtio queue and wait for the device. Called through
     /// [`Disk::transfer`], which routes it through the block queue.
     fn issue(&mut self, kind: u32, sector: u64, len: u32) -> Result<(), Failure> {
+        let submitted = REQUESTS_SUBMITTED.fetch_add(1, Ordering::Relaxed) + 1;
         let request = &self.request;
         request.write(REQUEST_HEADER, &virtio::block_request_header(kind, sector));
         // A status byte the device never writes stays at this value, which is not `BLK_S_OK`.
@@ -564,6 +591,15 @@ impl Disk {
             "block request",
         )?;
 
+        // The request's completion interrupt must be taken before the next request is submitted.
+        let delivered = msix::wait_for_interrupts(&COMPLETION_INTERRUPTS, submitted);
+        if delivered < submitted {
+            return Err(Failure::Interrupts {
+                delivered,
+                expected: submitted,
+            });
+        }
+
         let mut status_byte = [0u8; 1];
         self.request.read(REQUEST_STATUS, &mut status_byte);
         virtio::block_status(status_byte[0])?;
@@ -572,7 +608,7 @@ impl Disk {
 }
 
 /// Select queue 0, size it, give the device its three ring addresses, and enable it.
-fn setup_queue(common: &Region) -> Result<Queue, Failure> {
+fn setup_queue(common: &Region, vector: u16) -> Result<Queue, Failure> {
     common.write16(at(common::QUEUE_SELECT), 0)?;
     let max = common.read16(at(common::QUEUE_SIZE))?;
     if max == 0 {
@@ -594,6 +630,11 @@ fn setup_queue(common: &Region) -> Result<Queue, Failure> {
         ring.address(layout.used_offset),
     )?;
     let notify_offset = common.read16(at(common::QUEUE_NOTIFY_OFF))?;
+    // The vector is set before the queue is enabled. The device answers with the vector it took.
+    common.write16(at(common::QUEUE_MSIX_VECTOR), vector)?;
+    if common.read16(at(common::QUEUE_MSIX_VECTOR))? != vector {
+        return Err(Failure::NoVector);
+    }
     common.write16(at(common::QUEUE_ENABLE), 1)?;
     Ok(Queue {
         size,
@@ -608,4 +649,27 @@ impl From<QueueError> for Failure {
     fn from(error: QueueError) -> Self {
         Self::Queue(error)
     }
+}
+
+impl From<msix::Error> for Failure {
+    fn from(error: msix::Error) -> Self {
+        Self::Msix(error)
+    }
+}
+
+/// The interrupt vector the queue's completions arrive on, through MSI-X table entry
+/// [`MSIX_ENTRY`]. The handler counts them in [`COMPLETION_INTERRUPTS`].
+pub const COMPLETION_VECTOR: u8 = 0x51;
+/// The MSI-X table entry for the queue. Entry 0 is left for the configuration interrupt, which the
+/// driver does not use.
+const MSIX_ENTRY: u16 = 1;
+
+/// Completion interrupts received since boot. Written by the interrupt handler.
+static COMPLETION_INTERRUPTS: AtomicUsize = AtomicUsize::new(0);
+/// Requests submitted. Each one should raise one completion interrupt.
+static REQUESTS_SUBMITTED: AtomicUsize = AtomicUsize::new(0);
+
+/// Count one completion interrupt. Called from the interrupt handler on [`COMPLETION_VECTOR`].
+pub fn on_completion_interrupt() {
+    COMPLETION_INTERRUPTS.fetch_add(1, Ordering::Release);
 }
