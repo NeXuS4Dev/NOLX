@@ -942,3 +942,12 @@ malformed-media refusal; AHCI also passed without an APIC. The storage CI matrix
 runs those file persistence and refusal gates for every backend, not just virtio.
 This completes the storage-file integration gate, **not M9**: the remaining work is
 tracked without reduced scope in `docs/development/m9-completion.md`.
+
+### M9 native virtio-net work (2026-10-16)
+
+Modern/transitional virtio-net PCI functions now negotiate modern split RX/TX queues with
+per-queue MSI-X, bounded frame delivery and retained DMA. A two-exchange gateway ARP test
+verifies descriptor recycling, both completion vectors, and exact Ethernet bytes captured
+outside the guest. The dedicated test covers pc/Q35, absent hardware and no-APIC refusal.
+This closes the basic virtio-net transport gate, not persistent multi-device framework
+lifecycle, configurable network configuration, USB/AML/power, or M9 as a whole.

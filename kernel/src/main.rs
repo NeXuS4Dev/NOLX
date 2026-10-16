@@ -155,6 +155,7 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         hal::nvme::probe(&mut console);
         hal::xhci::probe(&mut console);
         hal::e1000::probe(&mut console);
+        hal::virtio_net::probe(&mut console);
         hal::blockdev::report(&mut console);
 
         obj::init(&mut console);

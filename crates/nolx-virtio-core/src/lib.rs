@@ -15,6 +15,9 @@
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+/// Modern virtio-net negotiation and frame layout.
+pub mod net;
+
 use nolx_pci_core::{capabilities, Bdf, ConfigSpace};
 
 /// The PCI vendor ID every virtio device carries.
@@ -109,6 +112,8 @@ pub const INIT_STATUS_SEQUENCE: [u8; 4] = [
 /// Failure in the virtio rules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VirtioError {
+    /// The network device does not offer its MAC address.
+    NoMacAddress,
     /// The device does not offer `VIRTIO_F_VERSION_1`, so it is not a modern device.
     NoVersion1,
     /// The device cleared `FEATURES_OK` after the driver set it: the feature set was rejected.

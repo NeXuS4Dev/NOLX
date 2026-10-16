@@ -43,8 +43,9 @@ M9 to the already implemented boot probes. Check items only with executable evid
 ## Networking
 
 - [x] e1000 receive, descriptor recycling and interrupt acknowledgement/delivery.
-- [ ] virtio-net negotiated RX/TX queues and interrupt delivery through the driver framework.
-- [ ] Verify externally supplied packets and transmitted bytes, not only synthetic host rules.
+- [x] virtio-net negotiated RX/TX queues and MSI-X interrupt delivery through the driver
+      framework; retain DMA/ring state and expose bounded receive/send frame operations.
+- [x] Verify externally supplied packets and transmitted bytes, not only synthetic host rules.
       Higher network/POSIX socket layers belong to later milestones.
 
 ## ACPI and power
@@ -113,3 +114,19 @@ host test commands passed 686 tests each (zero failures); host/kernel Clippy and
 235-block unsafe audit, boot/layout checks and all 21 image checks passed. Existing ECAM,
 PIC/PIT/AHCI fallback and injected PS/2 scripts also passed locally. No pull request was
 created for this work. M9 remains incomplete for the unchecked gates above.
+
+## Native virtio-net integration (2026-10-16)
+
+`kernel/src/hal/virtio_net.rs` negotiates VERSION_1 + MAC without checksum/GSO/multiqueue
+offload, owns separate RX/TX split queues, takes per-queue MSI-X interrupts on 0x53/0x54,
+recycles descriptors and delivers copies through a fixed-capacity frame FIFO. Queue and
+buffer DMA is retained after the probe. Send waits never hold the IRQ-state lock.
+`scripts/check-virtio-net.py` passed six local QEMU 11.0.2 boots: transitional and modern-only
+PCI functions on pc/Q35, absent-device fallback and explicit no-APIC refusal. It validates
+both exact transmitted ARP requests and both externally received replies from a host-side
+pcap, not only guest-generated log lines. Two portable tests cover feature refusal,
+offload rejection, truncation, oversized frames and header layout. The dedicated CI job
+is configured; its result must be recorded before promoting the new network assertions.
+
+The public frame operations are an interface-driver transport, not a POSIX socket/IP stack.
+The shared persistent framework lifecycle and multi-adapter/segment binding gates remain open.

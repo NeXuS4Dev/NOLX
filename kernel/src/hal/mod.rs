@@ -34,6 +34,7 @@ pub mod syscall;
 pub mod tables;
 pub mod timer;
 pub mod virtio_blk;
+pub mod virtio_net;
 pub mod xhci;
 
 use nolx_hal_core::console::HalConsole;
