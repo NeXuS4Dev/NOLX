@@ -145,3 +145,6 @@ pub(crate) fn assert_pod_size<T: Pod>(expected: usize, name: &str) {
         "{name}: size_of disagrees with the generated DISK_SIZE"
     );
 }
+
+/// Sector-device partition adapter used by native storage drivers.
+pub mod sector;

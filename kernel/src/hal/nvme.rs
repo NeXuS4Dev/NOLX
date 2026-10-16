@@ -79,6 +79,8 @@ static IO_SUBMITTED: AtomicUsize = AtomicUsize::new(0);
 /// Why the probe stopped.
 #[derive(Debug)]
 pub enum Failure {
+    /// Filesystem verification on this controller failed.
+    Filesystem(super::storage_volume::Failure),
     /// The block queue refused the request, or did not hand it back.
     Queue(QueueError),
     /// No NVMe controller is on the PCI bus.
@@ -400,7 +402,15 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
             expected,
         });
     }
-    Ok(())
+    let mut disk = Disk {
+        regs,
+        io,
+        data,
+        cid,
+    };
+    let (first, sectors) =
+        super::storage_volume::discover(&mut disk, blocks).map_err(Failure::Filesystem)?;
+    super::storage_volume::run(disk, first, sectors, console, "nvme").map_err(Failure::Filesystem)
 }
 
 /// Count one completion interrupt. Called from the interrupt handler on [`COMPLETION_VECTOR`].
@@ -555,5 +565,68 @@ impl From<QueueError> for Failure {
 impl From<msix::Error> for Failure {
     fn from(error: msix::Error) -> Self {
         Self::Msix(error)
+    }
+}
+
+/// The namespace's queue and page-aligned PRP buffer, shared by raw and filesystem I/O.
+struct Disk {
+    regs: Region,
+    io: Queue,
+    data: Dma,
+    cid: u16,
+}
+impl Disk {
+    fn transfer(&mut self, write: bool, lba: u64, len: usize) -> Result<(), nolxfs::DevError> {
+        let sectors = (len / 512) as u16;
+        let command = nvme::read_write(
+            write,
+            next_cid(&mut self.cid),
+            NSID,
+            lba,
+            sectors,
+            self.data.address(0),
+        )
+        .ok_or(nolxfs::DevError::Io(5))?;
+        let request = Request {
+            direction: if write {
+                Direction::Write
+            } else {
+                Direction::Read
+            },
+            lba,
+            sectors: u32::from(sectors),
+        };
+        execute_io(&self.regs, &mut self.io, &command, request).map_err(|_| nolxfs::DevError::Io(5))
+    }
+}
+impl super::storage_volume::SectorDisk for Disk {
+    fn flush(&mut self) -> Result<(), nolxfs::DevError> {
+        let command = nvme::flush(next_cid(&mut self.cid), NSID);
+        let expected = IO_SUBMITTED.fetch_add(1, Ordering::Relaxed) + 1;
+        execute(&self.regs, &mut self.io, &command).map_err(|_| nolxfs::DevError::Io(5))?;
+        if msix::wait_for_interrupts(&COMPLETION_INTERRUPTS, expected) < expected {
+            return Err(nolxfs::DevError::Io(5));
+        }
+        Ok(())
+    }
+    fn read_sectors(&mut self, first: u64, out: &mut [u8]) -> Result<(), nolxfs::DevError> {
+        if out.len() % 512 != 0 {
+            return Err(nolxfs::DevError::Io(5));
+        }
+        for (i, chunk) in out.chunks_mut(4096).enumerate() {
+            self.transfer(false, first + (i * 8) as u64, chunk.len())?;
+            self.data.read(0, chunk);
+        }
+        Ok(())
+    }
+    fn write_sectors(&mut self, first: u64, bytes: &[u8]) -> Result<(), nolxfs::DevError> {
+        if bytes.len() % 512 != 0 {
+            return Err(nolxfs::DevError::Io(5));
+        }
+        for (i, chunk) in bytes.chunks(4096).enumerate() {
+            self.data.write(0, chunk);
+            self.transfer(true, first + (i * 8) as u64, chunk.len())?;
+        }
+        Ok(())
     }
 }

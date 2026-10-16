@@ -293,3 +293,22 @@ pub fn namespace_block_bytes(identify: &[u8]) -> Option<u32> {
 
 #[cfg(test)]
 mod tests;
+
+/// Flush all prior writes to one namespace; no PRP data buffer is supplied.
+#[must_use]
+pub fn flush(cid: u16, nsid: u32) -> Sqe {
+    sqe(0, cid, nsid, 0, 0, [0; 6])
+}
+
+#[cfg(test)]
+mod flush_tests {
+    use super::*;
+    #[test]
+    fn flush_names_namespace_and_cid_but_has_no_data_or_command_dwords() {
+        let command = flush(7, 3);
+        assert_eq!(command[0], 0);
+        assert_eq!(&command[2..4], &7u16.to_le_bytes());
+        assert_eq!(&command[4..8], &3u32.to_le_bytes());
+        assert!(command[8..].iter().all(|&b| b == 0));
+    }
+}

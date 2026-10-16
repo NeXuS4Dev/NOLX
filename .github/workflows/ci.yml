@@ -679,8 +679,8 @@ jobs:
   # The boot runs once per storage backend, with that backend's disk as the only one the kernel can
   # find. Each run must bind its driver through nolx-df, write a checksummed pattern, read it back,
   # reach the end of boot, and find the other two controllers absent. The disk image is checksummed
-  # after QEMU exits, so a match means the write reached the disk. The NOLXFS file check runs only on
-  # the virtio backend, the one the volume code is on.
+  # after QEMU exits, so a match means the write reached the disk. Each backend must also commit,
+  # remount and read a real NOLXFS file through its own queued transport.
   storage-backends:
     name: Boot with ${{ matrix.backend }} storage only
     runs-on: ubuntu-latest
@@ -773,8 +773,7 @@ jobs:
             echo "the disk image does not hold the data the kernel wrote"
             exit 1
           fi
-      - name: The NOLXFS file holds the pattern (virtio only)
-        if: matrix.backend == 'virtio'
+      - name: The NOLXFS file holds the pattern
         run: |
           set -e
           line=$(grep -Eo 'nolxfs file checksum.bin: 8192 bytes written, committed, mounted again, read back, crc32 0x[0-9a-f]{8} matches' build/serial.log | head -1 || true)
@@ -788,6 +787,10 @@ jobs:
             echo "the file read back is not the pattern the kernel wrote"
             exit 1
           fi
+      - name: Independently mount the persisted file and boot from it again
+        run: |
+          cargo build -p nolxfs-dump
+          python3 scripts/check-storage-files.py "${{ matrix.backend }}" build/disk.img
       - name: Annotate the serial log on failure
         if: failure()
         run: |

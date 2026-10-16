@@ -29,11 +29,11 @@ pub mod pci;
 pub mod pic;
 pub mod ps2;
 pub mod rtc;
+pub mod storage_volume;
 pub mod syscall;
 pub mod tables;
 pub mod timer;
 pub mod virtio_blk;
-pub mod virtio_volume;
 pub mod xhci;
 
 use nolx_hal_core::console::HalConsole;

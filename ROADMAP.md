@@ -927,3 +927,18 @@ NOLX: init sequence complete, halting the boot processor
 ```
 
 Every one of those lines is now a hard gate in the boot smoke test.
+
+### M9 storage completion work — all-backend filesystem durability (2026-10-16)
+
+The filesystem transport is no longer virtio-only. `nolxfs::sector::PartitionDevice` adapts
+queued virtio, AHCI and NVMe sector transports to 4 KiB blocks. Checkpoint barriers issue
+real device-cache flush commands. AHCI validates capacity from IDENTIFY DEVICE before
+trusting GPT addresses; native filesystems share the GPT checks and volume path.
+Only completely blank partitions can be formatted, and an existing checksum file is
+verified before being written again.
+
+All three backends passed local QEMU file/host-mount/reboot tests, Q35 variants, and
+malformed-media refusal; AHCI also passed without an APIC. The storage CI matrix now
+runs those file persistence and refusal gates for every backend, not just virtio.
+This completes the storage-file integration gate, **not M9**: the remaining work is
+tracked without reduced scope in `docs/development/m9-completion.md`.

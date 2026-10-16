@@ -237,3 +237,55 @@ pub fn prdt_entry(address: u64, bytes: u32) -> Option<[u8; PRDT_ENTRY_LEN]> {
 
 #[cfg(test)]
 mod tests;
+
+/// Encode ATA IDENTIFY DEVICE as a host-to-device register FIS (512 bytes of data-in).
+#[must_use]
+pub fn h2d_identify() -> [u8; FIS_LEN] {
+    let mut fis = h2d_dma_ext(0xec, 0, 0);
+    fis[7] = 0;
+    fis
+}
+
+/// Encode ATA FLUSH CACHE EXT, a command with no data PRDT.
+#[must_use]
+pub fn h2d_flush_cache() -> [u8; FIS_LEN] {
+    let mut fis = h2d_dma_ext(0xea, 0, 0);
+    fis[7] = 0;
+    fis
+}
+
+/// Read the 48-bit ATA sector capacity from words 100 through 103 of IDENTIFY DEVICE.
+/// Refuse short data, missing LBA48 capability, empty disks and out-of-range capacities.
+#[must_use]
+pub fn identify_sectors(bytes: &[u8]) -> Option<u64> {
+    if bytes.len() < 512 || bytes[167] & 4 == 0 {
+        return None;
+    }
+    let sectors = u64::from_le_bytes(bytes[200..208].try_into().ok()?);
+    (sectors > 0 && sectors <= (1 << 48)).then_some(sectors)
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    #[test]
+    fn identify_and_flush_have_no_lba_or_count_fields() {
+        for (fis, opcode) in [(h2d_identify(), 0xec), (h2d_flush_cache(), 0xea)] {
+            assert_eq!(fis[0], 0x27);
+            assert_eq!(fis[1], 0x80);
+            assert_eq!(fis[2], opcode);
+            assert!(fis[3..].iter().all(|&b| b == 0));
+        }
+    }
+    #[test]
+    fn identify_capacity_is_bounded_and_requires_lba48() {
+        let mut bytes = [0; 512];
+        assert_eq!(identify_sectors(&bytes), None);
+        bytes[167] = 4;
+        bytes[200..208].copy_from_slice(&2048u64.to_le_bytes());
+        assert_eq!(identify_sectors(&bytes), Some(2048));
+        assert_eq!(identify_sectors(&bytes[..511]), None);
+        bytes[200..208].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(identify_sectors(&bytes), None);
+    }
+}

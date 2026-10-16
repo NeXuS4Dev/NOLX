@@ -21,11 +21,14 @@ M9 to the already implemented boot probes. Check items only with executable evid
 
 ## Storage integration
 
-- [ ] Run file-level format/write/commit/remount/read/checksum tests through **each**
-      storage backend. Current AHCI/NVMe jobs verify sectors; the NOLXFS volume adapter
-      and persisted file test still use virtio only. Sector checksums are not a substitute
-      for the roadmap's written-file requirement.
-- [ ] Preserve per-device queues and merging when generic filesystem I/O reaches AHCI/NVMe.
+- [x] Run file-level format/write/commit/remount/read/checksum tests through **each**
+      storage backend, independently mount the file on the host after QEMU exits, and
+      reboot the unchanged disk to read the previous commit before writing again.
+- [x] Preserve per-device queues when generic filesystem I/O reaches AHCI/NVMe; no data
+      transfer bypasses `blockdev::run`. Merging remains covered by portable queue tests,
+      not a claim that synchronous one-at-a-time I/O demonstrates concurrent merging.
+- [x] Issue real virtio FLUSH / ATA FLUSH CACHE EXT / NVMe Flush commands at checkpoint
+      barriers. Reject damaged GPT/container metadata without formatting existing data.
 
 ## Input
 
@@ -84,3 +87,21 @@ run [38954085871](https://github.com/NeXuS4Dev/NOLX/actions/runs/38954085871) on
 passed all nine jobs; AHCI-013 is `tested-T2`. The old PCI-014…018 checkpoint alone
 was read-only; the checked transport gates above are backed by the new tests, not that
 older evidence. **Do not mark M9 done from this partial gate list.**
+
+## Storage-file integration (2026-10-16)
+
+Local Rust 1.88.0 and QEMU 11.0.2 verification now exercises the shared `SectorDevice` /
+`PartitionDevice` contract and the native AHCI/NVMe filesystem transports. All three
+single-backend boots wrote and remounted `checksum.bin` (8192 bytes, CRC `0x9ea14b00`).
+`scripts/check-storage-files.py` independently mounted the persisted partition with
+`nolxfs-dump`, compared every file byte, booted the same image again, and verified the
+previous commit **before** overwriting the file. Q35 ECAM and AHCI no-APIC variants also
+passed locally. Corrupted GPT, corrupted container metadata and an erased superblock
+were refused without modifying the image; only entirely blank partitions authorize mkfs.
+Nine new portable tests cover partition bounds/overflow, block mapping, error propagation,
+cache-flush forwarding, ATA identification, and native flush request encodings.
+
+This closes the filesystem-test gap, **not the milestone**. Persistent controller lifecycle,
+multi-device binding, BAR allocation, USB HID, virtio-net, AML and power remain open.
+CI now applies the file, host-mount, reboot and malformed-media checks to every storage
+backend. Do not treat a local result as a CI result; final CI evidence is recorded separately.

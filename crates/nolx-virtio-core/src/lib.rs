@@ -438,3 +438,56 @@ pub fn capacity_bytes(capacity_sectors: u64) -> Option<u64> {
 
 #[cfg(test)]
 mod tests;
+
+/// Block feature bit: the device supports explicit durable cache flush requests.
+pub const FEATURE_BLK_FLUSH: u64 = 1 << 9;
+
+/// Negotiate modern block transport and the optional explicit-flush feature.
+pub fn negotiate_block(features: u64) -> Result<u64, VirtioError> {
+    Ok(negotiate(features)? | (features & FEATURE_BLK_FLUSH))
+}
+
+/// A no-data cache-flush request consists of a readable header followed by writable status.
+#[must_use]
+pub fn block_flush_chain(header: u64, status: u64) -> [Descriptor; 2] {
+    [
+        Descriptor {
+            addr: header,
+            len: 16,
+            flags: DESC_NEXT,
+            next: 1,
+        },
+        Descriptor {
+            addr: status,
+            len: 1,
+            flags: DESC_WRITE,
+            next: 0,
+        },
+    ]
+}
+
+#[cfg(test)]
+mod flush_tests {
+    use super::*;
+    #[test]
+    fn block_negotiation_accepts_only_modern_and_optional_flush() {
+        assert_eq!(
+            negotiate_block(u64::MAX),
+            Ok(FEATURE_VERSION_1 | FEATURE_BLK_FLUSH)
+        );
+        assert_eq!(negotiate_block(FEATURE_VERSION_1), Ok(FEATURE_VERSION_1));
+        assert!(negotiate_block(FEATURE_BLK_FLUSH).is_err());
+    }
+    #[test]
+    fn flush_has_no_data_descriptor_and_device_writes_only_status() {
+        let chain = block_flush_chain(0x1000, 0x2000);
+        assert_eq!(chain[0].addr, 0x1000);
+        assert_eq!(chain[0].len, 16);
+        assert_eq!(chain[0].flags, DESC_NEXT);
+        assert_eq!(chain[0].next, 1);
+        assert_eq!(chain[1].addr, 0x2000);
+        assert_eq!(chain[1].len, 1);
+        assert_eq!(chain[1].flags, DESC_WRITE);
+        assert_eq!(chain[1].next, 0);
+    }
+}

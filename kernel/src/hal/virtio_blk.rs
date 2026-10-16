@@ -16,7 +16,7 @@
 //! use. Then it writes a 2 KiB pattern to sectors 1600 to 1603, in the gap after the last
 //! partition, reads it back, and compares CRC-32 checksums. CI computes the same checksum over the
 //! image file after QEMU exits, so the write has to have reached the disk and not only the device's
-//! cache. Last, it puts a NOLXFS volume on the first partition in use; see [`super::virtio_volume`].
+//! cache. Last, it puts a NOLXFS volume on the first partition in use; see [`super::storage_volume`].
 
 use super::blockdev;
 use super::driver_start::{self, Log};
@@ -106,6 +106,8 @@ pub enum Failure {
     Unaligned,
     /// The volume layer refused the partition or the file.
     Volume(FsError),
+    /// Backend-neutral filesystem verification failed.
+    Filesystem(super::storage_volume::Failure),
     /// The file read back is not the bytes that were written.
     FileMismatch,
 }
@@ -243,7 +245,8 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     )?;
     common.write8(at(common::DEVICE_STATUS), virtio::INIT_STATUS_SEQUENCE[0])?;
     common.write8(at(common::DEVICE_STATUS), virtio::INIT_STATUS_SEQUENCE[1])?;
-    let accepted = virtio::negotiate(read_features(&common)?)?;
+    let offered = read_features(&common)?;
+    let accepted = virtio::negotiate_block(offered)?;
     write_driver_features(&common, accepted)?;
     common.write8(at(common::DEVICE_STATUS), virtio::INIT_STATUS_SEQUENCE[2])?;
     virtio::check_features_ok(common.read8(at(common::DEVICE_STATUS))?)?;
@@ -268,6 +271,7 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
         notify,
         notify_offset,
         request: Dma::new().ok_or(Failure::Memory)?,
+        flush_supported: accepted & virtio::FEATURE_BLK_FLUSH != 0,
     };
 
     disk.transfer(virtio::BLK_T_IN, 0, virtio::SECTOR_BYTES as u32)?;
@@ -297,7 +301,10 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
         });
     }
     match volume {
-        Some((first, last)) => super::virtio_volume::run(disk, first, last - first + 1, console),
+        Some((first, last)) => {
+            super::storage_volume::run(disk, first, last - first + 1, console, "virtio-blk")
+                .map_err(Failure::Filesystem)
+        }
         None => {
             let _ = writeln!(
                 console,
@@ -505,6 +512,7 @@ pub(crate) struct Disk {
     notify: Region,
     notify_offset: u64,
     request: Dma,
+    flush_supported: bool,
 }
 
 impl Disk {
@@ -571,10 +579,16 @@ impl Disk {
             request.address(REQUEST_DATA),
             request.address(REQUEST_STATUS),
         );
-        let chain = if kind == virtio::BLK_T_OUT {
+        let data_chain = if kind == virtio::BLK_T_OUT {
             virtio::block_write_chain(header, data, status, len)
         } else {
             virtio::block_read_chain(header, data, status, len)
+        };
+        let flush_chain = virtio::block_flush_chain(header, status);
+        let chain = if kind == virtio::BLK_T_FLUSH {
+            &flush_chain[..]
+        } else {
+            &data_chain[..]
         };
         for (index, descriptor) in chain.iter().enumerate() {
             self.queue
@@ -684,4 +698,21 @@ static REQUESTS_SUBMITTED: AtomicUsize = AtomicUsize::new(0);
 /// Count one completion interrupt. Called from the interrupt handler on [`COMPLETION_VECTOR`].
 pub fn on_completion_interrupt() {
     COMPLETION_INTERRUPTS.fetch_add(1, Ordering::Release);
+}
+
+impl super::storage_volume::SectorDisk for Disk {
+    fn flush(&mut self) -> Result<(), nolxfs::DevError> {
+        if !self.flush_supported {
+            return Err(nolxfs::DevError::Io(5));
+        }
+        // Requests are synchronous, so no data command can cross this barrier.
+        self.issue(virtio::BLK_T_FLUSH, 0, 0)
+            .map_err(|_| nolxfs::DevError::Io(5))
+    }
+    fn read_sectors(&mut self, first: u64, out: &mut [u8]) -> Result<(), nolxfs::DevError> {
+        Disk::read_sectors(self, first, out).map_err(|_| nolxfs::DevError::Io(5))
+    }
+    fn write_sectors(&mut self, first: u64, data: &[u8]) -> Result<(), nolxfs::DevError> {
+        Disk::write_sectors(self, first, data).map_err(|_| nolxfs::DevError::Io(5))
+    }
 }

@@ -77,6 +77,8 @@ const ROUND_TRIP_BYTES: usize = ROUND_TRIP_SECTORS as usize * SECTOR_BYTES as us
 /// Why the probe stopped.
 #[derive(Debug)]
 pub enum Failure {
+    /// Filesystem verification on this controller failed.
+    Filesystem(super::storage_volume::Failure),
     /// MSI programming failed.
     Msi(super::msix::Error),
     /// A command completed without its interrupt being delivered.
@@ -254,6 +256,7 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
         &data,
         Command {
             write: false,
+            opcode: None,
             lba: 0,
             sectors: 1,
         },
@@ -279,6 +282,7 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
         &data,
         Command {
             write: true,
+            opcode: None,
             lba: ROUND_TRIP_SECTOR,
             sectors: ROUND_TRIP_SECTORS,
         },
@@ -290,6 +294,7 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
         &data,
         Command {
             write: false,
+            opcode: None,
             lba: ROUND_TRIP_SECTOR,
             sectors: ROUND_TRIP_SECTORS,
         },
@@ -314,7 +319,29 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
         "ahci: wrote {ROUND_TRIP_SECTORS} sectors at {ROUND_TRIP_SECTOR}, read back, \
          crc32 {checksum:#010x} matches the written data"
     );
-    Ok(())
+    // Obtain the real disk geometry before trusting GPT addresses.
+    transfer(
+        &port,
+        &page,
+        &data,
+        Command {
+            write: false,
+            opcode: Some(0xec),
+            lba: 0,
+            sectors: 1,
+        },
+    )?;
+    let identify = data.read_array::<512>(0);
+    let capacity = ahci::identify_sectors(&identify).ok_or(Failure::Encoding)?;
+    let mut disk = Disk {
+        hba,
+        number,
+        page,
+        data,
+    };
+    let (first, sectors) =
+        super::storage_volume::discover(&mut disk, capacity).map_err(Failure::Filesystem)?;
+    super::storage_volume::run(disk, first, sectors, console, "ahci").map_err(Failure::Filesystem)
 }
 
 /// The first AHCI controller on the bus, if there is one.
@@ -361,6 +388,7 @@ fn find_sata_disk(hba: &Region, ports: u32) -> Result<u8, Failure> {
 /// One command in slot 0: a read or a write of `sectors` sectors starting at `lba`.
 struct Command {
     write: bool,
+    opcode: Option<u8>,
     lba: u64,
     sectors: u16,
 }
@@ -387,19 +415,31 @@ fn issue(port: &Port, page: &Dma, data: &Dma, command: Command) -> Result<(), Fa
     let header = ahci::encode_command_header(&CommandHeader {
         fis_dwords: 5,
         write: command.write,
-        prdt_entries: 1,
+        prdt_entries: u16::from(command.sectors != 0),
         table: page.address(COMMAND_TABLE_AT),
     })
     .ok_or(Failure::Encoding)?;
-    let prdt = ahci::prdt_entry(data.address(0), bytes).ok_or(Failure::Encoding)?;
-    let fis = if command.write {
+    let prdt = if bytes != 0 {
+        Some(ahci::prdt_entry(data.address(0), bytes).ok_or(Failure::Encoding)?)
+    } else {
+        None
+    };
+    let fis = if let Some(opcode) = command.opcode {
+        match opcode {
+            0xec => ahci::h2d_identify(),
+            0xea => ahci::h2d_flush_cache(),
+            _ => return Err(Failure::Encoding),
+        }
+    } else if command.write {
         ahci::h2d_write_dma_ext(command.lba, command.sectors)
     } else {
         ahci::h2d_read_dma_ext(command.lba, command.sectors)
     };
     page.write(COMMAND_LIST_AT, &header);
     page.write(COMMAND_TABLE_AT, &fis);
-    page.write(COMMAND_TABLE_AT + ahci::PRDT_OFFSET as u64, &prdt);
+    if let Some(prdt) = prdt {
+        page.write(COMMAND_TABLE_AT + ahci::PRDT_OFFSET as u64, &prdt);
+    }
     // The device reads these bytes over the bus, so they must be written before the port is told.
     fence(Ordering::SeqCst);
 
@@ -501,5 +541,80 @@ impl Port<'_> {
 impl From<QueueError> for Failure {
     fn from(error: QueueError) -> Self {
         Self::Queue(error)
+    }
+}
+
+/// Owned transport state for a SATA port, reused for every filesystem request.
+struct Disk {
+    hba: Region,
+    number: u8,
+    page: Dma,
+    data: Dma,
+}
+impl super::storage_volume::SectorDisk for Disk {
+    fn flush(&mut self) -> Result<(), nolxfs::DevError> {
+        issue(
+            &Port {
+                hba: &self.hba,
+                number: self.number,
+            },
+            &self.page,
+            &self.data,
+            Command {
+                write: false,
+                opcode: Some(0xea),
+                lba: 0,
+                sectors: 0,
+            },
+        )
+        .map_err(|_| nolxfs::DevError::Io(5))
+    }
+    fn read_sectors(&mut self, first: u64, out: &mut [u8]) -> Result<(), nolxfs::DevError> {
+        if out.len() % 512 != 0 {
+            return Err(nolxfs::DevError::Io(5));
+        }
+        for (i, chunk) in out.chunks_mut(4096).enumerate() {
+            transfer(
+                &Port {
+                    hba: &self.hba,
+                    number: self.number,
+                },
+                &self.page,
+                &self.data,
+                Command {
+                    write: false,
+                    opcode: None,
+                    lba: first + (i * 8) as u64,
+                    sectors: (chunk.len() / 512) as u16,
+                },
+            )
+            .map_err(|_| nolxfs::DevError::Io(5))?;
+            self.data.read(0, chunk);
+        }
+        Ok(())
+    }
+    fn write_sectors(&mut self, first: u64, bytes: &[u8]) -> Result<(), nolxfs::DevError> {
+        if bytes.len() % 512 != 0 {
+            return Err(nolxfs::DevError::Io(5));
+        }
+        for (i, chunk) in bytes.chunks(4096).enumerate() {
+            self.data.write(0, chunk);
+            transfer(
+                &Port {
+                    hba: &self.hba,
+                    number: self.number,
+                },
+                &self.page,
+                &self.data,
+                Command {
+                    write: true,
+                    opcode: None,
+                    lba: first + (i * 8) as u64,
+                    sectors: (chunk.len() / 512) as u16,
+                },
+            )
+            .map_err(|_| nolxfs::DevError::Io(5))?;
+        }
+        Ok(())
     }
 }
