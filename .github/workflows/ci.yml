@@ -613,6 +613,11 @@ jobs:
               raise SystemExit("wall clock did not advance from its RTC/monotonic anchor")
           PY
 
+      - name: Assert e1000 receive and interrupt delivery
+        run: |
+          grep -F 'e1000: received ARP reply from 10.0.2.2' build/serial.log
+          grep -E 'descriptor recycled, INTx vector 0x2[3-9a-f], interrupts [1-9][0-9]*' build/serial.log
+
       - name: Assert AHCI MSI completions
         run: |
           grep -F 'ahci: MSI completion interrupts: 3 of 3 commands, vector 0x52' build/serial.log
@@ -721,6 +726,7 @@ jobs:
             fi
           }
           need 'NOLX: init sequence complete, halting the boot processor'
+          need 'e1000: received ARP reply from 10.0.2.2'
           if grep -qE "PANIC|BUGCHECK|CPU exception" build/serial.log; then
             echo 'storage backend boot faulted after initialization'
             exit 1

@@ -20,3 +20,6 @@ NET-005 | NOLX M9 Frame length: a frame shorter than 60 bytes is padded to 60, a
 NET-006 | NOLX M9 Ethernet header: the destination, source, and big-endian ethertype are read from their fields, and a frame shorter than 14 bytes gives no header | tested-T1 | nolx-net-core tests::an_ethernet_header_gives_its_addresses_and_ethertype
 
 All six rows are `tested-T1`: the host tests passed in CI (workflow 38603598789, host-test job).
+
+NET-007 | NOLX M9 ARP reachability: minimum Ethernet ARP requests use network byte order and valid replies must match hardware/protocol/opcode, both MACs and both IPv4 endpoints; malformed or unrelated packets are refused | tested-T1 | nolx-net-core arp::tests (local Rust 1.88: 3 passed)
+NET-008 | NOLX M9 receive queue: bounded FIFO copies frames, preserves order across wrap, refuses overflow without overwriting unread packets, validates frame sizes and handles zero capacity | tested-T1 | nolx-net-core queue::tests (local Rust 1.88: 2 passed)

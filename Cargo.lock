@@ -22,14 +22,6 @@ name = "nolx-ahci-core"
 version = "0.1.0"
 
 [[package]]
-name = "nolx-net-core"
-version = "0.1.0"
-
-[[package]]
-name = "nolx-nvme-core"
-version = "0.1.0"
-
-[[package]]
 name = "nolx-block-core"
 version = "0.1.0"
 
@@ -55,6 +47,10 @@ name = "nolx-hal-core"
 version = "0.1.0"
 
 [[package]]
+name = "nolx-input-core"
+version = "0.1.0"
+
+[[package]]
 name = "nolx-kernel"
 version = "0.1.0"
 dependencies = [
@@ -65,6 +61,7 @@ dependencies = [
  "nolx-exec-core",
  "nolx-hal-core",
  "nolx-mm-core",
+ "nolx-net-core",
  "nolx-nvme-core",
  "nolx-obj-core",
  "nolx-pci-core",
@@ -77,11 +74,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "nolx-input-core"
+name = "nolx-mm-core"
 version = "0.1.0"
 
 [[package]]
-name = "nolx-mm-core"
+name = "nolx-net-core"
+version = "0.1.0"
+
+[[package]]
+name = "nolx-nvme-core"
 version = "0.1.0"
 
 [[package]]

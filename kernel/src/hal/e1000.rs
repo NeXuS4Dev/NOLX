@@ -14,7 +14,9 @@
 //!
 //! CI runs QEMU with an e1000 on a user-mode network backend.
 
-use core::sync::atomic::{fence, Ordering};
+use alloc::vec::Vec;
+use core::sync::atomic::{fence, AtomicU8, AtomicUsize, Ordering};
+use nolx_net_core::{arp, queue::FrameQueue};
 
 use nolx_df_core::{DeviceId, Dispatch, Driver, Error as DfError, Match, Registry};
 use nolx_e1000_core::{self as e1000, DEVICE_82540EM, VENDOR_INTEL};
@@ -26,6 +28,58 @@ use super::dma::Dma;
 use super::pci::ConfigAccess;
 use crate::mm::mmio::{self, Region};
 use crate::sync::IrqMutex;
+
+static RX_VECTOR: AtomicU8 = AtomicU8::new(0);
+static RX_INTERRUPTS: AtomicUsize = AtomicUsize::new(0);
+static RECEIVE: IrqMutex<Option<Receive>> = IrqMutex::new(None);
+
+struct Receive {
+    regs: Region,
+    descriptors: Dma,
+    buffers: Vec<Dma>,
+    next: u32,
+    frames: FrameQueue<8>,
+}
+
+/// Whether this vector names the firmware-assigned, level-triggered INTx route.
+pub fn handles_vector(vector: u8) -> bool {
+    vector >= 32 && RX_VECTOR.load(Ordering::Acquire) == vector
+}
+
+/// Acknowledge interrupt causes and recycle completed receive descriptors into a bounded FIFO.
+/// This path never allocates, prints, or acquires the framework state lock.
+pub fn on_interrupt() {
+    let mut receive = RECEIVE.lock();
+    let Some(receive) = receive.as_mut() else {
+        return;
+    };
+    let causes = receive.regs.read32(e1000::REG_ICR).unwrap_or(0);
+    if causes & e1000::ICR_RXT0 == 0 {
+        return;
+    }
+    RX_INTERRUPTS.fetch_add(1, Ordering::Release);
+    for _ in 0..RING {
+        let offset = u64::from(receive.next) * 16;
+        let status = receive.descriptors.read_array::<2>(offset + 12);
+        if status[0] & e1000::DESC_DD == 0 {
+            break;
+        }
+        fence(Ordering::Acquire);
+        let len = usize::from(receive.descriptors.read16(offset + 8));
+        if status[0] & e1000::RX_STATUS_EOP != 0
+            && status[1] == 0
+            && len <= nolx_net_core::FRAME_MAX_DEFAULT
+        {
+            let mut bytes = [0; nolx_net_core::FRAME_MAX_DEFAULT];
+            receive.buffers[receive.next as usize].read(0, &mut bytes[..len]);
+            receive.frames.push(&bytes[..len]);
+        }
+        receive.descriptors.write(offset + 8, &[0; 8]);
+        fence(Ordering::Release);
+        let _ = receive.regs.write32(e1000::REG_RDT, receive.next);
+        receive.next = (receive.next + 1) % RING;
+    }
+}
 
 /// PCI command register, with the memory space and bus master bits.
 const PCI_COMMAND: u8 = 0x04;
@@ -51,6 +105,10 @@ static MATCHES: &[Match] = &[Match::by_ids(VENDOR_INTEL, DEVICE_82540EM)];
 /// Why the driver stopped.
 #[derive(Debug)]
 pub enum Failure {
+    /// Firmware INTx assignment is unavailable or its interrupt was not delivered.
+    Interrupt,
+    /// No matching ARP reply was received from the QEMU network peer.
+    Receive,
     /// No e1000 is on the PCI bus.
     NoController,
     /// BAR 0 is not a memory BAR, so the registers cannot be reached.
@@ -85,7 +143,6 @@ impl From<crate::mm::mmio::Failure> for Failure {
 /// held here and never read again.
 #[allow(dead_code)]
 struct Rings {
-    rx: Dma,
     tx: Dma,
     frame: Dma,
 }
@@ -96,6 +153,7 @@ struct Report {
     base: u64,
     mac: [u8; 6],
     link_up: bool,
+    peer_mac: [u8; 6],
     region: Region,
 }
 
@@ -161,6 +219,7 @@ pub fn probe(console: &mut dyn HalConsole) {
                 console,
                 "e1000: transmitted a {FRAME_BYTES}-byte frame, descriptor done"
             );
+            let _ = writeln!(console, "e1000: received ARP reply from 10.0.2.2, peer {:02x?}, descriptor recycled, INTx vector {:#x}, interrupts {}", report.peer_mac, RX_VECTOR.load(Ordering::Acquire), RX_INTERRUPTS.load(Ordering::Acquire));
             let _ = writeln!(console, "e1000: bound and started through nolx-df");
         }
         (None, Some(error)) => {
@@ -207,7 +266,8 @@ fn start_device(_dev: usize) -> bool {
 fn stop_device(_dev: usize) -> bool {
     let state = STATE.lock();
     state.report.as_ref().is_some_and(|report| {
-        report.region.write32(e1000::REG_RCTL, 0).is_ok()
+        report.region.write32(0x00d8, u32::MAX).is_ok()
+            && report.region.write32(e1000::REG_RCTL, 0).is_ok()
             && report.region.write32(e1000::REG_TCTL, 0).is_ok()
     })
 }
@@ -254,18 +314,38 @@ fn bring_up() -> Result<(Rings, Report), Failure> {
     // them but the one behind the head.
     let ring_bytes = e1000::ring_bytes(RING).ok_or(Failure::Frame)?;
     let rx = Dma::new().ok_or(Failure::Memory)?;
+    let mut buffers = Vec::with_capacity(RING as usize);
     for slot in 0..RING {
         let buffer = Dma::new().ok_or(Failure::Memory)?;
         rx.write(
             u64::from(slot) * e1000::DESCRIPTOR_BYTES as u64,
             &e1000::rx_descriptor(buffer.address(0)),
         );
+        buffers.push(buffer);
     }
     fence(Ordering::SeqCst);
     write_address(&regs, e1000::REG_RDBAL, rx.address(0))?;
     regs.write32(e1000::REG_RDLEN, ring_bytes)?;
     regs.write32(e1000::REG_RDH, 0)?;
     regs.write32(e1000::REG_RDT, RING - 1)?;
+    let irq = (ConfigAccess.read_u32(bdf, 0x3c) & 0xff) as u8;
+    if !super::apic::is_enabled() || !(3..16).contains(&irq) {
+        return Err(Failure::Interrupt);
+    }
+    *RECEIVE.lock() = Some(Receive {
+        regs,
+        descriptors: rx,
+        buffers,
+        next: 0,
+        frames: FrameQueue::new(),
+    });
+    RX_VECTOR.store(32 + irq, Ordering::Release);
+    // Clear stale causes, enable receive timer interrupts, then unmask the level route.
+    let _ = regs.read32(e1000::REG_ICR)?;
+    regs.write32(e1000::REG_IMS, e1000::ICR_RXT0)?;
+    if !super::ioapic::unmask_pci_irq(irq) {
+        return Err(Failure::Interrupt);
+    }
     regs.write32(e1000::REG_RCTL, e1000::rctl_enable(true))?;
 
     // Transmit ring, empty to begin with.
@@ -299,14 +379,48 @@ fn bring_up() -> Result<(Rings, Report), Failure> {
         "transmit",
     )?;
 
+    // A second TX descriptor asks the QEMU user-network gateway for a real ARP reply.
+    // This fixed peer belongs to the boot self-test, not an inferred network configuration.
+    let local_ip = [10, 0, 2, 15];
+    let peer_ip = [10, 0, 2, 2];
+    frame.write(0, &arp::request(mac, local_ip, peer_ip));
+    tx.write(16, &descriptor);
+    fence(Ordering::SeqCst);
+    regs.write32(e1000::REG_TDT, 2)?;
+    // Wait until the NIC has produced a descriptor before briefly unmasking CPU IF.
+    // The I/O APIC preserves the pending level interrupt until the handler reads ICR.
+    poll(
+        || {
+            let receive = RECEIVE.lock();
+            let receive = receive.as_ref().ok_or(Failure::Receive)?;
+            Ok(receive.descriptors.read_array::<1>(12)[0] & e1000::DESC_DD != 0)
+        },
+        "ARP receive descriptor",
+    )?;
+    if super::msix::wait_for_interrupts(&RX_INTERRUPTS, 1) < 1 {
+        return Err(Failure::Interrupt);
+    }
+    let peer_mac = {
+        let mut receive = RECEIVE.lock();
+        let receive = receive.as_mut().ok_or(Failure::Receive)?;
+        let mut peer = None;
+        while let Some(frame) = receive.frames.pop() {
+            if let Some(mac) = arp::reply(frame.bytes(), mac, local_ip, peer_ip) {
+                peer = Some(mac);
+                break;
+            }
+        }
+        peer.ok_or(Failure::Receive)?
+    };
     let link_up = regs.read32(e1000::REG_STATUS)? & e1000::STATUS_LINK_UP != 0;
     Ok((
-        Rings { rx, tx, frame },
+        Rings { tx, frame },
         Report {
             bdf,
             base,
             mac,
             link_up,
+            peer_mac,
             region: regs,
         },
     ))
@@ -337,7 +451,7 @@ fn enable_device(bdf: Bdf) {
     cfg.write_u32(
         bdf,
         PCI_COMMAND,
-        command | COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER,
+        (command | COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER) & !(1 << 10),
     );
 }
 
@@ -367,9 +481,19 @@ fn poll(
     mut ready: impl FnMut() -> Result<bool, Failure>,
     step: &'static str,
 ) -> Result<(), Failure> {
-    for _ in 0..POLL_LIMIT {
+    let clock = super::hpet::counter().zip(super::hpet::frequency_hz());
+    for iteration in 0..POLL_LIMIT * 100 {
         if ready()? {
             return Ok(());
+        }
+        match (clock, super::hpet::counter()) {
+            (Some((start, frequency)), Some(now)) => {
+                if super::hpet::elapsed_ticks(start, now) >= frequency.saturating_mul(2) {
+                    break;
+                }
+            }
+            _ if iteration >= POLL_LIMIT - 1 => break,
+            _ => {}
         }
         core::hint::spin_loop();
     }

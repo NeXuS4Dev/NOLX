@@ -13,6 +13,9 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod arp;
+pub mod queue;
+
 /// The virtio device ID of a network device.
 pub const VIRTIO_NET_DEVICE_ID: u16 = 1;
 /// The PCI device ID of a modern virtio device is 0x1040 plus its virtio device ID.
