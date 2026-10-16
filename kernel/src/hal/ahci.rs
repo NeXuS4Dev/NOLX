@@ -29,11 +29,12 @@ use super::pci::ConfigAccess;
 use super::virtio_blk::fill_pattern;
 use crate::mm::mmio::{self, Region};
 use crate::sync::IrqMutex;
-use core::sync::atomic::{fence, AtomicUsize, Ordering};
+use core::sync::atomic::{fence, AtomicBool, AtomicUsize, Ordering};
 
 /// Dedicated AHCI MSI completion vector.
 pub const COMPLETION_VECTOR: u8 = 0x52;
 static COMPLETIONS: AtomicUsize = AtomicUsize::new(0);
+static MSI_ACTIVE: AtomicBool = AtomicBool::new(false);
 static INTERRUPT_REGISTERS: IrqMutex<Option<(Region, u8)>> = IrqMutex::new(None);
 
 /// Clear port/controller causes before local APIC EOI. Never acquires the driver's state lock.
@@ -228,11 +229,19 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     port.write(ahci::PORT_SERR, u32::MAX)?;
     port.write(ahci::PORT_IS, u32::MAX)?;
     port.start()?;
-    *INTERRUPT_REGISTERS.lock() = Some((hba, number));
-    super::msix::enable_msi(bdf, COMPLETION_VECTOR).map_err(Failure::Msi)?;
-    // Enable only D2H register-FIS interrupts, one per completed DMA EXT command.
-    port.write(0x14, 1)?;
-    hba.write32(ahci::HBA_GHC, hba.read32(ahci::HBA_GHC)? | 2)?;
+    if super::apic::is_enabled() {
+        *INTERRUPT_REGISTERS.lock() = Some((hba, number));
+        super::msix::enable_msi(bdf, COMPLETION_VECTOR).map_err(Failure::Msi)?;
+        // Enable only D2H register-FIS interrupts, one per completed DMA EXT command.
+        port.write(0x14, 1)?;
+        MSI_ACTIVE.store(true, Ordering::Release);
+        hba.write32(ahci::HBA_GHC, hba.read32(ahci::HBA_GHC)? | 2)?;
+    } else {
+        // Preserve the existing polled disk path on machines without a local APIC.
+        port.write(0x14, 0)?;
+        MSI_ACTIVE.store(false, Ordering::Release);
+        hba.write32(ahci::HBA_GHC, hba.read32(ahci::HBA_GHC)? & !2)?;
+    }
 
     // Sector 0 first: its first bytes are the pattern CI wrote into the image.
     data.write(0, &[0u8; SECTOR_BYTES as usize]);
@@ -287,11 +296,15 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     if back != written {
         return Err(Failure::RoundTrip);
     }
-    let _ = writeln!(
-        console,
-        "ahci: MSI completion interrupts: {} of 3 commands, vector {COMPLETION_VECTOR:#x}",
-        COMPLETIONS.load(Ordering::Acquire)
-    );
+    if MSI_ACTIVE.load(Ordering::Acquire) {
+        let _ = writeln!(
+            console,
+            "ahci: MSI completion interrupts: {} of 3 commands, vector {COMPLETION_VECTOR:#x}",
+            COMPLETIONS.load(Ordering::Acquire)
+        );
+    } else {
+        let _ = writeln!(console, "ahci: polled completion fallback; no local APIC");
+    }
     let checksum = crc32(&back);
     let _ = writeln!(
         console,
@@ -398,7 +411,9 @@ fn issue(port: &Port, page: &Dma, data: &Dma, command: Command) -> Result<(), Fa
         },
         "command issue",
     )?;
-    if super::msix::wait_for_interrupts(&COMPLETIONS, expected) < expected {
+    if MSI_ACTIVE.load(Ordering::Acquire)
+        && super::msix::wait_for_interrupts(&COMPLETIONS, expected) < expected
+    {
         return Err(Failure::Interrupt);
     }
     fence(Ordering::SeqCst);
@@ -410,9 +425,19 @@ fn poll(
     mut ready: impl FnMut() -> Result<bool, Failure>,
     step: &'static str,
 ) -> Result<(), Failure> {
-    for _ in 0..POLL_LIMIT {
+    let clock = super::hpet::counter().zip(super::hpet::frequency_hz());
+    for iteration in 0..POLL_LIMIT * 100 {
         if ready()? {
             return Ok(());
+        }
+        match (clock, super::hpet::counter()) {
+            (Some((start, frequency)), Some(now)) => {
+                if super::hpet::elapsed_ticks(start, now) >= frequency.saturating_mul(2) {
+                    break;
+                }
+            }
+            _ if iteration >= POLL_LIMIT - 1 => break,
+            _ => {}
         }
         core::hint::spin_loop();
     }
