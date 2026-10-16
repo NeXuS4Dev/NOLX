@@ -433,12 +433,11 @@ fn execute(regs: &Region, queue: &mut Queue, command: &Sqe) -> Result<(), Failur
     let mut done = [0u8; nvme::CQE_BYTES];
     poll(
         || {
-            let mut bytes = [0u8; nvme::CQE_BYTES];
-            queue.cq.read(entry_at, &mut bytes);
-            let dw3 = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
-            if nvme::completion_phase(dw3) != queue.phase {
+            let Some(bytes) = nvme::read_completion(queue.phase, |offset, out| {
+                queue.cq.read(entry_at + offset as u64, out);
+            }) else {
                 return Ok(false);
-            }
+            };
             done = bytes;
             Ok(true)
         },

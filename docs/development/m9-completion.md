@@ -143,3 +143,10 @@ now preserves NVMe timeout/interrupt/status/identifier categories and changes th
 completion-interrupt wait from a CPU-speed-only spin count to a bounded two-second HPET
 budget (still with a hard iteration ceiling and clockless fallback). Per-command interrupt
 assertions remain mandatory. Full CI must pass again before treating this as verified.
+
+The NVMe review also found a publication-order hazard: copying all completion bytes before
+checking phase can combine a stale command identifier with a newly published phase bit.
+The shared completion reader now observes the phase byte first, fences, then snapshots the
+entry before ringing the completion-head doorbell. Two portable tests enforce the read
+ordering and ensure unpublished payloads are never consumed. This is separate from the
+interrupt deadline fix; both retain strict identifier/status/interrupt validation.

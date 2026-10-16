@@ -312,3 +312,64 @@ mod flush_tests {
         assert!(command[8..].iter().all(|&b| b == 0));
     }
 }
+
+/// Read a published completion, checking its phase byte before copying any payload.
+///
+/// The controller publishes the status/phase after the other completion fields. Copying the
+/// whole entry first can mix an old CID with a newly published phase. `read` must perform
+/// volatile/coherent device-memory reads; the queue entry must not be released to the device
+/// until the returned snapshot has been consumed.
+pub fn read_completion(
+    expected_phase: bool,
+    mut read: impl FnMut(usize, &mut [u8]),
+) -> Option<[u8; CQE_BYTES]> {
+    let mut phase = [0; 1];
+    read(14, &mut phase);
+    if (phase[0] & 1 != 0) != expected_phase {
+        return None;
+    }
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    let mut entry = [0; CQE_BYTES];
+    read(0, &mut entry);
+    Some(entry)
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    #[test]
+    fn phase_is_observed_before_copying_the_published_cid() {
+        let mut calls = 0;
+        let entry = read_completion(true, |offset, out| {
+            calls += 1;
+            if calls == 1 {
+                assert_eq!((offset, out.len()), (14, 1));
+                out[0] = 1;
+            } else {
+                assert_eq!((offset, out.len()), (0, CQE_BYTES));
+                // The device's payload became visible with its phase publication.
+                out[12..14].copy_from_slice(&71u16.to_le_bytes());
+                out[14] = 1;
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(
+            completion_cid(u32::from_le_bytes(entry[12..16].try_into().unwrap())),
+            71
+        );
+    }
+    #[test]
+    fn an_unpublished_entry_never_reads_stale_payload() {
+        let mut calls = 0;
+        assert_eq!(
+            read_completion(false, |offset, out| {
+                calls += 1;
+                assert_eq!((offset, out.len()), (14, 1));
+                out[0] = 1;
+            }),
+            None
+        );
+        assert_eq!(calls, 1);
+    }
+}
