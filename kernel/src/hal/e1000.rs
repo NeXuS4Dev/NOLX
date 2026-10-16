@@ -14,7 +14,6 @@
 //!
 //! CI runs QEMU with an e1000 on a user-mode network backend.
 
-use alloc::vec::Vec;
 use core::sync::atomic::{fence, AtomicU8, AtomicUsize, Ordering};
 use nolx_net_core::{arp, queue::FrameQueue};
 
@@ -36,7 +35,7 @@ static RECEIVE: IrqMutex<Option<Receive>> = IrqMutex::new(None);
 struct Receive {
     regs: Region,
     descriptors: Dma,
-    buffers: Vec<Dma>,
+    buffers: [Option<Dma>; RING as usize],
     next: u32,
     frames: FrameQueue<8>,
 }
@@ -71,8 +70,10 @@ pub fn on_interrupt() {
             && len <= nolx_net_core::FRAME_MAX_DEFAULT
         {
             let mut bytes = [0; nolx_net_core::FRAME_MAX_DEFAULT];
-            receive.buffers[receive.next as usize].read(0, &mut bytes[..len]);
-            receive.frames.push(&bytes[..len]);
+            if let Some(buffer) = &receive.buffers[receive.next as usize] {
+                buffer.read(0, &mut bytes[..len]);
+                receive.frames.push(&bytes[..len]);
+            }
         }
         receive.descriptors.write(offset + 8, &[0; 8]);
         fence(Ordering::Release);
@@ -314,14 +315,14 @@ fn bring_up() -> Result<(Rings, Report), Failure> {
     // them but the one behind the head.
     let ring_bytes = e1000::ring_bytes(RING).ok_or(Failure::Frame)?;
     let rx = Dma::new().ok_or(Failure::Memory)?;
-    let mut buffers = Vec::with_capacity(RING as usize);
+    let mut buffers = [const { None }; RING as usize];
     for slot in 0..RING {
         let buffer = Dma::new().ok_or(Failure::Memory)?;
         rx.write(
             u64::from(slot) * e1000::DESCRIPTOR_BYTES as u64,
             &e1000::rx_descriptor(buffer.address(0)),
         );
-        buffers.push(buffer);
+        buffers[slot as usize] = Some(buffer);
     }
     fence(Ordering::SeqCst);
     write_address(&regs, e1000::REG_RDBAL, rx.address(0))?;
