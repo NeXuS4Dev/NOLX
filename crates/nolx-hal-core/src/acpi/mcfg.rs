@@ -75,8 +75,8 @@ impl Mcfg {
                 let bus_overlap = previous.segment == allocation.segment
                     && previous.start_bus <= allocation.end_bus
                     && allocation.start_bus <= previous.end_bus;
-                let physical_overlap = previous.first() <= allocation.last()
-                    && allocation.first() <= previous.last();
+                let physical_overlap =
+                    previous.first() <= allocation.last() && allocation.first() <= previous.last();
                 if bus_overlap || physical_overlap {
                     return Err(AcpiError::InvalidEntry);
                 }
@@ -109,7 +109,8 @@ mod tests {
         let len = bytes.len() as u32;
         bytes[4..8].copy_from_slice(&len.to_le_bytes());
         bytes[8] = 1;
-        for (record, &(base, segment, start, end)) in bytes[44..].chunks_exact_mut(16).zip(records) {
+        for (record, &(base, segment, start, end)) in bytes[44..].chunks_exact_mut(16).zip(records)
+        {
             record[..8].copy_from_slice(&base.to_le_bytes());
             record[8..10].copy_from_slice(&segment.to_le_bytes());
             record[10] = start;
@@ -168,7 +169,7 @@ mod tests {
         for second in [
             (0x9000_0000, 0, 32, 80), // same segment, overlapping buses
             (0x8000_0000, 1, 32, 80), // distinct segment, physical alias
-            (0x8000_0000, 0, 0, 63), // duplicate
+            (0x8000_0000, 0, 0, 63),  // duplicate
         ] {
             assert_eq!(
                 Mcfg::parse(&table(&[(0x8000_0000, 0, 0, 63), second])),
@@ -188,7 +189,10 @@ mod tests {
         );
         let mut too_many = records;
         too_many.push((0x8000_0000, 0, 32, 32));
-        assert_eq!(Mcfg::parse(&table(&too_many)), Err(AcpiError::TooManyEntries));
+        assert_eq!(
+            Mcfg::parse(&table(&too_many)),
+            Err(AcpiError::TooManyEntries)
+        );
         let mut bytes = table(&[(0x8000_0000, 0, 0, 0)]);
         bytes[36..44].fill(0xff);
         bytes[56..60].fill(0xff);

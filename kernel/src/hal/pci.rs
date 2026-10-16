@@ -112,7 +112,10 @@ fn probe_ecam(console: &mut dyn HalConsole, inventory: &nolx_pci_core::Inventory
     use nolx_pci_core::ecam::{AccessWidth, EcamWindow};
 
     let Some(mcfg) = super::acpi::discover().and_then(|platform| platform.mcfg) else {
-        let _ = writeln!(console, "pci: no usable MCFG; legacy configuration retained");
+        let _ = writeln!(
+            console,
+            "pci: no usable MCFG; legacy configuration retained"
+        );
         return;
     };
     let mut matched = 0;

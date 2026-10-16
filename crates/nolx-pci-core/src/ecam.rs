@@ -56,12 +56,7 @@ pub struct EcamWindow {
 
 impl EcamWindow {
     /// Validate an MCFG allocation, including its highest addressable byte.
-    pub fn new(
-        base: u64,
-        segment: u16,
-        start_bus: u8,
-        end_bus: u8,
-    ) -> Result<Self, EcamError> {
+    pub fn new(base: u64, segment: u16, start_bus: u8, end_bus: u8) -> Result<Self, EcamError> {
         if base & 0xF_FFFF != 0 {
             return Err(EcamError::UnalignedBase);
         }
