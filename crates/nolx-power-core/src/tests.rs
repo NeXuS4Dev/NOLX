@@ -227,3 +227,36 @@ fn a_fadt_that_is_damaged_or_incomplete_is_refused_with_its_reason() {
         "a port above 0xFFFF is not an I/O port"
     );
 }
+
+#[test]
+fn sleep_control_preserves_every_unrelated_bit() {
+    let mask = (7 << 10) | (1 << 13);
+    for current in [0, 1, 0xffff, 0x1555, 0xaaaa] {
+        for typ in 0..8 {
+            for enable in [false, true] {
+                let word = pm1_sleep_control(current, typ, enable).unwrap();
+                assert_eq!(word & !mask, current & !mask);
+                assert_eq!(word & mask, pm1_sleep_value(typ, enable).unwrap());
+            }
+        }
+    }
+    assert_eq!(pm1_sleep_control(0xffff, 8, true), None);
+}
+
+#[test]
+fn fadt_records_acpi_enable_and_control_width_without_truncating_ports() {
+    let mut bytes = fadt(116, 1, 0x1000, 0, 0x604, 0);
+    bytes[48..52].copy_from_slice(&0xb2u32.to_le_bytes());
+    bytes[52] = 0xf1;
+    bytes[89] = 2;
+    bytes[9] = 0;
+    bytes[9] = 0u8.wrapping_sub(bytes[..116].iter().fold(0u8, |a, &b| a.wrapping_add(b)));
+    let parsed = Fadt::parse(&bytes[..116]).unwrap();
+    assert_eq!(parsed.smi_command, Some(0xb2));
+    assert_eq!(parsed.acpi_enable, 0xf1);
+    assert_eq!(parsed.pm1_control_bytes, 2);
+    bytes[48..52].copy_from_slice(&0x100b2u32.to_le_bytes());
+    bytes[9] = 0;
+    bytes[9] = 0u8.wrapping_sub(bytes[..116].iter().fold(0u8, |a, &b| a.wrapping_add(b)));
+    assert_eq!(Fadt::parse(&bytes[..116]).unwrap().smi_command, None);
+}

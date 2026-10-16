@@ -210,6 +210,8 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         let mut round_robin_reported = false;
         let mut user_test_started = false;
         let mut user_test_reported = false;
+        #[cfg(feature = "hal-power-test-s5")]
+        let mut power_test_started = false;
         loop {
             hal::ps2::report_events(&mut console);
             if !round_robin_reported && exec::round_robin_complete() {
@@ -270,6 +272,22 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
                 if let Err(message) = mm::space::selftest::run(&mut console) {
                     let _ = writeln!(console, "NOLX: address space selftest: FAILED: {message}");
                     panic!("address space selftest: {message}");
+                }
+            }
+
+            #[cfg(feature = "hal-power-test-s5")]
+            if memory_selftest_done && !power_test_started {
+                power_test_started = true;
+                // The dedicated power test refuses any active PCI bus master before calling
+                // the primitive. Production suspend/shutdown must supply a driver quiesce policy.
+                if hal::power::test_vm_has_active_busmaster() {
+                    let _ = writeln!(console, "power: S5 refused: active PCI bus master");
+                } else {
+                    // SAFETY: this feature is run only by the single-CPU QEMU test with no
+                    // DMA devices; all PCI bus masters were checked inactive above.
+                    if let Err(error) = unsafe { hal::power::request_s5_quiesced(&mut console) } {
+                        panic!("power: S5 request failed: {error:?}");
+                    }
                 }
             }
 

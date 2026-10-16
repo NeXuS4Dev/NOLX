@@ -280,6 +280,12 @@ pub struct Fadt {
     pub pm1a_control: u16,
     /// The I/O port of the PM1b control block, when the platform has one.
     pub pm1b_control: Option<u16>,
+    /// Legacy SMI command port used to enable ACPI mode, when it fits the I/O address space.
+    pub smi_command: Option<u16>,
+    /// Firmware command byte for enabling ACPI mode (zero means unsupported).
+    pub acpi_enable: u8,
+    /// Width of each PM1 control block, in bytes (zero when absent from an old short table).
+    pub pm1_control_bytes: u8,
 }
 
 /// Why a FADT was refused.
@@ -339,6 +345,11 @@ impl Fadt {
             dsdt,
             pm1a_control,
             pm1b_control,
+            smi_command: u16::try_from(le32(table, 48))
+                .ok()
+                .filter(|&port| port != 0),
+            acpi_enable: table[52],
+            pm1_control_bytes: table.get(89).copied().unwrap_or(0),
         })
     }
 }
@@ -355,3 +366,9 @@ fn le64(bytes: &[u8], at: usize) -> u64 {
 
 #[cfg(test)]
 mod tests;
+
+/// Set only PM1 SLP_TYP/SLP_EN while retaining SCI_EN, bus-master reload and reserved bits.
+#[must_use]
+pub fn pm1_sleep_control(current: u16, sleep_type: u8, enable: bool) -> Option<u16> {
+    Some((current & !((7 << 10) | (1 << 13))) | pm1_sleep_value(sleep_type, enable)?)
+}

@@ -27,6 +27,7 @@ pub mod multiboot;
 pub mod nvme;
 pub mod pci;
 pub mod pic;
+pub mod power;
 pub mod ps2;
 pub mod rtc;
 pub mod storage_volume;
@@ -38,7 +39,7 @@ pub mod virtio_net;
 pub mod xhci;
 
 use nolx_hal_core::console::HalConsole;
-use nolx_power_core as power;
+use nolx_power_core as power_rules;
 
 /// `EFER`, the extended feature enable register.
 const MSR_EFER: u32 = 0xC000_0080;
@@ -144,7 +145,7 @@ pub fn init(console: &mut dyn HalConsole) {
         }
         match platform.s5_sleep_type {
             Some(sleep_type) => {
-                let word = power::pm1_sleep_value(sleep_type, true).unwrap_or(0);
+                let word = power_rules::pm1_sleep_value(sleep_type, true).unwrap_or(0);
                 let _ = writeln!(
                     console,
                     "acpi: S5 sleep type {sleep_type}, soft-off word would be {word:#x}, not entered"

@@ -54,7 +54,9 @@ M9 to the already implemented boot probes. Check items only with executable evid
       methods, with explicit unsupported-operation and resource limits.
 - [ ] Consume evaluated resources/status for device discovery and routing.
 - [ ] Device power-state/quiesce policy and S3 save/resume path.
-- [ ] ACPI S5 entry with QEMU observing actual shutdown, not a printed hypothetical word.
+- [x] ACPI S5 entry with QMP observing actual guest shutdown and QEMU exit zero, not a
+      printed hypothetical word. The unsafe primitive requires prior system quiescence;
+      its test VM has no active DMA, and a negative test refuses an active bus master.
 
 ## Final verification
 
@@ -150,3 +152,24 @@ The shared completion reader now observes the phase byte first, fences, then sna
 entry before ringing the completion-head doorbell. Two portable tests enforce the read
 ordering and ensure unpublished payloads are never consumed. This is separate from the
 interrupt deadline fix; both retain strict identifier/status/interrupt validation.
+
+NVMe follow-up run [38961357104](https://github.com/NeXuS4Dev/NOLX/actions/runs/38961357104)
+on `6ee3f79` passed **all ten jobs** after both completion fixes. Twenty-four simultaneous
+local stress boots (six QEMUs at a time) also passed full file/commit/memory/zero-heap-leak
+checks. The preceding deadline-only revision's CI also passed all ten jobs, but the phase
+publication ordering is retained because it fixes an independent correctness hazard.
+
+## Actual S5 entry (2026-10-16)
+
+`hal::power::request_s5_quiesced` enables ACPI mode through the validated FADT SMI command
+when necessary, preserves unrelated PM1 bits and issues the actual SLP_TYP/SLP_EN write.
+Dual-control blocks and unsupported formats are refused rather than guessed. The caller
+must already have stopped DMA and other CPUs; this is explicitly an unsafe low-level
+primitive, not a claim that the production power/quiesce policy exists.
+
+The dedicated `hal-power-test-s5` feature calls it only after all boot/memory tests, refusing
+active PCI bus masters. `scripts/check-power-s5.py` locally observed QMP `SHUTDOWN` with
+`guest=true`, `reason=guest-shutdown` and QEMU exit zero on pc and Q35 (SATA disabled in
+the positive Q35 no-DMA fixture). An active virtio-net interface was refused without a
+shutdown event. Portable tests cover preserved control bits and validated ACPI-enable/port
+fields. A dedicated CI job is configured; this does **not** close S3 or device-power policy.

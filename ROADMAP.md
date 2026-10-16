@@ -951,3 +951,12 @@ verifies descriptor recycling, both completion vectors, and exact Ethernet bytes
 outside the guest. The dedicated test covers pc/Q35, absent hardware and no-APIC refusal.
 This closes the basic virtio-net transport gate, not persistent multi-device framework
 lifecycle, configurable network configuration, USB/AML/power, or M9 as a whole.
+
+### M9 S5 hardware entry work (2026-10-16)
+
+A real ACPI S5 primitive now preserves PM1 control bits, enables ACPI mode when needed,
+and writes SLP_TYP/SLP_EN. Its unsafe contract requires prior system quiescence; the explicit
+hardware-test feature uses a no-active-DMA VM after the complete boot/memory tests.
+QMP observed actual guest shutdown and QEMU exit zero locally on pc/Q35; an active virtio-net
+bus master caused refusal. A dedicated CI job covers those positive and negative cases.
+S3 save/resume, AML methods and production system-wide device power/quiescence are still open.
