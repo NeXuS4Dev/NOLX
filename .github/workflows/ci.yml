@@ -614,7 +614,8 @@ jobs:
           PY
 
       - name: Assert AHCI MSI completions
-        run: grep -F 'ahci: MSI completion interrupts: 3 of 3 commands, vector 0x52' build/serial.log
+        run: |
+          grep -F 'ahci: MSI completion interrupts: 3 of 3 commands, vector 0x52' build/serial.log
 
       - name: Exercise PCIe ECAM and legacy-only configuration
         run: scripts/check-pci-ecam.sh 2>&1 | tee -a /tmp/job.log
