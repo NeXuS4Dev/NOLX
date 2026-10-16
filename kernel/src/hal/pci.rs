@@ -3,13 +3,13 @@
 //! The mechanism is the one every x86 PC has: write a dword address to `0xCF8`, then read or
 //! write the dword at `0xCFC`. The bit-level rules -- address encoding, header parsing, BAR
 //! sizing, capability walking, bridge-aware enumeration -- live in `nolx-pci-core`, where they
-//! are host-tested. This module supplies port access and reports the result; its ECAM probe
-//! independently checks identities through uncached MMIO without changing driver writes.
+//! are host-tested. Drivers use [`ConfigAccess`] for ECAM reads/writes on mapped ranges,
+//! with serialized legacy-port fallback restricted to segment zero.
 //!
 //! The address and data ports are a pair: any access between them would select a different
 //! register. Discovery runs on the boot processor before the periodic timer starts, so nothing
-//! else touches the pair. Interrupt-driven drivers will need that pair under a lock; the
-//! assertion rows record that obligation rather than leaving it implicit.
+//! else touches the pair. [`LEGACY_LOCK`] also serializes and masks interrupts around
+//! every address/data transaction, including calls after boot.
 
 use nolx_hal_core::console::HalConsole;
 use nolx_pci_core::{Bar, BarSet, Bdf, ConfigSpace};
@@ -183,8 +183,8 @@ impl ConfigSpace for LegacyPorts {
 
     fn write_u32(&mut self, bdf: Bdf, offset: u8, value: u32) {
         let _guard = LEGACY_LOCK.lock();
-        // SAFETY: as [`LegacyPorts::read_u32`]. Writes come only from the BAR sizing protocol,
-        // which restores each register it changes; discovery itself never writes.
+        // SAFETY: as [`LegacyPorts::read_u32`]. Callers are PCI configuration algorithms
+        // (BAR probing, device enable and interrupt setup); the pair stays locked.
         unsafe {
             outl(
                 nolx_pci_core::CONFIG_ADDRESS_PORT,
@@ -280,7 +280,7 @@ fn report_bars(console: &mut dyn HalConsole, bdf: Bdf, bars: &BarSet) {
     }
 }
 
-/// Exercise read-only ECAM through uncached MMIO without changing the drivers' transport.
+/// Independently check mapped ECAM identities and extended headers against legacy discovery.
 /// Called after the memory manager starts and before the periodic timer is enabled.
 fn probe_ecam(console: &mut dyn HalConsole, inventory: &nolx_pci_core::Inventory) {
     use nolx_pci_core::ecam::{AccessWidth, EcamWindow};
@@ -353,6 +353,6 @@ fn probe_ecam(console: &mut dyn HalConsole, inventory: &nolx_pci_core::Inventory
     }
     let _ = writeln!(
         console,
-        "pci: ECAM {matched} identity match(es), {refused} refused; legacy configuration retained"
+        "pci: ECAM {matched} identity match(es), {refused} refused; legacy fallback available"
     );
 }

@@ -2,7 +2,9 @@
 //! by its vendor and device ID and registers a driver for it. The framework binds the device and
 //! starts it; starting resets the controller, reads the MAC address from the EEPROM, programs the
 //! receive address, sets up one receive ring and one transmit ring of eight legacy descriptors,
-//! enables both engines, and transmits one 60-byte frame. Everything is polled, with bounds.
+//! enables both engines, transmits a 60-byte frame and requests an ARP reply from QEMU's
+//! user-network gateway. The level-triggered INTx handler acknowledges ICR, copies completed
+//! packets into a bounded FIFO, and recycles receive descriptors. Polling has bounded budgets.
 //!
 //! The register offsets, descriptor layouts, and ring arithmetic live in `nolx-e1000-core`, where
 //! they are host-tested. The framework's rules live in `nolx-df-core`. This module supplies register
@@ -10,7 +12,8 @@
 //!
 //! The framework dispatch table takes plain function pointers and no context, so the state the
 //! driver keeps between calls is in a static [`IrqMutex`]. The receive buffers are never reclaimed:
-//! the kernel has no frame free path, and the device owns them for as long as it is running.
+//! the device owns them for as long as it is running. RX buffers are retained in a fixed array,
+//! with no heap allocation in initialization or interrupt delivery.
 //!
 //! CI runs QEMU with an e1000 on a user-mode network backend.
 
@@ -477,7 +480,7 @@ fn find_controller() -> Option<(Bdf, DeviceId)> {
         })
 }
 
-/// Poll `ready` until it returns true, at most [`POLL_LIMIT`] times.
+/// Poll with a two-second HPET budget and hard iteration bound, or a bounded clockless fallback.
 fn poll(
     mut ready: impl FnMut() -> Result<bool, Failure>,
     step: &'static str,

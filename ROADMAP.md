@@ -728,10 +728,46 @@ completion before unmasking interrupts, and gives virtio polling an HPET-based
 two-second budget with bounded fallback/hard iteration ceilings. No test assertions
 were relaxed. Follow-up CI evidence is recorded in PR #14.
 
-Next: full ECAM transport selection for drivers and multi-segment enumeration.
-This checkpoint proves read-only ECAM access, not a complete PCIe transport.
+The next step at that checkpoint was native ECAM driver transport and multi-segment
+enumeration; the continuation below implements those paths.
 
-Not yet done: PCIe ECAM driver transport, MSI/MSI-X in the other drivers (NVMe uses MSI-X, see below), and every driver below.
+### M9 completion work — native transport, AHCI MSI, receive and PS/2 (2026-10-16)
+
+M9 remains **in progress**. Its full completion gate now lives in
+[docs/development/m9-completion.md](docs/development/m9-completion.md); it includes the
+unfinished work rather than treating green existing tests as proof of completion.
+
+- Drivers now select mapped ECAM reads/writes, with locked legacy port pairs as a
+  segment-zero-only fallback. Explicit segment adapters and declared root-bus ranges
+  prevent equal BDFs in different segments from aliasing. Q35 CI performs real virtio
+  disk writes through this transport, then checks the disk image. Nonzero segments are
+  enumerated/reported; existing boot drivers still bind segment zero.
+- AHCI programs a single MSI on vector 0x52. The handler acknowledges port/HBA causes
+  before APIC EOI; all three disk commands prove interrupt delivery and retain on-disk
+  checksum verification. A follow-up preserves polling when no local APIC exists and
+  adds an AHCI disk to the PIC/PIT fallback boot (AHCI-013).
+- e1000 retains RX buffers in a fixed array, enables its supported active-low/level INTx
+  route, acknowledges ICR and recycles descriptors into a bounded FIFO without allocating
+  or printing in the ISR. A real ARP request/reply with QEMU's user-network gateway checks
+  frame contents and interrupt delivery. The 82540EM does not advertise MSI; none is claimed.
+  Full AML-derived PCI link routing and a configurable network stack are not implemented.
+- PS/2 keyboard and standard three-byte mouse ports are initialized and IRQ1/IRQ12 are
+  serviced on APIC and PIC paths. A bounded source-tagged event FIFO carries HID key usages,
+  signed relative pointer motion and buttons to an idle-context consumer. CI injects real
+  QMP key presses/releases and mouse motion/buttons after scheduler bring-up and asserts
+  the decoded contents. This is not yet USB HID enumeration or a public input-device API.
+
+Run [38953420334](https://github.com/NeXuS4Dev/NOLX/actions/runs/38953420334) on `492d7a5`
+passed all nine jobs. PCI-019, AHCI-012, NIC-011/012 and PS2-010 are `tested-T2`;
+PCI-020/021, NET-007/008 and PS2-008/009 are `tested-T1`. Eleven new portable tests pass.
+Local full host tests, host/kernel-target Clippy, formatting and release image checks pass.
+An initial workflow scalar quoting error was fixed. Another run found the RX ownership
+vector retained 64 heap bytes, violating the existing heap self-test baseline; replacing it
+with a fixed array removed the allocation. The heap assertion was not weakened.
+
+Not yet done: xHCI enumeration and HID transfer paths, virtio-net, AML namespace/method
+execution and resource-driven routing, S3/S5 and driver power/lifecycle integration.
+The complete unchecked gates remain in the linked checklist.
 
 - PCI/PCIe enumeration, BAR assignment, MSI/MSI-X, capability walking.
 - Storage: AHCI (SATA), NVMe, virtio-blk; block layer with partitions (GPT), request

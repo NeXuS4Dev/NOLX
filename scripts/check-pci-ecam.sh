@@ -42,7 +42,7 @@ data = Path('build/ecam-disk.img').read_bytes()[1600*512:1604*512]
 checksum = f'crc32 0x{zlib.crc32(data):08x} matches'
 assert checksum in log, 'ECAM-backed disk image does not match the reported checksum'
 CHECK
-    grep -qE 'pci: ECAM [1-9][0-9]* identity match\(es\), 0 refused; legacy configuration retained' "$log"
+    grep -qE 'pci: ECAM [1-9][0-9]* identity match\(es\), 0 refused; legacy fallback available' "$log"
     grep -qE 'pci: ECAM [0-9a-f]{2}:[0-9a-f]{2}\.[0-7] identity matched, extended header 0x[0-9a-f]{8}' "$log"
   else
     grep -qF 'pci: configuration transport=legacy' "$log"

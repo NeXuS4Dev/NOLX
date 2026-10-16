@@ -1,6 +1,7 @@
 //! The AHCI driver's probe: find the controller, find the first port with a SATA disk, start
 //! that port, read sector 0 through command slot 0, then write a pattern to sectors 1600 to 1603,
-//! read them back, and compare CRC-32 checksums. Everything is polled.
+//! read them back, and compare CRC-32 checksums. Commands verify MSI delivery when a local
+//! APIC is available, with a polled completion fallback otherwise.
 //!
 //! The rules -- the register offsets, the port state bits, the FIS and command-header layouts,
 //! the physical region descriptors -- live in `nolx-ahci-core`, where they are host-tested. This
@@ -21,7 +22,7 @@ use nolx_block_core::queue::{Direction, Request};
 use nolx_df_core::{DeviceId, Dispatch, Driver, Match, Registry};
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
-use nolx_pci_core::{Bar, Bdf};
+use nolx_pci_core::{Bar, Bdf, ConfigSpace};
 use nolx_virtio_core::crc32;
 
 use super::dma::Dma;
@@ -201,6 +202,8 @@ fn stop_device(_dev: usize) -> bool {
 
 fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     let (bdf, _) = find_controller().ok_or(Failure::NoController)?;
+    let command = ConfigAccess.read_u32(bdf, 4) & 0xffff;
+    ConfigAccess.write_u32(bdf, 4, command | 6);
     let bars = nolx_pci_core::read_bars(&mut ConfigAccess, bdf);
     let abar = match bars.slots[ABAR_SLOT] {
         Bar::Memory32 { base, .. } => u64::from(base),
@@ -420,7 +423,7 @@ fn issue(port: &Port, page: &Dma, data: &Dma, command: Command) -> Result<(), Fa
     Ok(())
 }
 
-/// Poll `ready` until it returns true, at most [`POLL_LIMIT`] times.
+/// Poll with a two-second HPET budget and hard iteration bound, or a bounded clockless fallback.
 fn poll(
     mut ready: impl FnMut() -> Result<bool, Failure>,
     step: &'static str,

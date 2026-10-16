@@ -13,7 +13,7 @@
 //!
 //! Scope: legacy configuration access, MSI/MSI-X rules in [`msi`], and validated PCIe
 //! ECAM address calculations in [`ecam`]. The kernel still uses legacy configuration
-//! ports for drivers, with a read-only ECAM boot probe using MCFG discovery.
+//! ports as a segment-zero fallback, selecting ECAM for driver reads/writes when mapped.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
