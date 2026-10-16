@@ -23,6 +23,7 @@ name = "nolx-kernel"
 path = "src/main.rs"
 
 [dependencies]
+nolx-input-core = { path = "../crates/nolx-input-core" }
 nolx-net-core = { path = "../crates/nolx-net-core" }
 nolx-ahci-core = { path = "../crates/nolx-ahci-core" }
 nolx-nvme-core = { path = "../crates/nolx-nvme-core" }

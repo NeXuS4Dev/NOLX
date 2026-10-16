@@ -60,6 +60,7 @@ dependencies = [
  "nolx-e1000-core",
  "nolx-exec-core",
  "nolx-hal-core",
+ "nolx-input-core",
  "nolx-mm-core",
  "nolx-net-core",
  "nolx-nvme-core",

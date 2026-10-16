@@ -263,7 +263,7 @@ pub fn unmask_legacy_irq(irq: u8) -> bool {
 /// Extended PCI link-device routing still requires ACPI `_PRT`/resource evaluation.
 pub fn unmask_pci_irq(irq: u8) -> bool {
     let index = usize::from(irq);
-    if !(3..LEGACY_IRQS).contains(&index) {
+    if !(3..LEGACY_IRQS).contains(&index) || irq == 12 {
         return false;
     }
     let base = IRQ_ROUTE_BASE[index].load(Ordering::Acquire);

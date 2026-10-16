@@ -622,6 +622,9 @@ jobs:
         run: |
           grep -F 'ahci: MSI completion interrupts: 3 of 3 commands, vector 0x52' build/serial.log
 
+      - name: Inject PS/2 keyboard and mouse input through QMP
+        run: python3 scripts/check-ps2-input.py 2>&1 | tee -a /tmp/job.log
+
       - name: Exercise PCIe ECAM and legacy-only configuration
         run: scripts/check-pci-ecam.sh 2>&1 | tee -a /tmp/job.log
 
@@ -656,6 +659,7 @@ jobs:
             build/serial.log
             build/hal-*.serial.log
             build/pci-*.serial.log
+            build/input-*.serial.log
       # Posted on success as well as failure. The artifact above is the archive of
       # record, but it is not reachable from everywhere this project is developed; the
       # comment is.

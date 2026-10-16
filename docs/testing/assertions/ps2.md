@@ -21,3 +21,7 @@ PS2-006 | NOLX M9 Extended keys: a key after the E0 prefix uses the extended tab
 PS2-007 | NOLX M9 Pause and Print Screen: the Pause sequence is consumed in full and decoding resumes after it; the Print Screen fake-shift sequences report no key, and an unknown code reports nothing | tested-T1 | nolx-input-core tests::pause_is_consumed_and_decoding_resumes_after_it, tests::print_screen_fake_shifts_and_unknown_codes_report_nothing
 
 All seven rows are `tested-T1`: the host tests passed in CI (workflow 38599792741, host-test job).
+
+PS2-008 | NOLX M9 mouse decoding: resynchronize on first-byte bit 3, decode signed nine-bit displacement and button masks, invert Y to screen coordinates and discard overflowed/errored partial packets | tested-T1 | nolx-input-core events::tests::mouse_resynchronizes_and_decodes_nine_bit_signed_motion (local Rust 1.88 passed)
+PS2-009 | NOLX M9 bounded input delivery: source-tagged key/pointer events preserve FIFO order across wrap, never overwrite unread events, count overflow and support zero capacity | tested-T1 | nolx-input-core events::tests::queue_preserves_sources_and_order_on_wrap_without_overwriting (local Rust 1.88 passed)
+PS2-010 | NOLX M9 PS/2 hardware input: initialize i8042 keyboard/mouse, route IRQ1/IRQ12, decode actual incoming bytes and deliver key press/release, relative movement and button changes outside the ISR | pending-T2 | scripts/check-ps2-input.py injects QMP keyboard and mouse events after scheduler boot, then asserts exact HID usage, displacement and button values

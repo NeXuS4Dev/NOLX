@@ -32,6 +32,18 @@ extern "C" fn nolx_interrupt_dispatch(frame_pointer: *mut InterruptFrame) -> *mu
         return frame_pointer;
     }
 
+    if vector == 33 || vector == 44 {
+        if apic::is_enabled() {
+            return device_completion(frame_pointer, super::ps2::on_interrupt);
+        }
+        let previous = cpu::raise_ipl(Ipl::DEVICE_MIN);
+        super::ps2::on_interrupt();
+        pic::end_of_interrupt(vector);
+        if let Some(previous) = previous {
+            cpu::restore_ipl(previous);
+        }
+        return frame_pointer;
+    }
     if apic::is_enabled() && super::e1000::handles_vector(vector) {
         return device_completion(frame_pointer, super::e1000::on_interrupt);
     }
