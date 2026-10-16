@@ -1,9 +1,10 @@
-//! Legacy PCI configuration access and the boot-time device inventory.
+//! Legacy PCI configuration access, boot-time inventory, and a read-only ECAM probe.
 //!
 //! The mechanism is the one every x86 PC has: write a dword address to `0xCF8`, then read or
 //! write the dword at `0xCFC`. The bit-level rules -- address encoding, header parsing, BAR
 //! sizing, capability walking, bridge-aware enumeration -- live in `nolx-pci-core`, where they
-//! are host-tested. This module supplies only the two port accesses and reports the result.
+//! are host-tested. This module supplies port access and reports the result; its ECAM probe
+//! independently checks identities through uncached MMIO without changing driver writes.
 //!
 //! The address and data ports are a pair: any access between them would select a different
 //! register. Discovery runs on the boot processor before the periodic timer starts, so nothing
@@ -74,6 +75,7 @@ pub fn init(console: &mut dyn HalConsole) {
             info.header_type
         );
     }
+    probe_ecam(console, &inventory);
     for info in inventory.as_slice() {
         if info.header_type == 0 {
             let bars = nolx_pci_core::read_bars(&mut LegacyPorts, info.bdf);
@@ -101,4 +103,81 @@ fn report_bars(console: &mut dyn HalConsole, bdf: Bdf, bars: &BarSet) {
             "pci: {bus:02x}:{device:02x}.{function} bar{slot} {kind} {base:#x} size {size:#x} prefetch={prefetch}"
         );
     }
+}
+
+/// Exercise read-only ECAM through uncached MMIO without changing the drivers' transport.
+/// Called after the memory manager starts and before the periodic timer is enabled.
+fn probe_ecam(console: &mut dyn HalConsole, inventory: &nolx_pci_core::Inventory) {
+    use crate::mm::mmio;
+    use nolx_pci_core::ecam::{AccessWidth, EcamWindow};
+
+    let Some(mcfg) = super::acpi::discover().and_then(|platform| platform.mcfg) else {
+        let _ = writeln!(
+            console,
+            "pci: no usable MCFG; legacy configuration retained"
+        );
+        return;
+    };
+    let mut matched = 0;
+    let mut refused = 0;
+    for info in inventory.as_slice() {
+        // Legacy discovery describes only segment zero. Never compare its BDFs to
+        // another segment, even when that segment uses the same bus numbers.
+        let Some(allocation) = mcfg.allocations().iter().find(|allocation| {
+            allocation.segment == 0
+                && allocation.start_bus <= info.bdf.bus
+                && info.bdf.bus <= allocation.end_bus
+        }) else {
+            continue;
+        };
+        let window = match EcamWindow::new(
+            allocation.base,
+            allocation.segment,
+            allocation.start_bus,
+            allocation.end_bus,
+        ) {
+            Ok(window) => window,
+            Err(_) => {
+                refused += 1;
+                continue;
+            }
+        };
+        let physical = match window.address(0, info.bdf, 0, AccessWidth::Dword) {
+            Ok(physical) => physical,
+            Err(_) => {
+                refused += 1;
+                continue;
+            }
+        };
+        // Map one function, not the potentially 256 MiB allocation. The MMIO
+        // allocator rejects RAM aliases and unsupported physical addresses.
+        let region = match mmio::map(physical, 4096) {
+            Ok(region) => region,
+            Err(_) => {
+                refused += 1;
+                continue;
+            }
+        };
+        let expected = u32::from(info.vendor_id) | (u32::from(info.device_id) << 16);
+        if region.read32(0) != Ok(expected) {
+            refused += 1;
+            continue;
+        }
+        // The extended capability header is read-only. Zero/all-ones is valid
+        // when no extended capabilities exist; do not mistake it for a fault.
+        if let Ok(header) = region.read32(0x100) {
+            matched += 1;
+            let _ = writeln!(
+                console,
+                "pci: ECAM {:02x}:{:02x}.{} identity matched, extended header {header:#010x}",
+                info.bdf.bus, info.bdf.device, info.bdf.function
+            );
+        } else {
+            refused += 1;
+        }
+    }
+    let _ = writeln!(
+        console,
+        "pci: ECAM {matched} identity match(es), {refused} refused; legacy configuration retained"
+    );
 }

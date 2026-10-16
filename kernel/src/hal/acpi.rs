@@ -1,9 +1,9 @@
-//! Early physical-memory discovery for ACPI root, MADT, and HPET tables.
+//! Early physical-memory discovery for ACPI root, MADT, HPET, MCFG, and power tables.
 
 use core::ptr;
 
 use crate::mm::phys;
-use nolx_hal_core::acpi::{HpetInfo, Madt, Rsdp, Sdt};
+use nolx_hal_core::acpi::{mcfg::Mcfg, HpetInfo, Madt, Rsdp, Sdt};
 use nolx_power_core::{self as power, Fadt, SleepState};
 
 /// How much physical memory the direct map covers. Tables outside it cannot be read, and a
@@ -22,6 +22,8 @@ pub struct PlatformTables {
     pub madt: Madt,
     /// HPET register-block metadata, when firmware published an HPET table.
     pub hpet: Option<HpetInfo>,
+    /// Validated PCIe ECAM allocations, when firmware publishes an MCFG table.
+    pub mcfg: Option<Mcfg>,
     /// `true` when the platform root was an XSDT, otherwise an RSDT.
     pub used_xsdt: bool,
     /// ACPI revision reported by the RSDP.
@@ -34,7 +36,7 @@ pub struct PlatformTables {
     pub s3_sleep_type: Option<u8>,
 }
 
-/// Find and validate the platform RSDP, root table, MADT, and optional HPET table.
+/// Find and validate the platform RSDP, root table, MADT, and optional device tables.
 ///
 /// Firmware tables outside the direct map are ignored. The early kernel has no allocator for
 /// a dedicated mapping yet, so later memory-manager work will replace this restriction with
@@ -61,6 +63,7 @@ pub fn discover() -> Option<PlatformTables> {
         let mut madt = None;
         let mut hpet = None;
         let mut fadt = None;
+        let mut mcfg = None;
         for physical_address in entries {
             let Some(table) = read_sdt_at(physical_address) else {
                 continue;
@@ -75,6 +78,9 @@ pub fn discover() -> Option<PlatformTables> {
                 signature if signature == power::FADT_SIGNATURE && fadt.is_none() => {
                     fadt = Fadt::parse(table.bytes()).ok();
                 }
+                signature if signature == *b"MCFG" && mcfg.is_none() => {
+                    mcfg = Mcfg::parse(table.bytes()).ok();
+                }
                 _ => {}
             }
         }
@@ -86,6 +92,7 @@ pub fn discover() -> Option<PlatformTables> {
             return Some(PlatformTables {
                 madt,
                 hpet,
+                mcfg,
                 used_xsdt: index == 0,
                 rsdp_revision: rsdp.revision,
                 fadt,

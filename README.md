@@ -82,6 +82,12 @@ Milestone tracking lives in [ROADMAP.md](ROADMAP.md). Current state:
 | M9 — Devices and drivers | **in progress** — `nolx-pci-core` (configuration-space discovery, BAR sizing at boot, capability walk, bridge-aware enumeration), bound to ports `0xCF8`/`0xCFC` and enumerated at boot (PCI-001…010); `nolx-virtio-core` (virtio 1.x transport and block rules, VIO-001…015): the virtio-blk probe reads sector 0, writes and reads back sectors 1600–1603, and reads the GPT; `nolx-block-core` (GPT rules, BLK-001…025): the kernel reads the partition table and puts a NOLXFS volume on the first partition, which is remounted and read back with a checksum; `nolx-ahci-core` (AHCI rules, AHCI-001…007 host-tested; the boot probe reads sector 0 from a SATA disk, then writes, reads back, and checksums sectors 1600–1603, AHCI-008…011); `nolx-nvme-core` (NVMe rules, NVME-001…011): the probe identifies namespace 1 through an I/O queue, reads sector 0, and round-trips sectors 1600–1603 with a CRC-32 check, with the NVMe copy checksummed after QEMU exits; the rest of the storage stack, input, and network drivers are not yet built |
 | M10+ | planned |
 
+M9 ECAM continuation (2026-10-16): checksummed MCFG parsing and read-only uncached
+ECAM identity/extended-header reads now pass Q35 boot checks; the i440FX legacy
+fallback also passes. All nine jobs in [CI run 38947112092](https://github.com/NeXuS4Dev/NOLX/actions/runs/38947112092)
+passed on `b4747b4`. Drivers still use legacy configuration ports for writes;
+ECAM transport selection and multi-segment enumeration remain open.
+
 ### What has actually been verified
 
 This repository is honest about which artifacts were executed and which were not.
