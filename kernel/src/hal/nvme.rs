@@ -24,7 +24,7 @@ use nolx_pci_core::{Bar, Bdf, ConfigSpace};
 use nolx_virtio_core::crc32;
 
 use super::dma::Dma;
-use super::pci::LegacyPorts;
+use super::pci::ConfigAccess;
 use super::virtio_blk::fill_pattern;
 use crate::mm::mmio::{self, Region};
 use crate::sync::IrqMutex;
@@ -240,7 +240,7 @@ impl Queue {
 fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     let (bdf, _) = find_controller().ok_or(Failure::NoController)?;
     enable_device(bdf);
-    let bars = nolx_pci_core::read_bars(&mut LegacyPorts, bdf);
+    let bars = nolx_pci_core::read_bars(&mut ConfigAccess, bdf);
     let base = match bars.slots[BAR0_SLOT] {
         Bar::Memory32 { base, .. } => u64::from(base),
         Bar::Memory64 { base, .. } => base,
@@ -498,7 +498,7 @@ fn write64(regs: &Region, offset: u64, value: u64) -> Result<(), Failure> {
 /// Turn on memory decoding and bus mastering, keeping every other command bit as it was. The
 /// status half of the register is not written, since some of its bits clear when written.
 fn enable_device(bdf: Bdf) {
-    let mut cfg = LegacyPorts;
+    let mut cfg = ConfigAccess;
     let command = cfg.read_u32(bdf, PCI_COMMAND) & 0xFFFF;
     cfg.write_u32(
         bdf,
@@ -509,7 +509,7 @@ fn enable_device(bdf: Bdf) {
 
 /// The first NVMe controller on the bus, if there is one.
 fn find_controller() -> Option<(Bdf, DeviceId)> {
-    let inventory = nolx_pci_core::enumerate(&mut LegacyPorts);
+    let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
     inventory
         .as_slice()
         .iter()

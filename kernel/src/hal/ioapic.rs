@@ -258,6 +258,27 @@ pub fn unmask_legacy_irq(irq: u8) -> bool {
     true
 }
 
+/// Route a firmware-assigned PCI INTx line as active-low/level-triggered, then unmask it.
+/// Only legacy GSI assignments already covered by MADT initialization are supported here.
+/// Extended PCI link-device routing still requires ACPI `_PRT`/resource evaluation.
+pub fn unmask_pci_irq(irq: u8) -> bool {
+    let index = usize::from(irq);
+    if !(3..LEGACY_IRQS).contains(&index) || irq == 12 {
+        return false;
+    }
+    let base = IRQ_ROUTE_BASE[index].load(Ordering::Acquire);
+    if base == 0 {
+        return false;
+    }
+    let _guard = super::cpu::InterruptGuard::disable();
+    let register = IRQ_ROUTE_LOW_REGISTER[index].load(Ordering::Relaxed) as u8;
+    let old = ioapic_read(base, register);
+    ioapic_write(base, register, old | REDIRECTION_MASKED);
+    let value = (old | REDIRECTION_ACTIVE_LOW | REDIRECTION_LEVEL_TRIGGERED) & !REDIRECTION_MASKED;
+    ioapic_write(base, register, value);
+    true
+}
+
 /// Unmask MADT NMI-source routes after the local APIC and NMI IDT path are ready.
 pub fn unmask_nmi_sources() {
     for index in 0..MAX_IO_APIC_NMIS {

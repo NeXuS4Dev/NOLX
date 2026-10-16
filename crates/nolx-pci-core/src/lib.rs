@@ -13,7 +13,7 @@
 //!
 //! Scope: legacy configuration access, MSI/MSI-X rules in [`msi`], and validated PCIe
 //! ECAM address calculations in [`ecam`]. The kernel still uses legacy configuration
-//! ports for drivers, with a read-only ECAM boot probe using MCFG discovery.
+//! ports as a segment-zero fallback, selecting ECAM for driver reads/writes when mapped.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -496,9 +496,19 @@ impl Inventory {
 /// a bridge that breaks that rule is counted in [`Inventory::refused_bridges`] and not followed,
 /// which also makes the scan terminate on any input.
 pub fn enumerate<C: ConfigSpace>(cfg: &mut C) -> Inventory {
+    enumerate_range(cfg, 0, 0)
+}
+
+/// Enumerate declared root buses in an inclusive firmware range and their bridges.
+///
+/// Unlike [`enumerate`], every bus in the supplied range is a root. This supports
+/// MCFG allocations with nonzero first buses. A reversed range yields an empty inventory.
+pub fn enumerate_range<C: ConfigSpace>(cfg: &mut C, first: u8, last: u8) -> Inventory {
     let mut inventory = Inventory::default();
     let mut reached = [false; 256];
-    reached[0] = true;
+    if first <= last {
+        reached[usize::from(first)..=usize::from(last)].fill(true);
+    }
     let mut bus = 0usize;
     while bus < 256 {
         if reached[bus] {

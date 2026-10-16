@@ -27,6 +27,7 @@ pub mod multiboot;
 pub mod nvme;
 pub mod pci;
 pub mod pic;
+pub mod ps2;
 pub mod rtc;
 pub mod syscall;
 pub mod tables;

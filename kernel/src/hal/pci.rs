@@ -1,26 +1,174 @@
-//! Legacy PCI configuration access, boot-time inventory, and a read-only ECAM probe.
+//! Serialized legacy/ECAM PCI configuration transport and boot-time inventories.
 //!
 //! The mechanism is the one every x86 PC has: write a dword address to `0xCF8`, then read or
 //! write the dword at `0xCFC`. The bit-level rules -- address encoding, header parsing, BAR
 //! sizing, capability walking, bridge-aware enumeration -- live in `nolx-pci-core`, where they
-//! are host-tested. This module supplies port access and reports the result; its ECAM probe
-//! independently checks identities through uncached MMIO without changing driver writes.
+//! are host-tested. Drivers use [`ConfigAccess`] for ECAM reads/writes on mapped ranges,
+//! with serialized legacy-port fallback restricted to segment zero.
 //!
 //! The address and data ports are a pair: any access between them would select a different
 //! register. Discovery runs on the boot processor before the periodic timer starts, so nothing
-//! else touches the pair. Interrupt-driven drivers will need that pair under a lock; the
-//! assertion rows record that obligation rather than leaving it implicit.
+//! else touches the pair. [`LEGACY_LOCK`] also serializes and masks interrupts around
+//! every address/data transaction, including calls after boot.
 
 use nolx_hal_core::console::HalConsole;
 use nolx_pci_core::{Bar, BarSet, Bdf, ConfigSpace};
 
 use super::{inl, outl};
+use crate::mm::mmio::{self, Region};
+use crate::sync::IrqMutex;
+use core::sync::atomic::{AtomicUsize, Ordering};
+use nolx_hal_core::acpi::mcfg::MAX_ALLOCATIONS;
+use nolx_pci_core::ecam::{AccessWidth, EcamError, EcamWindow, ExtendedConfigSpace, SegmentConfig};
+
+static LEGACY_LOCK: IrqMutex<()> = IrqMutex::new(());
+static ECAM_READS: AtomicUsize = AtomicUsize::new(0);
+static ECAM_WRITES: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Copy)]
+struct MappedAllocation {
+    window: EcamWindow,
+    region: Region,
+    segment: u16,
+    first: u8,
+    last: u8,
+}
+
+static MAPPINGS: IrqMutex<[Option<MappedAllocation>; MAX_ALLOCATIONS]> =
+    IrqMutex::new([None; MAX_ALLOCATIONS]);
+
+/// Native configuration transport: mapped ECAM, or legacy ports for uncovered segment zero.
+pub struct ConfigAccess;
+
+impl ExtendedConfigSpace for ConfigAccess {
+    fn read_dword(&mut self, segment: u16, bdf: Bdf, offset: u16) -> Result<u32, EcamError> {
+        let mappings = MAPPINGS.lock();
+        for mapping in mappings.iter().flatten() {
+            if mapping.segment == segment && (mapping.first..=mapping.last).contains(&bdf.bus) {
+                let physical = mapping
+                    .window
+                    .address(segment, bdf, offset, AccessWidth::Dword)?;
+                let (start, _) = mapping.window.physical_range();
+                let value = mapping
+                    .region
+                    .read32(physical - start)
+                    .map_err(|_| EcamError::InvalidOffset)?;
+                ECAM_READS.fetch_add(1, Ordering::Relaxed);
+                return Ok(value);
+            }
+        }
+        if segment == 0 && offset < 256 && offset.is_multiple_of(4) {
+            Bdf::new(bdf.bus, bdf.device, bdf.function).map_err(|_| EcamError::InvalidBdf)?;
+            Ok(LegacyPorts.read_u32(bdf, offset as u8))
+        } else {
+            Err(EcamError::OutsideWindow)
+        }
+    }
+
+    fn write_dword(
+        &mut self,
+        segment: u16,
+        bdf: Bdf,
+        offset: u16,
+        value: u32,
+    ) -> Result<(), EcamError> {
+        let mappings = MAPPINGS.lock();
+        for mapping in mappings.iter().flatten() {
+            if mapping.segment == segment && (mapping.first..=mapping.last).contains(&bdf.bus) {
+                let physical = mapping
+                    .window
+                    .address(segment, bdf, offset, AccessWidth::Dword)?;
+                let (start, _) = mapping.window.physical_range();
+                mapping
+                    .region
+                    .write32(physical - start, value)
+                    .map_err(|_| EcamError::InvalidOffset)?;
+                ECAM_WRITES.fetch_add(1, Ordering::Relaxed);
+                return Ok(());
+            }
+        }
+        if segment == 0 && offset < 256 && offset.is_multiple_of(4) {
+            Bdf::new(bdf.bus, bdf.device, bdf.function).map_err(|_| EcamError::InvalidBdf)?;
+            LegacyPorts.write_u32(bdf, offset as u8, value);
+            Ok(())
+        } else {
+            Err(EcamError::OutsideWindow)
+        }
+    }
+}
+
+impl ConfigSpace for ConfigAccess {
+    fn read_u32(&mut self, bdf: Bdf, offset: u8) -> u32 {
+        self.read_dword(0, bdf, u16::from(offset & !3))
+            .unwrap_or(u32::MAX)
+    }
+    fn write_u32(&mut self, bdf: Bdf, offset: u8, value: u32) {
+        let _ = self.write_dword(0, bdf, u16::from(offset & !3), value);
+    }
+}
+
+/// Select configuration transport after MMIO initialization, before any driver starts.
+/// Mapping failures retain legacy access only for segment zero; other segments never alias it.
+pub fn select_transport(console: &mut dyn HalConsole) {
+    let Some(mcfg) = super::acpi::discover().and_then(|platform| platform.mcfg) else {
+        let _ = writeln!(console, "pci: configuration transport=legacy");
+        return;
+    };
+    let mut mappings = MAPPINGS.lock();
+    for (slot, allocation) in mcfg.allocations().iter().enumerate() {
+        let Ok(window) = EcamWindow::new(
+            allocation.base,
+            allocation.segment,
+            allocation.start_bus,
+            allocation.end_bus,
+        ) else {
+            continue;
+        };
+        let (start, bytes) = window.physical_range();
+        let Ok(region) = mmio::map(start, bytes) else {
+            let _ = writeln!(
+                console,
+                "pci: ECAM segment {} buses {}..{} mapping refused",
+                allocation.segment, allocation.start_bus, allocation.end_bus
+            );
+            continue;
+        };
+        if allocation.segment == 0 {
+            let bdf = Bdf {
+                bus: allocation.start_bus,
+                device: 0,
+                function: 0,
+            };
+            let expected = LegacyPorts.read_u32(bdf, 0);
+            if expected != u32::MAX && region.read32(0) != Ok(expected) {
+                let _ = writeln!(
+                    console,
+                    "pci: ECAM identity mismatch; legacy fallback retained"
+                );
+                continue;
+            }
+        }
+        mappings[slot] = Some(MappedAllocation {
+            window,
+            region,
+            segment: allocation.segment,
+            first: allocation.start_bus,
+            last: allocation.end_bus,
+        });
+        let _ = writeln!(
+            console,
+            "pci: configuration transport=ECAM segment {} buses {}..{}",
+            allocation.segment, allocation.start_bus, allocation.end_bus
+        );
+    }
+}
 
 /// The legacy configuration mechanism over the two architected ports.
 pub struct LegacyPorts;
 
 impl ConfigSpace for LegacyPorts {
     fn read_u32(&mut self, bdf: Bdf, offset: u8) -> u32 {
+        let _guard = LEGACY_LOCK.lock();
         // SAFETY: 0xCF8 and 0xCFC are the configuration ports the PCI specification defines on
         // every x86 PC. A configuration read has no side effect of its own; an absent function
         // reads as all ones, which discovery treats as "no device here".
@@ -34,8 +182,9 @@ impl ConfigSpace for LegacyPorts {
     }
 
     fn write_u32(&mut self, bdf: Bdf, offset: u8, value: u32) {
-        // SAFETY: as [`LegacyPorts::read_u32`]. Writes come only from the BAR sizing protocol,
-        // which restores each register it changes; discovery itself never writes.
+        let _guard = LEGACY_LOCK.lock();
+        // SAFETY: as [`LegacyPorts::read_u32`]. Callers are PCI configuration algorithms
+        // (BAR probing, device enable and interrupt setup); the pair stays locked.
         unsafe {
             outl(
                 nolx_pci_core::CONFIG_ADDRESS_PORT,
@@ -48,7 +197,7 @@ impl ConfigSpace for LegacyPorts {
 
 /// Enumerate PCI configuration space and report every function found.
 pub fn init(console: &mut dyn HalConsole) {
-    let inventory = nolx_pci_core::enumerate(&mut LegacyPorts);
+    let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
     let note = if inventory.overflowed {
         ", inventory incomplete"
     } else {
@@ -75,10 +224,36 @@ pub fn init(console: &mut dyn HalConsole) {
             info.header_type
         );
     }
+    let allocations = *MAPPINGS.lock();
+    for allocation in allocations.iter().flatten() {
+        let functions = nolx_pci_core::enumerate_range(
+            &mut SegmentConfig {
+                transport: &mut ConfigAccess,
+                segment: allocation.segment,
+            },
+            allocation.first,
+            allocation.last,
+        );
+        let _ = writeln!(
+            console,
+            "pci: ECAM segment {} buses {}..{}: {} function(s), incomplete={}",
+            allocation.segment,
+            allocation.first,
+            allocation.last,
+            functions.len,
+            functions.overflowed
+        );
+    }
+    let _ = writeln!(
+        console,
+        "pci: ECAM driver accesses: {} reads, {} writes",
+        ECAM_READS.load(Ordering::Relaxed),
+        ECAM_WRITES.load(Ordering::Relaxed)
+    );
     probe_ecam(console, &inventory);
     for info in inventory.as_slice() {
         if info.header_type == 0 {
-            let bars = nolx_pci_core::read_bars(&mut LegacyPorts, info.bdf);
+            let bars = nolx_pci_core::read_bars(&mut ConfigAccess, info.bdf);
             report_bars(console, info.bdf, &bars);
         }
     }
@@ -105,10 +280,9 @@ fn report_bars(console: &mut dyn HalConsole, bdf: Bdf, bars: &BarSet) {
     }
 }
 
-/// Exercise read-only ECAM through uncached MMIO without changing the drivers' transport.
+/// Independently check mapped ECAM identities and extended headers against legacy discovery.
 /// Called after the memory manager starts and before the periodic timer is enabled.
 fn probe_ecam(console: &mut dyn HalConsole, inventory: &nolx_pci_core::Inventory) {
-    use crate::mm::mmio;
     use nolx_pci_core::ecam::{AccessWidth, EcamWindow};
 
     let Some(mcfg) = super::acpi::discover().and_then(|platform| platform.mcfg) else {
@@ -149,23 +323,28 @@ fn probe_ecam(console: &mut dyn HalConsole, inventory: &nolx_pci_core::Inventory
                 continue;
             }
         };
-        // Map one function, not the potentially 256 MiB allocation. The MMIO
-        // allocator rejects RAM aliases and unsupported physical addresses.
-        let region = match mmio::map(physical, 4096) {
-            Ok(region) => region,
-            Err(_) => {
-                refused += 1;
-                continue;
-            }
+        let mappings = MAPPINGS.lock();
+        let Some(mapping) = mappings.iter().flatten().find(|mapping| {
+            mapping.segment == 0 && (mapping.first..=mapping.last).contains(&info.bdf.bus)
+        }) else {
+            refused += 1;
+            continue;
         };
-        let expected = u32::from(info.vendor_id) | (u32::from(info.device_id) << 16);
-        if region.read32(0) != Ok(expected) {
+        let region = mapping.region;
+        let (base, _) = mapping.window.physical_range();
+        let offset = physical - base;
+        // Keep the cross-check independent of the newly selected native transport:
+        // `inventory` itself now comes from ECAM, so comparing it only to ECAM
+        // would be circular and would no longer prove PCI-018's legacy equivalence.
+        let expected = LegacyPorts.read_u32(info.bdf, 0);
+        let discovered = u32::from(info.vendor_id) | (u32::from(info.device_id) << 16);
+        if expected != discovered || region.read32(offset) != Ok(expected) {
             refused += 1;
             continue;
         }
         // The extended capability header is read-only. Zero/all-ones is valid
         // when no extended capabilities exist; do not mistake it for a fault.
-        if let Ok(header) = region.read32(0x100) {
+        if let Ok(header) = region.read32(offset + 0x100) {
             matched += 1;
             let _ = writeln!(
                 console,
@@ -178,6 +357,6 @@ fn probe_ecam(console: &mut dyn HalConsole, inventory: &nolx_pci_core::Inventory
     }
     let _ = writeln!(
         console,
-        "pci: ECAM {matched} identity match(es), {refused} refused; legacy configuration retained"
+        "pci: ECAM {matched} identity match(es), {refused} refused; legacy fallback available"
     );
 }

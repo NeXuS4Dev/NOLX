@@ -1,6 +1,7 @@
 //! The AHCI driver's probe: find the controller, find the first port with a SATA disk, start
 //! that port, read sector 0 through command slot 0, then write a pattern to sectors 1600 to 1603,
-//! read them back, and compare CRC-32 checksums. Everything is polled.
+//! read them back, and compare CRC-32 checksums. Commands verify MSI delivery when a local
+//! APIC is available, with a polled completion fallback otherwise.
 //!
 //! The rules -- the register offsets, the port state bits, the FIS and command-header layouts,
 //! the physical region descriptors -- live in `nolx-ahci-core`, where they are host-tested. This
@@ -21,15 +22,36 @@ use nolx_block_core::queue::{Direction, Request};
 use nolx_df_core::{DeviceId, Dispatch, Driver, Match, Registry};
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
-use nolx_pci_core::{Bar, Bdf};
+use nolx_pci_core::{Bar, Bdf, ConfigSpace};
 use nolx_virtio_core::crc32;
 
 use super::dma::Dma;
-use super::pci::LegacyPorts;
+use super::pci::ConfigAccess;
 use super::virtio_blk::fill_pattern;
 use crate::mm::mmio::{self, Region};
 use crate::sync::IrqMutex;
-use core::sync::atomic::{fence, Ordering};
+use core::sync::atomic::{fence, AtomicBool, AtomicUsize, Ordering};
+
+/// Dedicated AHCI MSI completion vector.
+pub const COMPLETION_VECTOR: u8 = 0x52;
+static COMPLETIONS: AtomicUsize = AtomicUsize::new(0);
+static MSI_ACTIVE: AtomicBool = AtomicBool::new(false);
+static INTERRUPT_REGISTERS: IrqMutex<Option<(Region, u8)>> = IrqMutex::new(None);
+
+/// Clear port/controller causes before local APIC EOI. Never acquires the driver's state lock.
+pub fn on_completion_interrupt() {
+    let registers = INTERRUPT_REGISTERS.lock();
+    if let Some((hba, number)) = *registers {
+        let status_offset = ahci::port_register(number, ahci::PORT_IS).unwrap_or(0);
+        let status = hba.read32(status_offset).unwrap_or(0);
+        let global = hba.read32(ahci::HBA_IS).unwrap_or(0);
+        let _ = hba.write32(status_offset, status);
+        let _ = hba.write32(ahci::HBA_IS, global);
+        if status & 1 != 0 {
+            COMPLETIONS.fetch_add(1, Ordering::Release);
+        }
+    }
+}
 
 /// The base address register that holds the HBA's registers. AHCI puts them in BAR 5.
 const ABAR_SLOT: usize = 5;
@@ -55,6 +77,10 @@ const ROUND_TRIP_BYTES: usize = ROUND_TRIP_SECTORS as usize * SECTOR_BYTES as us
 /// Why the probe stopped.
 #[derive(Debug)]
 pub enum Failure {
+    /// MSI programming failed.
+    Msi(super::msix::Error),
+    /// A command completed without its interrupt being delivered.
+    Interrupt,
     /// The block queue refused the request, or did not hand it back.
     Queue(QueueError),
     /// No AHCI controller is on the PCI bus.
@@ -176,7 +202,9 @@ fn stop_device(_dev: usize) -> bool {
 
 fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     let (bdf, _) = find_controller().ok_or(Failure::NoController)?;
-    let bars = nolx_pci_core::read_bars(&mut LegacyPorts, bdf);
+    let command = ConfigAccess.read_u32(bdf, 4) & 0xffff;
+    ConfigAccess.write_u32(bdf, 4, command | 6);
+    let bars = nolx_pci_core::read_bars(&mut ConfigAccess, bdf);
     let abar = match bars.slots[ABAR_SLOT] {
         Bar::Memory32 { base, .. } => u64::from(base),
         Bar::Memory64 { base, .. } => base,
@@ -204,6 +232,19 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     port.write(ahci::PORT_SERR, u32::MAX)?;
     port.write(ahci::PORT_IS, u32::MAX)?;
     port.start()?;
+    if super::apic::is_enabled() {
+        *INTERRUPT_REGISTERS.lock() = Some((hba, number));
+        super::msix::enable_msi(bdf, COMPLETION_VECTOR).map_err(Failure::Msi)?;
+        // Enable only D2H register-FIS interrupts, one per completed DMA EXT command.
+        port.write(0x14, 1)?;
+        MSI_ACTIVE.store(true, Ordering::Release);
+        hba.write32(ahci::HBA_GHC, hba.read32(ahci::HBA_GHC)? | 2)?;
+    } else {
+        // Preserve the existing polled disk path on machines without a local APIC.
+        port.write(0x14, 0)?;
+        MSI_ACTIVE.store(false, Ordering::Release);
+        hba.write32(ahci::HBA_GHC, hba.read32(ahci::HBA_GHC)? & !2)?;
+    }
 
     // Sector 0 first: its first bytes are the pattern CI wrote into the image.
     data.write(0, &[0u8; SECTOR_BYTES as usize]);
@@ -258,6 +299,15 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     if back != written {
         return Err(Failure::RoundTrip);
     }
+    if MSI_ACTIVE.load(Ordering::Acquire) {
+        let _ = writeln!(
+            console,
+            "ahci: MSI completion interrupts: {} of 3 commands, vector {COMPLETION_VECTOR:#x}",
+            COMPLETIONS.load(Ordering::Acquire)
+        );
+    } else {
+        let _ = writeln!(console, "ahci: polled completion fallback; no local APIC");
+    }
     let checksum = crc32(&back);
     let _ = writeln!(
         console,
@@ -269,7 +319,7 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
 
 /// The first AHCI controller on the bus, if there is one.
 fn find_controller() -> Option<(Bdf, DeviceId)> {
-    let inventory = nolx_pci_core::enumerate(&mut LegacyPorts);
+    let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
     inventory
         .as_slice()
         .iter()
@@ -332,6 +382,7 @@ fn transfer(port: &Port, page: &Dma, data: &Dma, command: Command) -> Result<(),
 
 /// Issue the command in the port's slot 0 and wait for it. Called through [`transfer`].
 fn issue(port: &Port, page: &Dma, data: &Dma, command: Command) -> Result<(), Failure> {
+    let expected = COMPLETIONS.load(Ordering::Acquire) + 1;
     let bytes = u32::from(command.sectors) * SECTOR_BYTES;
     let header = ahci::encode_command_header(&CommandHeader {
         fis_dwords: 5,
@@ -363,18 +414,33 @@ fn issue(port: &Port, page: &Dma, data: &Dma, command: Command) -> Result<(), Fa
         },
         "command issue",
     )?;
+    if MSI_ACTIVE.load(Ordering::Acquire)
+        && super::msix::wait_for_interrupts(&COMPLETIONS, expected) < expected
+    {
+        return Err(Failure::Interrupt);
+    }
     fence(Ordering::SeqCst);
     Ok(())
 }
 
-/// Poll `ready` until it returns true, at most [`POLL_LIMIT`] times.
+/// Poll with a two-second HPET budget and hard iteration bound, or a bounded clockless fallback.
 fn poll(
     mut ready: impl FnMut() -> Result<bool, Failure>,
     step: &'static str,
 ) -> Result<(), Failure> {
-    for _ in 0..POLL_LIMIT {
+    let clock = super::hpet::counter().zip(super::hpet::frequency_hz());
+    for iteration in 0..POLL_LIMIT * 100 {
         if ready()? {
             return Ok(());
+        }
+        match (clock, super::hpet::counter()) {
+            (Some((start, frequency)), Some(now)) => {
+                if super::hpet::elapsed_ticks(start, now) >= frequency.saturating_mul(2) {
+                    break;
+                }
+            }
+            _ if iteration >= POLL_LIMIT - 1 => break,
+            _ => {}
         }
         core::hint::spin_loop();
     }

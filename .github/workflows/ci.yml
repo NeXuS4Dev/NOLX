@@ -613,6 +613,18 @@ jobs:
               raise SystemExit("wall clock did not advance from its RTC/monotonic anchor")
           PY
 
+      - name: Assert e1000 receive and interrupt delivery
+        run: |
+          grep -F 'e1000: received ARP reply from 10.0.2.2' build/serial.log
+          grep -E 'descriptor recycled, INTx vector 0x2[3-9a-f], interrupts [1-9][0-9]*' build/serial.log
+
+      - name: Assert AHCI MSI completions
+        run: |
+          grep -F 'ahci: MSI completion interrupts: 3 of 3 commands, vector 0x52' build/serial.log
+
+      - name: Inject PS/2 keyboard and mouse input through QMP
+        run: python3 scripts/check-ps2-input.py 2>&1 | tee -a /tmp/job.log
+
       - name: Exercise PCIe ECAM and legacy-only configuration
         run: scripts/check-pci-ecam.sh 2>&1 | tee -a /tmp/job.log
 
@@ -647,6 +659,7 @@ jobs:
             build/serial.log
             build/hal-*.serial.log
             build/pci-*.serial.log
+            build/input-*.serial.log
       # Posted on success as well as failure. The artifact above is the archive of
       # record, but it is not reachable from everywhere this project is developed; the
       # comment is.
@@ -717,6 +730,11 @@ jobs:
             fi
           }
           need 'NOLX: init sequence complete, halting the boot processor'
+          need 'e1000: received ARP reply from 10.0.2.2'
+          if grep -qE "PANIC|BUGCHECK|CPU exception" build/serial.log; then
+            echo 'storage backend boot faulted after initialization'
+            exit 1
+          fi
           case "${{ matrix.backend }}" in
             virtio)
               need 'virtio-blk: bound and started through nolx-df'
@@ -725,6 +743,7 @@ jobs:
               ;;
             ahci)
               need 'ahci: bound and started through nolx-df'
+              need 'ahci: MSI completion interrupts: 3 of 3 commands, vector 0x52'
               need 'virtio-blk: not brought up: NoDevice'
               need 'nvme: not brought up: NoController'
               ;;
