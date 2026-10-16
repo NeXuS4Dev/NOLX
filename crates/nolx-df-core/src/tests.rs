@@ -194,3 +194,24 @@ fn the_dispatch_table_receives_the_device_handle() {
     reg.start(second).unwrap();
     assert_eq!(DRV_LAST_START.load(Ordering::SeqCst), second);
 }
+
+#[test]
+fn driver_identity_survives_stop_restart_and_removal() {
+    let mut registry: Registry<2, 3> = Registry::new();
+    assert_eq!(registry.find_driver("good"), None);
+    let driver = registry.add_driver(good_driver(STORAGE_RULES)).unwrap();
+    assert_eq!(registry.find_driver("good"), Some(driver));
+    let dev = registry.add_device(STORAGE).unwrap();
+    assert_eq!(registry.driver_name(dev), Err(Error::NoDriver));
+    registry.bind(dev).unwrap();
+    registry.start(dev).unwrap();
+    assert_eq!(registry.remove(dev), Err(Error::Busy));
+    registry.stop(dev).unwrap();
+    assert_eq!(registry.driver_name(dev), Ok("good"));
+    registry.start(dev).unwrap();
+    registry.stop(dev).unwrap();
+    registry.remove(dev).unwrap();
+    assert_eq!(registry.driver_name(dev), Ok("good"));
+    assert_eq!(registry.driver_name(usize::MAX), Err(Error::UnknownDevice));
+    assert_eq!(registry.start(dev), Err(Error::BadState));
+}

@@ -16,7 +16,7 @@ use super::driver_start::{self, Log};
 use super::msix;
 use nolx_block_core::devices::QueueError;
 use nolx_block_core::queue::{Direction, Request};
-use nolx_df_core::{DeviceId, Dispatch, Driver, Match, Registry};
+use nolx_df_core::{DeviceId, Dispatch, Driver, Match};
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
 use nolx_nvme_core::{self as nvme, Sqe};
@@ -138,11 +138,13 @@ impl From<mmio::Failure> for Failure {
 struct State {
     log: Log,
     outcome: Option<Result<(), Failure>>,
+    disk: Option<Disk>,
 }
 
 static STATE: IrqMutex<State> = IrqMutex::new(State {
     log: Log::new(),
     outcome: None,
+    disk: None,
 });
 
 /// The match rule: the controller's class, subclass, and programming interface.
@@ -166,13 +168,12 @@ pub fn probe(console: &mut dyn HalConsole) {
         let _ = writeln!(console, "nvme: not brought up: {:?}", Failure::NoController);
         return;
     };
-    let mut registry: Registry<1, 1> = Registry::new();
     let driver = Driver {
         name: "nvme",
         matches: MATCHES,
         ops: DISPATCH,
     };
-    if let Err(error) = driver_start::attach(&mut registry, driver, id) {
+    if let Err(error) = driver_start::attach(driver, id) {
         let _ = writeln!(console, "nvme: framework refused the device: {error:?}");
     }
     let state = STATE.lock();
@@ -201,13 +202,32 @@ fn start_device(_dev: usize) -> bool {
     let started = result.is_ok();
     let mut state = STATE.lock();
     state.log = log;
-    state.outcome = Some(result);
+    state.outcome = Some(result.map(|disk| {
+        state.disk = Some(disk);
+    }));
     started
 }
 
-/// Nothing to undo: the queue stays registered for the rest of boot.
+/// Flush and quiesce hardware before returning owned DMA pages. No IRQ lock spans the wait.
 fn stop_device(_dev: usize) -> bool {
+    let Some(mut disk) = STATE.lock().disk.take() else {
+        return false;
+    };
+    if disk.quiesce().is_err() {
+        STATE.lock().disk = Some(disk);
+        return false;
+    }
+    disk.release();
     true
+}
+
+pub(crate) fn with_disk<T>(
+    op: impl FnOnce(&mut dyn nolxfs::sector::SectorDevice) -> Result<T, nolxfs::DevError>,
+) -> Result<T, nolxfs::DevError> {
+    let mut disk = STATE.lock().disk.take().ok_or(nolxfs::DevError::Io(19))?;
+    let result = op(&mut disk);
+    STATE.lock().disk = Some(disk);
+    result
 }
 
 /// One submission and completion queue pair, with the producer and consumer positions the driver
@@ -239,7 +259,7 @@ impl Queue {
     }
 }
 
-fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
+fn bring_up(console: &mut dyn HalConsole) -> Result<Disk, Failure> {
     let (bdf, _) = find_controller().ok_or(Failure::NoController)?;
     enable_device(bdf);
     let bars = nolx_pci_core::read_bars(&mut ConfigAccess, bdf);
@@ -403,6 +423,10 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
         });
     }
     let mut disk = Disk {
+        capacity: blocks,
+        bdf,
+        admin,
+        identify,
         regs,
         io,
         data,
@@ -410,7 +434,9 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     };
     let (first, sectors) =
         super::storage_volume::discover(&mut disk, blocks).map_err(Failure::Filesystem)?;
-    super::storage_volume::run(disk, first, sectors, console, "nvme").map_err(Failure::Filesystem)
+    super::storage_volume::run(&mut disk, first, sectors, console, "nvme")
+        .map_err(Failure::Filesystem)?;
+    Ok(disk)
 }
 
 /// Count one completion interrupt. Called from the interrupt handler on [`COMPLETION_VECTOR`].
@@ -569,6 +595,10 @@ impl From<msix::Error> for Failure {
 
 /// The namespace's queue and page-aligned PRP buffer, shared by raw and filesystem I/O.
 struct Disk {
+    capacity: u64,
+    bdf: Bdf,
+    admin: Queue,
+    identify: Dma,
     regs: Region,
     io: Queue,
     data: Dma,
@@ -611,6 +641,9 @@ impl Disk {
     }
 }
 impl super::storage_volume::SectorDisk for Disk {
+    fn sector_count(&self) -> u64 {
+        self.capacity
+    }
     fn flush(&mut self) -> Result<(), nolxfs::DevError> {
         let command = nvme::flush(next_cid(&mut self.cid), NSID);
         let expected = IO_SUBMITTED.fetch_add(1, Ordering::Relaxed) + 1;
@@ -621,9 +654,7 @@ impl super::storage_volume::SectorDisk for Disk {
         Ok(())
     }
     fn read_sectors(&mut self, first: u64, out: &mut [u8]) -> Result<(), nolxfs::DevError> {
-        if out.len() % 512 != 0 {
-            return Err(nolxfs::DevError::Io(5));
-        }
+        nolxfs::sector::check_sector_io(self.capacity, first, out.len())?;
         for (i, chunk) in out.chunks_mut(4096).enumerate() {
             self.transfer(false, first + (i * 8) as u64, chunk.len())?;
             self.data.read(0, chunk);
@@ -631,13 +662,37 @@ impl super::storage_volume::SectorDisk for Disk {
         Ok(())
     }
     fn write_sectors(&mut self, first: u64, bytes: &[u8]) -> Result<(), nolxfs::DevError> {
-        if bytes.len() % 512 != 0 {
-            return Err(nolxfs::DevError::Io(5));
-        }
+        nolxfs::sector::check_sector_io(self.capacity, first, bytes.len())?;
         for (i, chunk) in bytes.chunks(4096).enumerate() {
             self.data.write(0, chunk);
             self.transfer(true, first + (i * 8) as u64, chunk.len())?;
         }
         Ok(())
+    }
+}
+
+impl Disk {
+    fn quiesce(&mut self) -> Result<(), Failure> {
+        nolxfs::sector::SectorDevice::flush(self).map_err(|_| Failure::Encoding)?;
+        self.regs.write32(nvme::REG_CC, 0)?;
+        poll(
+            || Ok(!nvme::csts_ready(self.regs.read32(nvme::REG_CSTS)?)),
+            "stop disable",
+        )?;
+        let command = ConfigAccess.read_u32(self.bdf, 4) & 0xffff;
+        ConfigAccess.write_u32(self.bdf, 4, command & !4);
+        blockdev::detach(blockdev::NVME)?;
+        Ok(())
+    }
+    fn release(self) {
+        // SAFETY: the controller is disabled/RDY clear, all queues retired, PCI DMA disabled.
+        unsafe {
+            self.admin.sq.release();
+            self.admin.cq.release();
+            self.identify.release();
+            self.io.sq.release();
+            self.io.cq.release();
+            self.data.release();
+        }
     }
 }

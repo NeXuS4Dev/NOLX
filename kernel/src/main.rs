@@ -182,6 +182,8 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         hal::pci::init(&mut console);
         hal::ps2::init(&mut console);
 
+        hal::blockdev::retained_selftest(&mut console);
+        hal::driver_start::report(&mut console);
         hal::init_wall_clock(&mut console);
         let _ = writeln!(
             console,
@@ -207,6 +209,8 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
 
         let mut timer_marker_reported = false;
         let mut memory_selftest_done = false;
+        #[cfg(feature = "hal-driver-lifecycle-test")]
+        let mut lifecycle_test_done = false;
         let mut round_robin_reported = false;
         let mut user_test_started = false;
         let mut user_test_reported = false;
@@ -273,6 +277,12 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
                     let _ = writeln!(console, "NOLX: address space selftest: FAILED: {message}");
                     panic!("address space selftest: {message}");
                 }
+            }
+
+            #[cfg(feature = "hal-driver-lifecycle-test")]
+            if memory_selftest_done && !lifecycle_test_done {
+                lifecycle_test_done = true;
+                hal::driver_start::lifecycle_selftest(&mut console);
             }
 
             #[cfg(feature = "hal-power-test-s5")]

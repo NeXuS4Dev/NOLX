@@ -77,3 +77,112 @@ pub fn report(console: &mut dyn HalConsole) {
         "blockdev: {dispatched} requests dispatched, {completed} completed"
     );
 }
+
+/// Detach a completely drained queue after its controller has stopped.
+pub(crate) fn detach(dev: usize) -> Result<(), QueueError> {
+    QUEUES.lock().detach(dev)
+}
+
+fn with_device<T>(
+    dev: usize,
+    op: impl FnOnce(&mut dyn nolxfs::sector::SectorDevice) -> Result<T, nolxfs::DevError>,
+) -> Result<T, nolxfs::DevError> {
+    if super::cpu::current_ipl() != nolx_hal_core::ipl::Ipl::PASSIVE {
+        return Err(nolxfs::DevError::Io(16));
+    }
+    let name = match dev {
+        VIRTIO => "virtio-blk",
+        AHCI => "ahci",
+        NVME => "nvme",
+        _ => return Err(nolxfs::DevError::Io(19)),
+    };
+    super::driver_start::device_io(name, || match dev {
+        VIRTIO => super::virtio_blk::with_disk(op),
+        AHCI => super::ahci::with_disk(op),
+        NVME => super::nvme::with_disk(op),
+        _ => Err(nolxfs::DevError::Io(19)),
+    })
+}
+/// Read whole sectors through a retained controller after its probe has returned.
+pub fn read_sectors(dev: usize, first: u64, out: &mut [u8]) -> Result<(), nolxfs::DevError> {
+    with_device(dev, |disk| {
+        nolxfs::sector::check_sector_io(disk.sector_count(), first, out.len())?;
+        disk.read_sectors(first, out)
+    })
+}
+/// Write whole sectors through the persistent device's normal queued path.
+pub fn write_sectors(dev: usize, first: u64, data: &[u8]) -> Result<(), nolxfs::DevError> {
+    with_device(dev, |disk| {
+        nolxfs::sector::check_sector_io(disk.sector_count(), first, data.len())?;
+        disk.write_sectors(first, data)
+    })
+}
+/// Issue a durable barrier against a retained controller, without holding its state lock.
+pub fn flush(dev: usize) -> Result<(), nolxfs::DevError> {
+    with_device(dev, |disk| disk.flush())
+}
+
+/// Exercise retained hardware after all framework probe callbacks have returned.
+pub fn retained_selftest(console: &mut dyn HalConsole) {
+    for (dev, name) in [(VIRTIO, "virtio-blk"), (AHCI, "ahci"), (NVME, "nvme")] {
+        let mut sector = [0; 512];
+        match read_sectors(dev, 0, &mut sector) {
+            Ok(()) => {
+                assert_eq!(
+                    &sector[..b"NOLX-BLK-SECTOR0".len()],
+                    b"NOLX-BLK-SECTOR0",
+                    "persistent disk data mismatch"
+                );
+                let _ = writeln!(
+                    console,
+                    "blockdev: retained {name} read verified after probe return"
+                );
+            }
+            Err(nolxfs::DevError::Io(19)) => {}
+            Err(error) => panic!("persistent disk {name} failed: {error:?}"),
+        }
+    }
+}
+
+/// Invalid retained requests must never reach hardware or partially transfer a prefix.
+#[cfg(feature = "hal-driver-lifecycle-test")]
+pub(crate) fn bounds_selftest(dev: usize) {
+    use nolxfs::DevError;
+    let capacity = with_device(dev, |disk| Ok(disk.sector_count())).unwrap();
+    let before = DISPATCHED.load(Ordering::Acquire);
+    let mut sector = [0; 512];
+    assert_eq!(
+        read_sectors(dev, u64::MAX, &mut sector),
+        Err(DevError::OutOfRange { block: u64::MAX })
+    );
+    assert_eq!(
+        write_sectors(dev, u64::MAX, &sector),
+        Err(DevError::OutOfRange { block: u64::MAX })
+    );
+    assert_eq!(
+        read_sectors(dev, capacity, &mut sector),
+        Err(DevError::OutOfRange { block: capacity })
+    );
+    assert_eq!(
+        read_sectors(dev, 0, &mut []),
+        Err(DevError::BadBufferLen { got: 0, want: 512 })
+    );
+    assert_eq!(
+        write_sectors(dev, 0, &[0; 513]),
+        Err(DevError::BadBufferLen {
+            got: 513,
+            want: 512
+        })
+    );
+    assert_eq!(
+        read_sectors(dev, capacity - 1, &mut [0; 1024]),
+        Err(DevError::OutOfRange {
+            block: capacity - 1
+        })
+    );
+    assert_eq!(
+        DISPATCHED.load(Ordering::Acquire),
+        before,
+        "invalid request reached hardware"
+    );
+}

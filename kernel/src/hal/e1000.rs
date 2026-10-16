@@ -11,8 +11,9 @@
 //! access, memory for the rings, and the driver's dispatch table.
 //!
 //! The framework dispatch table takes plain function pointers and no context, so the state the
-//! driver keeps between calls is in a static [`IrqMutex`]. The receive buffers are never reclaimed:
-//! the device owns them for as long as it is running. RX buffers are retained in a fixed array,
+//! driver keeps between calls is in a static [`IrqMutex`]. Receive buffers remain owned until
+//! engine disable/reset succeeds; stop detaches IRQ-visible state before reclaiming them.
+//! RX buffers are retained in a fixed array,
 //! with no heap allocation in initialization or interrupt delivery.
 //!
 //! CI runs QEMU with an e1000 on a user-mode network backend.
@@ -20,7 +21,7 @@
 use core::sync::atomic::{fence, AtomicU8, AtomicUsize, Ordering};
 use nolx_net_core::{arp, queue::FrameQueue};
 
-use nolx_df_core::{DeviceId, Dispatch, Driver, Error as DfError, Match, Registry};
+use nolx_df_core::{DeviceId, Dispatch, Driver, Match};
 use nolx_e1000_core::{self as e1000, DEVICE_82540EM, VENDOR_INTEL};
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
@@ -143,9 +144,7 @@ impl From<crate::mm::mmio::Failure> for Failure {
     }
 }
 
-/// The rings and the transmit buffer. The device keeps them for as long as it runs, so they are
-/// held here and never read again.
-#[allow(dead_code)]
+/// The TX ring and buffer, retained until a successful engine disable/reset.
 struct Rings {
     tx: Dma,
     frame: Dma,
@@ -159,6 +158,7 @@ struct Report {
     link_up: bool,
     peer_mac: [u8; 6],
     region: Region,
+    interrupts: usize,
 }
 
 /// State shared between the driver's dispatch calls and the probe that reports them.
@@ -190,13 +190,12 @@ pub fn probe(console: &mut dyn HalConsole) {
         let _ = writeln!(console, "e1000: no controller on the PCI bus");
         return;
     };
-    let mut registry: Registry<1, 1> = Registry::new();
     let driver = Driver {
         name: "e1000",
         matches: MATCHES,
         ops: DISPATCH,
     };
-    let attached = attach(&mut registry, driver, id);
+    let attached = super::driver_start::attach(driver, id);
     if let Err(error) = attached {
         let _ = writeln!(console, "e1000: framework refused the device: {error:?}");
     }
@@ -223,7 +222,7 @@ pub fn probe(console: &mut dyn HalConsole) {
                 console,
                 "e1000: transmitted a {FRAME_BYTES}-byte frame, descriptor done"
             );
-            let _ = writeln!(console, "e1000: received ARP reply from 10.0.2.2, peer {:02x?}, descriptor recycled, INTx vector {:#x}, interrupts {}", report.peer_mac, RX_VECTOR.load(Ordering::Acquire), RX_INTERRUPTS.load(Ordering::Acquire));
+            let _ = writeln!(console, "e1000: received ARP reply from 10.0.2.2, peer {:02x?}, descriptor recycled, INTx vector {:#x}, interrupts {}", report.peer_mac, RX_VECTOR.load(Ordering::Acquire), report.interrupts);
             let _ = writeln!(console, "e1000: bound and started through nolx-df");
         }
         (None, Some(error)) => {
@@ -233,15 +232,6 @@ pub fn probe(console: &mut dyn HalConsole) {
             let _ = writeln!(console, "e1000: not started");
         }
     }
-}
-
-/// Register the driver, add the device, bind it, and start it. Returns the device handle.
-fn attach(registry: &mut Registry<1, 1>, driver: Driver, id: DeviceId) -> Result<usize, DfError> {
-    registry.add_driver(driver)?;
-    let dev = registry.add_device(id)?;
-    registry.bind(dev)?;
-    registry.start(dev)?;
-    Ok(dev)
 }
 
 fn accept(_: &DeviceId) -> bool {
@@ -266,17 +256,60 @@ fn start_device(_dev: usize) -> bool {
     }
 }
 
-/// The framework's stop operation: clear both engines' enable bits. The rings stay in place.
+/// Reset both engines and retire IRQ-visible state before reclaiming RX/TX DMA pages.
 fn stop_device(_dev: usize) -> bool {
-    let state = STATE.lock();
-    state.report.as_ref().is_some_and(|report| {
-        report.region.write32(0x00d8, u32::MAX).is_ok()
-            && report.region.write32(e1000::REG_RCTL, 0).is_ok()
-            && report.region.write32(e1000::REG_TCTL, 0).is_ok()
-    })
+    let Some((regs, bdf)) = STATE.lock().report.as_ref().map(|r| (r.region, r.bdf)) else {
+        return false;
+    };
+    let reset = (|| -> Result<(), Failure> {
+        regs.write32(0x00d8, u32::MAX)?;
+        regs.write32(e1000::REG_RCTL, 0)?;
+        regs.write32(e1000::REG_TCTL, 0)?;
+        poll(
+            || Ok(regs.read32(e1000::REG_RCTL)? & 2 == 0 && regs.read32(e1000::REG_TCTL)? & 2 == 0),
+            "engine disable",
+        )?;
+        regs.write32(
+            e1000::REG_CTRL,
+            regs.read32(e1000::REG_CTRL)? | e1000::CTRL_RST,
+        )?;
+        poll(
+            || Ok(regs.read32(e1000::REG_CTRL)? & e1000::CTRL_RST == 0),
+            "stop reset",
+        )?;
+        Ok(())
+    })();
+    if reset.is_err() {
+        return false;
+    }
+    RX_VECTOR.store(0, Ordering::Release);
+    let command = ConfigAccess.read_u32(bdf, 4) & 0xffff;
+    ConfigAccess.write_u32(bdf, 4, command & !4);
+    let receive = RECEIVE.lock().take();
+    let rings = {
+        let mut state = STATE.lock();
+        state.report = None;
+        state.rings.take()
+    };
+    // SAFETY: controller reset acknowledged, PCI bus mastering is disabled, and the ISR can no
+    // longer reach receive state. Every page is uniquely moved out of its owning driver slot.
+    unsafe {
+        if let Some(receive) = receive {
+            receive.descriptors.release();
+            for buffer in receive.buffers.into_iter().flatten() {
+                buffer.release();
+            }
+        }
+        if let Some(rings) = rings {
+            rings.tx.release();
+            rings.frame.release();
+        }
+    }
+    true
 }
 
 fn bring_up() -> Result<(Rings, Report), Failure> {
+    let initial_interrupts = RX_INTERRUPTS.load(Ordering::Acquire);
     let (bdf, _) = find_controller().ok_or(Failure::NoController)?;
     enable_device(bdf);
     let bars = nolx_pci_core::read_bars(&mut ConfigAccess, bdf);
@@ -391,17 +424,21 @@ fn bring_up() -> Result<(Rings, Report), Failure> {
     tx.write(16, &descriptor);
     fence(Ordering::SeqCst);
     regs.write32(e1000::REG_TDT, 2)?;
-    // Wait until the NIC has produced a descriptor before briefly unmasking CPU IF.
-    // The I/O APIC preserves the pending level interrupt until the handler reads ICR.
+    // At boot IF is masked, so the descriptor signals readiness. On restart IF may already
+    // be enabled: the ISR can consume/recycle it before this poll, so accept its fresh counter
+    // too. Never wait solely for a DD bit that the IRQ handler has already cleared.
     poll(
         || {
             let receive = RECEIVE.lock();
             let receive = receive.as_ref().ok_or(Failure::Receive)?;
-            Ok(receive.descriptors.read_array::<1>(12)[0] & e1000::DESC_DD != 0)
+            Ok(RX_INTERRUPTS.load(Ordering::Acquire) > initial_interrupts
+                || receive.descriptors.read_array::<1>(12)[0] & e1000::DESC_DD != 0)
         },
         "ARP receive descriptor",
     )?;
-    if super::msix::wait_for_interrupts(&RX_INTERRUPTS, 1) < 1 {
+    if super::msix::wait_for_interrupts(&RX_INTERRUPTS, initial_interrupts + 1)
+        < initial_interrupts + 1
+    {
         return Err(Failure::Interrupt);
     }
     let peer_mac = {
@@ -426,6 +463,7 @@ fn bring_up() -> Result<(Rings, Report), Failure> {
             link_up,
             peer_mac,
             region: regs,
+            interrupts: RX_INTERRUPTS.load(Ordering::Acquire) - initial_interrupts,
         },
     ))
 }
@@ -502,4 +540,9 @@ fn poll(
         core::hint::spin_loop();
     }
     Err(Failure::Timeout(step))
+}
+
+#[cfg(feature = "hal-driver-lifecycle-test")]
+pub(crate) fn lifecycle_diagnostic(console: &mut dyn HalConsole) {
+    let _ = writeln!(console, "e1000: lifecycle error: {:?}", STATE.lock().error);
 }

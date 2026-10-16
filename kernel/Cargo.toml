@@ -15,6 +15,7 @@ default = []
 hal-fault-test-pf = []
 hal-fault-test-gp = []
 hal-power-test-s5 = []
+hal-driver-lifecycle-test = []
 
 # A single binary target. There is deliberately no lib target: the crate is `no_std` and
 # cannot be built for a host test harness. Pure HAL layouts and calculations live in

@@ -32,10 +32,10 @@ use crate::hal::pci::ConfigAccess;
 use crate::mm::mmio::{self, Region};
 use crate::sync::IrqMutex;
 use core::sync::atomic::{fence, AtomicUsize, Ordering};
-use nolx_df_core::{DeviceId, Dispatch, Driver, Match, Registry};
+use nolx_df_core::{DeviceId, Dispatch, Driver, Match};
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
-use nolx_pci_core::{Bar, BarSet, Bdf};
+use nolx_pci_core::{Bar, BarSet, Bdf, ConfigSpace};
 use nolx_virtio_core::{self as virtio, common, VirtioCap, VirtioError};
 
 /// The queue size the driver asks for, or the device's maximum if that is smaller.
@@ -148,11 +148,13 @@ impl From<FsError> for Failure {
 struct State {
     log: Log,
     outcome: Option<Result<(), Failure>>,
+    disk: Option<Disk>,
 }
 
 static STATE: IrqMutex<State> = IrqMutex::new(State {
     log: Log::new(),
     outcome: None,
+    disk: None,
 });
 
 /// The match rules: the transitional and the modern virtio block device IDs.
@@ -179,13 +181,12 @@ pub fn probe(console: &mut dyn HalConsole) {
         );
         return;
     };
-    let mut registry: Registry<1, 1> = Registry::new();
     let driver = Driver {
         name: "virtio-blk",
         matches: MATCHES,
         ops: DISPATCH,
     };
-    if let Err(error) = driver_start::attach(&mut registry, driver, id) {
+    if let Err(error) = driver_start::attach(driver, id) {
         let _ = writeln!(
             console,
             "virtio-blk: framework refused the device: {error:?}"
@@ -217,17 +218,38 @@ fn start_device(_dev: usize) -> bool {
     let started = result.is_ok();
     let mut state = STATE.lock();
     state.log = log;
-    state.outcome = Some(result);
+    state.outcome = Some(result.map(|disk| {
+        state.disk = Some(disk);
+    }));
     started
 }
 
-/// Nothing to undo: the queue stays registered for the rest of boot.
+/// Flush and quiesce hardware before returning owned DMA pages. No IRQ lock spans the wait.
 fn stop_device(_dev: usize) -> bool {
+    let Some(mut disk) = STATE.lock().disk.take() else {
+        return false;
+    };
+    if disk.quiesce().is_err() {
+        STATE.lock().disk = Some(disk);
+        return false;
+    }
+    disk.release();
     true
 }
 
-fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
+pub(crate) fn with_disk<T>(
+    op: impl FnOnce(&mut dyn nolxfs::sector::SectorDevice) -> Result<T, nolxfs::DevError>,
+) -> Result<T, nolxfs::DevError> {
+    let mut disk = STATE.lock().disk.take().ok_or(nolxfs::DevError::Io(19))?;
+    let result = op(&mut disk);
+    STATE.lock().disk = Some(disk);
+    result
+}
+
+fn bring_up(console: &mut dyn HalConsole) -> Result<Disk, Failure> {
     let (bdf, _) = find_device().ok_or(Failure::NoDevice)?;
+    let command = ConfigAccess.read_u32(bdf, 4) & 0xffff;
+    ConfigAccess.write_u32(bdf, 4, command | 6);
     let bars = nolx_pci_core::read_bars(&mut ConfigAccess, bdf);
     let caps = virtio::discover(&mut ConfigAccess, bdf);
     let common_cap = caps.common.ok_or(Failure::NoCapability("common"))?;
@@ -267,11 +289,14 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     let notify_offset =
         virtio::notify_address(&notify_cap, queue.notify_offset) - u64::from(notify_cap.offset);
     let mut disk = Disk {
+        capacity: sectors,
         queue,
         notify,
         notify_offset,
         request: Dma::new().ok_or(Failure::Memory)?,
         flush_supported: accepted & virtio::FEATURE_BLK_FLUSH != 0,
+        bdf,
+        common,
     };
 
     disk.transfer(virtio::BLK_T_IN, 0, virtio::SECTOR_BYTES as u32)?;
@@ -302,17 +327,17 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     }
     match volume {
         Some((first, last)) => {
-            super::storage_volume::run(disk, first, last - first + 1, console, "virtio-blk")
-                .map_err(Failure::Filesystem)
+            super::storage_volume::run(&mut disk, first, last - first + 1, console, "virtio-blk")
+                .map_err(Failure::Filesystem)?;
         }
         None => {
             let _ = writeln!(
                 console,
                 "virtio-blk: gpt has no partitions in use; no volume"
             );
-            Ok(())
         }
     }
+    Ok(disk)
 }
 
 /// Read the primary GPT header from LBA 1 and the table it names, check both against the
@@ -508,11 +533,36 @@ struct Queue {
 
 /// The disk once it is running: its queue, the notify register, and the request page.
 pub(crate) struct Disk {
+    capacity: u64,
     queue: Queue,
     notify: Region,
     notify_offset: u64,
     request: Dma,
     flush_supported: bool,
+    bdf: Bdf,
+    common: Region,
+}
+
+impl Disk {
+    fn quiesce(&mut self) -> Result<(), Failure> {
+        nolxfs::sector::SectorDevice::flush(self).map_err(|e| Failure::Volume(e.into()))?;
+        self.common.write8(at(common::DEVICE_STATUS), 0)?;
+        poll(
+            || Ok(self.common.read8(at(common::DEVICE_STATUS))? == 0),
+            "stop reset",
+        )?;
+        let command = ConfigAccess.read_u32(self.bdf, 4) & 0xffff;
+        ConfigAccess.write_u32(self.bdf, 4, command & !4);
+        blockdev::detach(blockdev::VIRTIO)?;
+        Ok(())
+    }
+    fn release(self) {
+        // SAFETY: quiesce completed a device reset, disabled DMA and detached the idle queue.
+        unsafe {
+            self.queue.ring.release();
+            self.request.release();
+        }
+    }
 }
 
 impl Disk {
@@ -701,6 +751,9 @@ pub fn on_completion_interrupt() {
 }
 
 impl super::storage_volume::SectorDisk for Disk {
+    fn sector_count(&self) -> u64 {
+        self.capacity
+    }
     fn flush(&mut self) -> Result<(), nolxfs::DevError> {
         if !self.flush_supported {
             return Err(nolxfs::DevError::Io(5));
@@ -710,9 +763,11 @@ impl super::storage_volume::SectorDisk for Disk {
             .map_err(|_| nolxfs::DevError::Io(5))
     }
     fn read_sectors(&mut self, first: u64, out: &mut [u8]) -> Result<(), nolxfs::DevError> {
+        nolxfs::sector::check_sector_io(self.capacity, first, out.len())?;
         Disk::read_sectors(self, first, out).map_err(|_| nolxfs::DevError::Io(5))
     }
     fn write_sectors(&mut self, first: u64, data: &[u8]) -> Result<(), nolxfs::DevError> {
+        nolxfs::sector::check_sector_io(self.capacity, first, data.len())?;
         Disk::write_sectors(self, first, data).map_err(|_| nolxfs::DevError::Io(5))
     }
 }

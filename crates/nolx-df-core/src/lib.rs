@@ -193,6 +193,24 @@ impl<const D: usize, const N: usize> Registry<D, N> {
         Ok(index)
     }
 
+    /// Look up a registered driver's stable slot by name.
+    #[must_use]
+    pub fn find_driver(&self, name: &str) -> Option<usize> {
+        self.drivers
+            .iter()
+            .position(|slot| slot.is_some_and(|driver| driver.name == name))
+    }
+
+    /// The bound driver's diagnostic name, retained across stop and removal.
+    pub fn driver_name(&self, dev: usize) -> Result<&'static str, Error> {
+        let index = self.device(dev)?.driver.ok_or(Error::NoDriver)?;
+        self.drivers
+            .get(index)
+            .and_then(Option::as_ref)
+            .map(|driver| driver.name)
+            .ok_or(Error::NoDriver)
+    }
+
     /// Record a discovered device. Returns its handle.
     ///
     /// # Errors

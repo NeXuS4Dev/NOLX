@@ -960,3 +960,17 @@ hardware-test feature uses a no-active-DMA VM after the complete boot/memory tes
 QMP observed actual guest shutdown and QEMU exit zero locally on pc/Q35; an active virtio-net
 bus master caused refusal. A dedicated CI job covers those positive and negative cases.
 S3 save/resume, AML methods and production system-wide device power/quiescence are still open.
+
+
+### M9 persistent healthy-driver lifecycle checkpoint (2026-10-16)
+
+Native virtio-blk/AHCI/NVMe/e1000/virtio-net now share a persistent registry, retain their
+transport ownership after probe return, and support tested healthy stop/restart/removal.
+The dedicated `hal-driver-lifecycle-test` build and `scripts/check-driver-lifecycle.py` run
+three cycles per driver independently and together, prove exact DMA page reclamation and
+reacquisition, and verify retained disk I/O or fresh network exchanges after restart.
+Callbacks never hold the registry IRQ lock while waiting. Public transport I/O is excluded
+from lifecycle operations and requires Started state. **M9 remains in progress**: failure-path
+ownership, reusable MMIO/IRQ resources and multiple instances/segments remain open alongside
+USB HID, AML resource discovery, BAR/bridge allocation and production S3/power policy.
+See the [completion gate](docs/development/m9-completion.md) for precise evidence and limits.

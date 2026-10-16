@@ -12,7 +12,7 @@ use crate::{
     sync::IrqMutex,
 };
 use core::sync::atomic::{fence, AtomicUsize, Ordering};
-use nolx_df_core::{DeviceId, Dispatch, Driver, Match, Registry};
+use nolx_df_core::{DeviceId, Dispatch, Driver, Match};
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
 use nolx_net_core::{
@@ -86,7 +86,6 @@ pub fn probe(console: &mut dyn HalConsole) {
         let _ = writeln!(console, "virtio-net: not brought up: NoDevice");
         return;
     };
-    let mut registry: Registry<1, 1> = Registry::new();
     let driver = Driver {
         name: "virtio-net",
         matches: MATCHES,
@@ -96,7 +95,7 @@ pub fn probe(console: &mut dyn HalConsole) {
             stop,
         },
     };
-    if let Err(error) = driver_start::attach(&mut registry, driver, id) {
+    if let Err(error) = driver_start::attach(driver, id) {
         let _ = writeln!(console, "virtio-net: framework refused device: {error:?}");
     }
     if let Some((log, outcome)) = START.lock().as_ref() {
@@ -134,6 +133,16 @@ fn stop(_: usize) -> bool {
         *DEVICE.lock() = Some(nic);
         return false;
     }
+    let command = ConfigAccess.read_u32(nic.bdf, 4) & 0xffff;
+    ConfigAccess.write_u32(nic.bdf, 4, command & !4);
+    // SAFETY: virtio reset completed and PCI bus mastering is disabled; IRQ state owns no rings.
+    unsafe {
+        nic.rx.ring.release();
+        nic.rx.data.release();
+        nic.tx.ring.release();
+        nic.tx.data.release();
+    }
+
     true
 }
 
@@ -287,6 +296,7 @@ impl Queue {
     }
 }
 struct Nic {
+    bdf: Bdf,
     common: Region,
     rx: Queue,
     tx: Queue,
@@ -369,6 +379,7 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<Nic, Failure> {
     let rx = Queue::new(&common, notify, cap, 0)?;
     let tx = Queue::new(&common, notify, cap, 1)?;
     let mut nic = Nic {
+        bdf,
         common,
         rx,
         tx,
@@ -418,17 +429,37 @@ pub fn send_frame(bytes: &[u8]) -> Result<(), Failure> {
     if super::cpu::current_ipl() != nolx_hal_core::ipl::Ipl::PASSIVE {
         return Err(Failure::Busy);
     }
-    let mut nic = DEVICE.lock().take().ok_or(Failure::Busy)?;
-    let result = nic.transmit(bytes);
-    *DEVICE.lock() = Some(nic);
-    result
+    driver_start::device_operation(
+        "virtio-net",
+        || {
+            let mut nic = DEVICE.lock().take().ok_or(Failure::Busy)?;
+            let result = nic.transmit(bytes);
+            *DEVICE.lock() = Some(nic);
+            result
+        },
+        |error| {
+            if error == nolx_df_core::Error::Busy {
+                Failure::Busy
+            } else {
+                Failure::NoDevice
+            }
+        },
+    )
 }
 /// Consume one externally received frame from the bounded device queue.
 pub fn receive_frame() -> Option<Frame> {
-    let mut slot = DEVICE.lock();
-    let nic = slot.as_mut()?;
-    let _ = nic.receive();
-    nic.frames.pop()
+    driver_start::device_operation(
+        "virtio-net",
+        || {
+            let mut slot = DEVICE.lock();
+            let nic = slot.as_mut().ok_or(Failure::NoDevice)?;
+            nic.receive()?;
+            Ok(nic.frames.pop())
+        },
+        |_| Failure::Busy,
+    )
+    .ok()
+    .flatten()
 }
 
 /// Receive-vector entry point, before APIC EOI.

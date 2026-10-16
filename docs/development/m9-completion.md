@@ -17,7 +17,10 @@ M9 to the already implemented boot probes. Check items only with executable evid
 - [ ] Assign unconfigured BARs and bridge resource windows without overlaps, rather than
       depending exclusively on firmware-assigned addresses.
 - [ ] Bind supported devices beyond the current one-device, segment-zero boot probes.
-- [ ] Finish driver lifecycle/resource ownership beyond one-shot framework boot callbacks.
+- [x] Persistent system registry; retain native storage/network state past probe return;
+      healthy stop/restart/removal with hardware quiescence and exact DMA reclamation.
+- [ ] Complete failed-start/failed-stop recovery and MMIO/interrupt-resource reclamation;
+      multi-controller contexts and binding remain a separate gate above.
 
 ## Storage integration
 
@@ -82,8 +85,8 @@ one-device boot drivers still bind segment zero. e1000 INTx routing currently co
 firmware-assigned legacy GSIs (IRQ3…15 except IRQ12), not AML PCI link-device routing.
 Network reachability verification currently uses QEMU's user-network gateway as a boot
 self-test peer; this is not a configurable IP/socket stack. Input FIFO delivery exists,
-but HID enumeration and public input-device objects remain open. Driver registries still
-use one-shot boot callbacks rather than a persistent system-wide lifecycle.
+but HID enumeration and public input-device objects remain open. At that checkpoint driver registries still
+used one-shot boot callbacks; the persistent lifecycle checkpoint below supersedes that limitation.
 
 The AHCI no-local-APIC polling fallback plus PIC/PIT disk checksum test is also verified:
 run [38954085871](https://github.com/NeXuS4Dev/NOLX/actions/runs/38954085871) on `c8431f0`
@@ -183,3 +186,41 @@ release kernel Clippy passed, all 241 unsafe blocks had safety invariants, and t
 image passed all 21 layout checks. No PR has been opened. **M9 is still not complete:**
 BAR/bridge allocation, persistent/multi-device lifecycle, xHCI/HID/input objects, evaluated
 AML/resources and global power-quiesce/S3 remain the unchecked acceptance gates.
+
+
+## Persistent healthy-driver lifecycle (2026-10-16)
+
+The system now keeps one registry beyond probe return. Framework callbacks and retained I/O
+check out its state without holding an IRQ lock across hardware waits. Reentrant/concurrent
+operations return Busy; public I/O is refused unless its driver is Started. Storage keeps its
+transport after borrowed filesystem tests, including NVMe admin queues/identify DMA ownership.
+Sector operations reject empty/unaligned, overflow and capacity-exceeding requests; partitions
+are checked against physical transport capacity. Both native NICs now reclaim DMA after reset
+(plus explicit RX/TX disable for e1000), PCI BME disable and IRQ-state detachment.
+
+Local Rust 1.88.0 / QEMU 11.0.2 tests use
+`make kernel KERNEL_FEATURES=hal-driver-lifecycle-test` and
+`python3 scripts/check-driver-lifecycle.py`. Five independent fixtures plus one containing all
+five drivers each exercise three stop/restart cycles, retained disk read/write/flush/readback or
+fresh ARP RX/TX, running-removal refusal, removal and restart refusal. Each cycle proves exact
+DMA reclamation/reacquisition: virtio-blk 2 pages, AHCI 2, NVMe 6, e1000 11, virtio-net 4.
+Every fixture finishes with zero pinned DMA pages. The host independently verifies the final
+sector-1700 write on each disk. The combined fixture has **one controller of each kind**, not
+multiple controllers of one kind. Dedicated CI job: `Persistent five-driver hardware lifecycle`.
+
+Restart testing exposed e1000's boot-only assumption that IF remains masked: its ISR can
+recycle a descriptor before the poll observes DD. Readiness now accepts a fresh IRQ counter as
+well as DD, and waits against the current start's counter baseline instead of the first boot's.
+
+**Still open:** singleton native contexts/fixed storage queue IDs and segment-zero binding;
+MMIO mappings remain monotonic (no unmap/reuse), and interrupt-vector/routing resource release
+is not complete. Failed initialization deliberately pins DMA rather than freeing possibly active
+hardware buffers; failure ownership/recovery is not yet complete. These healthy-path tests do
+not close the full lifecycle, power quiescence, or multi-device M9 gates.
+
+Local regression for this checkpoint: 695 tests passed in each overlapping host command;
+host and default/feature kernel Clippy and formatting passed; unsafe audit 246 blocks / zero
+missing invariants; conformance 324 assertions / zero problems. All six lifecycle fixtures,
+six native virtio-net configurations, three independent filesystem backends, host mounts,
+reboots and nine malformed-media refusals passed. Lifecycle storage cycles additionally prove
+that malformed, out-of-capacity and overflowing retained requests dispatch zero commands.
