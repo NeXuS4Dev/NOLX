@@ -1,0 +1,12 @@
+[package]
+name = "nolx-power-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-testable ACPI device and power rules for NOLX: _STA status bits, _CRS resource templates, the _Sx sleep-type lookup, and the PM1 sleep control word"
+readme = "../../README.md"
+publish = false
+
+[lib]
+path = "src/lib.rs"

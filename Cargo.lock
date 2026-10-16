@@ -3,12 +3,43 @@
 version = 4
 
 [[package]]
+name = "fsck-nolxfs"
+version = "0.1.0"
+dependencies = [
+ "nolxfs",
+]
+
+[[package]]
 name = "mkfs-nolxfs"
 version = "0.1.0"
 dependencies = [
  "nolx-types",
  "nolxfs",
 ]
+
+[[package]]
+name = "nolx-ahci-core"
+version = "0.1.0"
+
+[[package]]
+name = "nolx-net-core"
+version = "0.1.0"
+
+[[package]]
+name = "nolx-nvme-core"
+version = "0.1.0"
+
+[[package]]
+name = "nolx-block-core"
+version = "0.1.0"
+
+[[package]]
+name = "nolx-df-core"
+version = "0.1.0"
+
+[[package]]
+name = "nolx-e1000-core"
+version = "0.1.0"
 
 [[package]]
 name = "nolx-exec-core"
@@ -27,14 +58,27 @@ version = "0.1.0"
 name = "nolx-kernel"
 version = "0.1.0"
 dependencies = [
+ "nolx-ahci-core",
+ "nolx-block-core",
+ "nolx-df-core",
+ "nolx-e1000-core",
  "nolx-exec-core",
  "nolx-hal-core",
  "nolx-mm-core",
+ "nolx-nvme-core",
  "nolx-obj-core",
+ "nolx-pci-core",
+ "nolx-power-core",
  "nolx-types",
+ "nolx-usb-core",
  "nolx-vfs",
+ "nolx-virtio-core",
  "nolxfs",
 ]
+
+[[package]]
+name = "nolx-input-core"
+version = "0.1.0"
 
 [[package]]
 name = "nolx-mm-core"
@@ -42,6 +86,14 @@ version = "0.1.0"
 
 [[package]]
 name = "nolx-obj-core"
+version = "0.1.0"
+
+[[package]]
+name = "nolx-pci-core"
+version = "0.1.0"
+
+[[package]]
+name = "nolx-power-core"
 version = "0.1.0"
 
 [[package]]
@@ -56,6 +108,13 @@ name = "nolx-types"
 version = "0.1.0"
 
 [[package]]
+name = "nolx-usb-core"
+version = "0.1.0"
+dependencies = [
+ "nolx-input-core",
+]
+
+[[package]]
 name = "nolx-vfs"
 version = "0.1.0"
 dependencies = [
@@ -64,8 +123,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "nolx-virtio-core"
+version = "0.1.0"
+dependencies = [
+ "nolx-pci-core",
+]
+
+[[package]]
 name = "nolxfs"
 version = "0.1.0"
 dependencies = [
  "nolx-types",
+]
+
+[[package]]
+name = "nolxfs-dump"
+version = "0.1.0"
+dependencies = [
+ "nolxfs",
 ]

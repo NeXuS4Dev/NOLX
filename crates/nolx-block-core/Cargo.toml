@@ -1,0 +1,12 @@
+[package]
+name = "nolx-block-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-testable block-device rules for NOLX: GUID Partition Table header and entry validation, partition lookup, CRC-32"
+readme = "../../README.md"
+publish = false
+
+[lib]
+path = "src/lib.rs"

@@ -1,0 +1,12 @@
+[package]
+name = "nolx-input-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-testable PS/2 rules for NOLX: controller status and configuration, device replies, and the scancode set 1 decoder that yields USB HID usage codes"
+readme = "../../README.md"
+publish = false
+
+[lib]
+path = "src/lib.rs"

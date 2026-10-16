@@ -37,6 +37,7 @@ pub mod buddy;
 pub mod commit;
 pub mod heap;
 pub mod magazine;
+pub mod mmio;
 pub mod numa;
 pub mod paging;
 pub mod vad;

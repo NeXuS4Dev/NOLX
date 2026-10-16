@@ -32,6 +32,13 @@ extern "C" fn nolx_interrupt_dispatch(frame_pointer: *mut InterruptFrame) -> *mu
         return frame_pointer;
     }
 
+    if vector == super::nvme::COMPLETION_VECTOR {
+        return device_completion(frame_pointer, super::nvme::on_completion_interrupt);
+    }
+    if vector == super::virtio_blk::COMPLETION_VECTOR {
+        return device_completion(frame_pointer, super::virtio_blk::on_completion_interrupt);
+    }
+
     if apic::is_enabled() && apic::handles_vector(vector) {
         // Interrupt gates clear IF. APIC TPR and the per-CPU software IPL are both raised
         // until after the local APIC EOI, then restored in that order.
@@ -180,4 +187,16 @@ pub fn trigger_general_protection_test() -> ! {
         );
     }
     halt_after_exception()
+}
+
+/// Take a device's completion on its own MSI-X vector: count it with `handler`, then send the local
+/// APIC its EOI. The software IPL is raised for the duration, as for the other device vectors.
+fn device_completion(frame_pointer: *mut InterruptFrame, handler: fn()) -> *mut InterruptFrame {
+    let previous = cpu::raise_ipl(Ipl::DEVICE_MIN);
+    handler();
+    apic::end_of_interrupt();
+    if let Some(previous_ipl) = previous {
+        cpu::restore_ipl(previous_ipl);
+    }
+    frame_pointer
 }

@@ -1,0 +1,12 @@
+[package]
+name = "nolx-e1000-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-testable Intel e1000 rules for NOLX: register offsets, EEPROM MAC read, legacy receive and transmit descriptors, control bits, and ring arithmetic"
+readme = "../../README.md"
+publish = false
+
+[lib]
+path = "src/lib.rs"

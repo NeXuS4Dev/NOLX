@@ -551,6 +551,145 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
 
 ## M9 — Devices and drivers
 
+**Status: started.** Slices landed on branch `arena/d71a2d5c-nolx`:
+
+- PCI (`crates/nolx-pci-core`): configuration-space logic (`0xCF8` addressing, function identity,
+  BAR decoding and sizing with restore-after-probe, capability walking with a loop guard,
+  bridge-aware enumeration), bound to ports `0xCF8`/`0xCFC` and reported at boot. BAR sizing runs
+  for type-0 functions. PCI-001 to PCI-008 are `tested-T1`; PCI-009 and PCI-010 are `tested-T2`
+  (CI runs [38370090989](https://github.com/NeXuS4Dev/NOLX/actions/runs/38370090989) and
+  [38371460597](https://github.com/NeXuS4Dev/NOLX/actions/runs/38371460597)).
+- virtio (`crates/nolx-virtio-core`, in progress): host-tested transport rules (capability
+  discovery, notify address, feature negotiation, status sequence, split virtqueue layout,
+  block request format). VIO-001 to VIO-009 are `tested-T1` in `docs/testing/assertions/drv.md`.
+- MMIO windows (`crates/nolx-mm-core/src/mmio.rs`, `kernel/src/mm/mmio.rs`): device registers
+  outside the direct map are mapped uncached in PML4 slot 257. MMIO-001 to MMIO-004 are
+  `tested-T1`; MMIO-005 is `tested-T2` (the boot maps the local APIC through the window and
+  checks it against the direct map).
+- virtio-blk (`kernel/src/hal/virtio_blk.rs`): the probe finds the device, negotiates features,
+  sets up queue 0, and reads sector 0 through the ring, polled. VIO-010 is `tested-T1`; VIO-011
+  and VIO-012 are `tested-T2`, with CI attaching a 1 MiB disk whose sector 0 starts with a
+  known pattern (run [38404754464](https://github.com/NeXuS4Dev/NOLX/actions/runs/38404754464)).
+- virtio-blk writes: a 2 KiB pattern is written to sectors 1600 to 1603, read back, and checked by
+  CRC-32; CI checksums the same sectors in the disk image after QEMU exits. VIO-013 is
+  `tested-T1`. VIO-014 and VIO-015 are `tested-T2` (run [38456685552](https://github.com/NeXuS4Dev/NOLX/actions/runs/38456685552)). They were first
+  `tested-T2` at run [38442239670](https://github.com/NeXuS4Dev/NOLX/actions/runs/38442239670),
+  when the pattern was at sectors 8 to 11.
+- GPT rules (`crates/nolx-block-core`): header signature, revision, header and table CRC-32,
+  the own-LBA and reserved-field checks, entry size, usable area, partition range, and overlap.
+  BLK-001 to BLK-021 are `tested-T1`.
+- GPT on the virtio disk: CI attaches an image from `tools/make-test-disk.py` with two partitions.
+  The probe reads the header and table through the queue, checks them, and prints the partitions.
+  BLK-022 and BLK-023 are `tested-T2` (run [38456685552](https://github.com/NeXuS4Dev/NOLX/actions/runs/38456685552)).
+- NOLXFS on the first partition: the kernel formats it when it holds no volume, writes an 8 KiB file,
+  commits, mounts the volume again from the disk, and reads the file back. CI compares the checksum
+  with the pattern and runs `fsck.nolxfs` on the partition. BLK-024 and BLK-025 are `tested-T2`
+  (run [38456685552](https://github.com/NeXuS4Dev/NOLX/actions/runs/38456685552)).
+- AHCI (`crates/nolx-ahci-core`, `kernel/src/hal/ahci.rs`): register layout, port state, FIS and
+  command-header encodings, physical region descriptors, and the WRITE DMA EXT encoding, host-tested
+  (AHCI-001 to AHCI-007 and AHCI-010 are `tested-T1`). The probe finds the controller through BAR 5,
+  starts the first SATA port, reads sector 0 through command slot 0, then writes a 2 KiB pattern to
+  sectors 1600 to 1603, reads it back, and checks CRC-32. AHCI-008 and AHCI-009 are `tested-T2`
+  (run [38460754722](https://github.com/NeXuS4Dev/NOLX/actions/runs/38460754722)); AHCI-011 is `tested-T2` (run [38523473276](https://github.com/NeXuS4Dev/NOLX/actions/runs/38523473276)). CI attaches
+  a copy of the disk image to the AHCI port and checksums the written sectors in that copy after QEMU exits.
+  Not yet done: interrupts, and the other storage paths (request merging, per-device queues).
+- NVMe (`crates/nolx-nvme-core`, `kernel/src/hal/nvme.rs`): controller registers, doorbell offsets,
+  the enable sequence, 64-byte submission and 16-byte completion entries, the Create I/O queue and
+  Read and Write encodings, completion status, and the namespace block size, host-tested
+  (NVME-001 to NVME-008 are `tested-T1`). The probe finds class 01:08:02, enables memory decoding and
+  bus mastering, maps BAR 0, sets up one admin queue pair and one I/O queue pair of eight entries,
+  identifies namespace 1, reads sector 0 through the I/O queue, then writes sectors 1600 to 1603,
+  reads them back, and checks CRC-32. NVME-009 to NVME-011 are `tested-T2` (run
+  [38558796880](https://github.com/NeXuS4Dev/NOLX/actions/runs/38558796880)). CI attaches a copy of the
+  disk image as an NVMe namespace and checksums the written sectors in that copy after QEMU exits.
+  I/O completions arrive as MSI-X interrupts on vector 0x50 (NVME-013 is `tested-T2`, run [38775764121](https://github.com/NeXuS4Dev/NOLX/actions/runs/38775764121)).
+  Not yet done: interrupts for the other drivers.
+
+- MSI and MSI-X rules (`crates/nolx-pci-core/src/msi.rs`): capability layouts, the message address
+  and data for a local APIC, the MSI-X table entry and its placement in a BAR, host-tested
+  (PCI-011 to PCI-013 are `tested-T1`, run [38567825680](https://github.com/NeXuS4Dev/NOLX/actions/runs/38567825680)).
+  The kernel does not program MSI or MSI-X yet.
+
+- Block request queue (`crates/nolx-block-core/src/queue.rs`): adjacent same-direction requests merge
+  up to a size limit, a merge can bridge queued requests, and the queue keeps arrival order. Host-tested;
+  BLK-026 and BLK-027 are `tested-T1` (run [38570531260](https://github.com/NeXuS4Dev/NOLX/actions/runs/38570531260)).
+  The drivers do not submit through the queue yet.
+
+- PS/2 keyboard rules (`crates/nolx-input-core`): controller status and configuration bits, device
+  replies, and the scancode set 1 decoder with the E0 and E1 prefixes, producing USB HID usage codes.
+  Host-tested; PS2-001 to PS2-007 are `tested-T1` (run [38599792741](https://github.com/NeXuS4Dev/NOLX/actions/runs/38599792741)).
+  The kernel does not read the keyboard yet, and the mouse and xHCI are not started.
+
+- Network device rules (`crates/nolx-net-core`): virtio-net identity, features, configuration space,
+  queue layout, and the 12-byte net header, plus Ethernet frame limits, header fields, and MAC address
+  rules. Host-tested; NET-001 to NET-006 are `tested-T1` (run [38603598789](https://github.com/NeXuS4Dev/NOLX/actions/runs/38603598789)).
+  The kernel has no network driver yet.
+
+- ACPI device and power rules (`crates/nolx-power-core`): `_STA` status bits and usability, `_CRS`
+  resource templates (IRQ, I/O, fixed I/O, Memory32Fixed, QWord memory), the `_S3_`/`_S5_` sleep-type
+  lookup in AML, and the PM1 sleep word. Host-tested; PWR-001 to PWR-005 are `tested-T1` (run
+  [38607105889](https://github.com/NeXuS4Dev/NOLX/actions/runs/38607105889)). The kernel does not run
+  `_STA` or `_CRS` yet, and does not enter a sleep state.
+
+- USB host rules (`crates/nolx-usb-core`): xHCI register offsets and port status with the
+  write-one-to-clear rules, the link, normal, and event TRBs, and the HID boot keyboard report, which
+  yields the same key events as the PS/2 decoder. Host-tested; USB-001 to USB-006 are `tested-T1` (run
+  [38608775432](https://github.com/NeXuS4Dev/NOLX/actions/runs/38608775432)). The kernel does not
+  drive a controller yet, and hubs and other device classes are not here.
+
+- e1000 rules (`crates/nolx-e1000-core`): register map and device identity, the EEPROM MAC read,
+  receive address registers, engine control values, legacy receive and transmit descriptors, ring sizing,
+  and free-slot arithmetic. Host-tested; NIC-001 to NIC-007 are `tested-T1` (run
+  [38611667077](https://github.com/NeXuS4Dev/NOLX/actions/runs/38611667077)). The kernel has no e1000
+  driver yet.
+
+- Driver framework rules (`crates/nolx-df-core`, `nolx-df`): device identity and match rules, binding in
+  registration order with a probe, the lifecycle (bind, start, stop, remove, failure), a dispatch table of
+  function pointers, and fixed capacity. Host-tested; DF-001 to DF-007 are `tested-T1` (run
+  [38614702136](https://github.com/NeXuS4Dev/NOLX/actions/runs/38614702136)). The kernel does not use the
+  framework yet, and no driver is registered with it.
+
+- Per-device block queues (`crates/nolx-block-core/src/devices.rs`): each attached device has its own
+  request queue, so merges stay within one device; dispatch is round-robin with a per-device in-flight
+  limit, so one device cannot starve the others. Host-tested; BLK-028 to BLK-032 are `tested-T1` (run
+  [38619742873](https://github.com/NeXuS4Dev/NOLX/actions/runs/38619742873)). The drivers do not submit
+  through these queues yet.
+
+- xHCI bring-up in the kernel (`kernel/src/hal/xhci.rs`): finds the controller by class code, enables
+  it, maps BAR 0, halts and resets it, and reports each root port's connection state. USB-007 and
+  USB-008 are `tested-T2` (run [38621595620](https://github.com/NeXuS4Dev/NOLX/actions/runs/38621595620)).
+  Not yet done: command and event rings, slots, and device enumeration.
+
+- e1000 driver in the kernel (`kernel/src/hal/e1000.rs`), run through the driver framework: the
+  framework binds and starts the device, which resets it, reads the MAC from the EEPROM, sets up one
+  receive and one transmit ring, and transmits a 60-byte frame. NIC-008 to NIC-010 are `tested-T2`
+  (run [38630855644](https://github.com/NeXuS4Dev/NOLX/actions/runs/38630855644)). Not yet done: receive
+  checks, interrupts, and the network stack above the driver.
+
+- Storage backends at T2 (`.github/workflows/ci.yml`, job `storage-backends`): the kernel boots to its end
+  with virtio-blk, AHCI, or NVMe alone; each binds through `nolx-df`, writes and reads back a checksummed
+  pattern, and the disk image matches. The NOLXFS file check runs on virtio. BLK-035 is `tested-T2`
+  (run [38884801713](https://github.com/NeXuS4Dev/NOLX/actions/runs/38884801713)).
+- MSI-X for virtio-blk (`kernel/src/hal/msix.rs`, shared with NVMe): the device's queue is given table
+  entry 1 and vector 0x51, read back before the queue is enabled, and each request's completion is taken
+  as an interrupt before the next request is submitted. BLK-036 is `tested-T2` (run
+  [38909420793](https://github.com/NeXuS4Dev/NOLX/actions/runs/38909420793)). Not yet done: MSI or
+  MSI-X for AHCI and e1000.
+- ACPI in the kernel (`kernel/src/hal/acpi.rs`): the FADT gives the PM1a control port and the DSDT; the
+  S5 soft-off type is read from the DSDT's AML, and the kernel reports the word it would write. PWR-008
+  is `tested-T2` (run [38730057305](https://github.com/NeXuS4Dev/NOLX/actions/runs/38730057305)). Not yet
+  done: `_STA` and `_CRS` evaluation, which needs an AML interpreter, and entering a sleep state.
+
+- Block request path in the kernel (`kernel/src/hal/blockdev.rs`): every virtio-blk, AHCI, and NVMe
+  read and write goes through a per-device queue, and the boot report prints the count dispatched and
+  completed. BLK-033 is `tested-T2` (run [38690959084](https://github.com/NeXuS4Dev/NOLX/actions/runs/38690959084)).
+- Storage drivers through `nolx-df` (`kernel/src/hal/driver_start.rs`): virtio-blk, AHCI, and NVMe
+  are each registered with the framework, matched to their controller, and started; the start
+  operation runs the bring-up. BLK-034 is `tested-T2` (run [38704280940](https://github.com/NeXuS4Dev/NOLX/actions/runs/38704280940)).
+  Not yet done: interrupts, and the storage paths for sleep states.
+
+Not yet done: PCIe ECAM, MSI/MSI-X in the other drivers (NVMe uses MSI-X, see below), and every driver below.
+
 - PCI/PCIe enumeration, BAR assignment, MSI/MSI-X, capability walking.
 - Storage: AHCI (SATA), NVMe, virtio-blk; block layer with partitions (GPT), request
   merging, per-device queues.

@@ -23,6 +23,12 @@ name = "nolx-kernel"
 path = "src/main.rs"
 
 [dependencies]
+nolx-ahci-core = { path = "../crates/nolx-ahci-core" }
+nolx-nvme-core = { path = "../crates/nolx-nvme-core" }
+nolx-usb-core = { path = "../crates/nolx-usb-core" }
+nolx-df-core = { path = "../crates/nolx-df-core" }
+nolx-e1000-core = { path = "../crates/nolx-e1000-core" }
+nolx-block-core = { path = "../crates/nolx-block-core" }
 nolx-hal-core = { path = "../crates/nolx-hal-core" }
 # The memory-management algorithms: buddy allocator, frame magazines, page-table
 # arithmetic, VAD tree, commit accounting, and the kernel heap. `no_std`, no hardware
@@ -36,5 +42,11 @@ nolx-obj-core = { path = "../crates/nolx-obj-core" }
 # table. Kernel-specific object headers and address-space storage wrap this core model.
 nolx-exec-core = { path = "../crates/nolx-exec-core" }
 nolx-types = { path = "../crates/nolx-types" }
+# Bus discovery: PCI configuration-space logic, host-tested. The kernel supplies only the
+# legacy port accesses (`hal::pci`).
+nolx-pci-core = { path = "../crates/nolx-pci-core" }
+# ACPI sleep-state rules: the FADT fields and the `_Sx_` lookup, host-tested.
+nolx-power-core = { path = "../crates/nolx-power-core" }
+nolx-virtio-core = { path = "../crates/nolx-virtio-core" }
 nolx-vfs = { path = "../crates/nolx-vfs" }
 nolxfs = { path = "../crates/nolxfs" }

@@ -1,0 +1,15 @@
+[package]
+name = "nolx-virtio-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-testable virtio 1.x rules for NOLX: PCI capability discovery, status and feature negotiation, split virtqueue layout, block request encoding"
+readme = "../../README.md"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+nolx-pci-core = { path = "../nolx-pci-core" }

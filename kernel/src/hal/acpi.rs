@@ -4,6 +4,7 @@ use core::ptr;
 
 use crate::mm::phys;
 use nolx_hal_core::acpi::{HpetInfo, Madt, Rsdp, Sdt};
+use nolx_power_core::{self as power, Fadt, SleepState};
 
 /// How much physical memory the direct map covers. Tables outside it cannot be read, and a
 /// firmware table above the line is reported as absent rather than followed into a fault.
@@ -25,6 +26,12 @@ pub struct PlatformTables {
     pub used_xsdt: bool,
     /// ACPI revision reported by the RSDP.
     pub rsdp_revision: u8,
+    /// Fixed ACPI description: the DSDT address and the PM1 control port, when a FADT was found.
+    pub fadt: Option<Fadt>,
+    /// The S5 (soft-off) sleep type named in the DSDT, when the DSDT was read and names one.
+    pub s5_sleep_type: Option<u8>,
+    /// The S3 (suspend-to-RAM) sleep type named in the DSDT, when the DSDT was read and names one.
+    pub s3_sleep_type: Option<u8>,
 }
 
 /// Find and validate the platform RSDP, root table, MADT, and optional HPET table.
@@ -53,6 +60,7 @@ pub fn discover() -> Option<PlatformTables> {
 
         let mut madt = None;
         let mut hpet = None;
+        let mut fadt = None;
         for physical_address in entries {
             let Some(table) = read_sdt_at(physical_address) else {
                 continue;
@@ -64,15 +72,25 @@ pub fn discover() -> Option<PlatformTables> {
                 signature if signature == *b"HPET" && hpet.is_none() => {
                     hpet = HpetInfo::parse(table.bytes()).ok();
                 }
+                signature if signature == power::FADT_SIGNATURE && fadt.is_none() => {
+                    fadt = Fadt::parse(table.bytes()).ok();
+                }
                 _ => {}
             }
         }
         if let Some(madt) = madt {
+            let (s5_sleep_type, s3_sleep_type) = match fadt {
+                Some(fadt) => sleep_types(fadt.dsdt),
+                None => (None, None),
+            };
             return Some(PlatformTables {
                 madt,
                 hpet,
                 used_xsdt: index == 0,
                 rsdp_revision: rsdp.revision,
+                fadt,
+                s5_sleep_type,
+                s3_sleep_type,
             });
         }
     }
@@ -131,4 +149,20 @@ fn read_sdt_at(address: u64) -> Option<Sdt<'static>> {
     // ACPI tables remain readable through it for the kernel's lifetime.
     let bytes = unsafe { core::slice::from_raw_parts(phys::direct_ptr::<u8>(address), length) };
     Sdt::parse(bytes, None).ok()
+}
+
+/// The S5 and S3 sleep types the DSDT at `dsdt_address` names, read from its AML. A DSDT that
+/// cannot be read, or does not name a type, gives `None` for that state.
+fn sleep_types(dsdt_address: u64) -> (Option<u8>, Option<u8>) {
+    let Some(dsdt) = read_sdt_at(dsdt_address) else {
+        return (None, None);
+    };
+    if dsdt.signature() != *b"DSDT" {
+        return (None, None);
+    }
+    let aml = dsdt.bytes();
+    (
+        power::sleep_type(aml, SleepState::S5.name()),
+        power::sleep_type(aml, SleepState::S3.name()),
+    )
 }

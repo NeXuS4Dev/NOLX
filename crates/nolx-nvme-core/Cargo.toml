@@ -1,0 +1,12 @@
+[package]
+name = "nolx-nvme-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-testable NVMe rules for NOLX: controller registers, queue entry encodings, completion status, and namespace block size"
+readme = "../../README.md"
+publish = false
+
+[lib]
+path = "src/lib.rs"

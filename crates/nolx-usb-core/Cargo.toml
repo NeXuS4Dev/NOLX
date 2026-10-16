@@ -1,0 +1,15 @@
+[package]
+name = "nolx-usb-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-testable USB rules for NOLX: xHCI register offsets and port status, TRB encodings and event decoding, and HID boot keyboard reports"
+readme = "../../README.md"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+nolx-input-core = { path = "../nolx-input-core" }

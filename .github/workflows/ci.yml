@@ -146,9 +146,16 @@ jobs:
           targets: x86_64-unknown-none
       - uses: Swatinem/rust-cache@v2
       - name: Clippy the kernel for its own target
+        # Each warning is also printed as an error annotation, so the lint shows on the run
+        # without opening the log. The step still fails on any warning.
         run: |
-          cargo clippy --release --target x86_64-unknown-none -p nolx-kernel -- -D warnings \
-            2>&1 | tee /tmp/job.log
+          set +e
+          cargo clippy --release --target x86_64-unknown-none -p nolx-kernel \
+            --message-format=short --color never -- -D warnings > /tmp/clippy.txt 2>&1
+          status=$?
+          tee -a /tmp/job.log < /tmp/clippy.txt
+          grep -v -E "^[[:space:]]*$|Checking |Compiling |Finished " /tmp/clippy.txt | head -60 | while IFS= read -r line; do echo "::error::$line"; done
+          exit $status
       - name: Build the kernel
         run: make kernel 2>&1 | tee -a /tmp/job.log
       - name: Validate the resulting image
@@ -200,11 +207,106 @@ jobs:
       - name: Boot and capture the serial log
         run: |
           set -o pipefail
-          timeout 30 qemu-system-x86_64 \
+          # The disk the virtio-blk probe reads: 1 MiB, with a known pattern at the start of
+          # sector 0 and a GUID Partition Table with two partitions. See tools/make-test-disk.py.
+          python3 tools/make-test-disk.py build/disk.img
+          # The AHCI drive gets its own copy. QEMU locks an image that a drive opens for writing,
+          # so a second drive on the same file would refuse to start.
+          cp build/disk.img build/disk-sata.img
+          # The NVMe namespace gets its own copy too, for the same reason.
+          cp build/disk.img build/disk-nvme.img
+          # 90 seconds: the boot also probes AHCI and NVMe controllers, and the markers after the
+          # virtio work must still be reached before QEMU is stopped.
+          timeout 90 qemu-system-x86_64 \
             -kernel build/nolx.elf \
             -m 512M -nographic -no-reboot \
+            -drive file=build/disk.img,if=none,id=vd0,format=raw \
+            -device virtio-blk-pci,drive=vd0 \
+            -drive file=build/disk-sata.img,if=none,id=sata0,format=raw \
+            -device ahci,id=ahci -device ide-hd,drive=sata0,bus=ahci.0 \
+            -drive file=build/disk-nvme.img,if=none,id=nvme0,format=raw \
+            -device nvme,drive=nvme0,serial=nolx0 \
+            -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 \
+            -netdev user,id=net0 -device e1000,netdev=net0 \
             | tee build/serial.log || true
           cat build/serial.log >> /tmp/job.log
+      # The NOLXFS file, after a remount from the disk, must be the pattern the kernel wrote.
+      # Then fsck.nolxfs checks the volume in the partition: a clean volume means the commit left a
+      # consistent on-disk state, not only a file the kernel could read back from memory.
+      - name: The NOLXFS volume holds the file and checks clean
+        run: |
+          set -e
+          line=$(grep -Eo 'nolxfs file checksum.bin: 8192 bytes written, committed, mounted again, read back, crc32 0x[0-9a-f]{8} matches' build/serial.log | head -1 || true)
+          if [ -z "$line" ]; then
+            echo "the NOLXFS file did not verify after the remount"
+            exit 1
+          fi
+          want=$(echo "$line" | grep -Eo '0x[0-9a-f]{8}')
+          got=$(python3 -c "b=bytes((((i & 0xFF) * 7) & 0xFF) ^ ((((i >> 8) & 0xFF) * 131) & 0xFF) ^ 0xA5 for i in range(8192)); import zlib; print('0x%08x' % (zlib.crc32(b) & 0xffffffff))")
+          echo "the kernel read back crc32 $want; the pattern it wrote has crc32 $got"
+          if [ "$want" != "$got" ]; then
+            echo "the file read back is not the pattern the kernel wrote"
+            exit 1
+          fi
+          # The partition: LBA 40 for 1000 sectors, as the disk tool wrote it.
+          dd if=build/disk.img of=build/volume.img bs=512 skip=40 count=1000 status=none
+          cargo run -q -p fsck-nolxfs -- build/volume.img
+
+      # The round trip wrote sectors 1600 to 1603 and the kernel printed their checksum. Here the
+      # image file, as QEMU left it, is checksummed over the same sectors: a match means the
+      # write reached the disk and was not only held in the device's cache.
+      - name: The written sectors are on the disk image
+        run: |
+          set -e
+          line=$(grep -Eo 'wrote 4 sectors at 1600, read back, crc32 0x[0-9a-f]{8} matches' build/serial.log | head -1 || true)
+          if [ -z "$line" ]; then
+            echo "the virtio round trip did not report a checksum"
+            exit 1
+          fi
+          want=$(echo "$line" | grep -Eo '0x[0-9a-f]{8}')
+          got=$(python3 -c "import zlib; d=open('build/disk.img','rb').read()[1600*512:1604*512]; print('0x%08x' % (zlib.crc32(d) & 0xffffffff))")
+          echo "the kernel wrote crc32 $want; the disk image's sectors 1600 to 1603 have crc32 $got"
+          if [ "$want" != "$got" ]; then
+            echo "the disk image does not hold the data the kernel wrote"
+            exit 1
+          fi
+
+      # The AHCI round trip wrote sectors 1600 to 1603 to the SATA copy of the disk. QEMU has
+      # exited, so the copy is checksummed here and must match what the kernel wrote.
+      - name: The AHCI written sectors are on the SATA disk copy
+        run: |
+          set -e
+          line=$(grep -Eo 'ahci: wrote 4 sectors at 1600, read back, crc32 0x[0-9a-f]{8} matches' build/serial.log | head -1 || true)
+          if [ -z "$line" ]; then
+            echo "the AHCI round trip did not report a checksum"
+            exit 1
+          fi
+          want=$(echo "$line" | grep -Eo '0x[0-9a-f]{8}')
+          got=$(python3 -c "import zlib; d=open('build/disk-sata.img','rb').read()[1600*512:1604*512]; print('0x%08x' % (zlib.crc32(d) & 0xffffffff))")
+          echo "the kernel wrote crc32 $want through AHCI; the SATA copy's sectors 1600 to 1603 have crc32 $got"
+          if [ "$want" != "$got" ]; then
+            echo "the SATA disk does not hold the data the kernel wrote"
+            exit 1
+          fi
+
+      # The NVMe round trip wrote sectors 1600 to 1603 to the NVMe copy of the disk. QEMU has
+      # exited, so the copy is checksummed here and must match what the kernel wrote.
+      - name: The NVMe written sectors are on the NVMe disk copy
+        run: |
+          set -e
+          line=$(grep -Eo 'nvme: wrote 4 sectors at 1600, read back, crc32 0x[0-9a-f]{8} matches' build/serial.log | head -1 || true)
+          if [ -z "$line" ]; then
+            echo "the NVMe round trip did not report a checksum"
+            exit 1
+          fi
+          want=$(echo "$line" | grep -Eo '0x[0-9a-f]{8}')
+          got=$(python3 -c "import zlib; d=open('build/disk-nvme.img','rb').read()[1600*512:1604*512]; print('0x%08x' % (zlib.crc32(d) & 0xffffffff))")
+          echo "the kernel wrote crc32 $want through NVMe; the NVMe copy's sectors 1600 to 1603 have crc32 $got"
+          if [ "$want" != "$got" ]; then
+            echo "the NVMe disk does not hold the data the kernel wrote"
+            exit 1
+          fi
+
       # These are the markers the kernel actually reaches today. The list is the project's
       # honest progress record: a marker is added when the kernel emits it, not before.
       - name: Assert the boot markers
@@ -225,6 +327,8 @@ jobs:
             "hal: syscall/sysret fast path armed (STAR kernel 0x08/0x10, user 0x1b/0x23)" \
             "hal: 8259 PIC remapped to vectors 32..47; all IRQs masked" \
             "acpi: RSDP revision=" \
+            "acpi: PM1a control block at 0x" \
+            "acpi: S5 sleep type " \
             "hpet: counter enabled at" \
             "apic: x" \
             "apic: calibrated timer=" \
@@ -325,6 +429,161 @@ jobs:
             echo "the NUMA node list was not built"
             exit 1
           fi
+          # Device discovery: the legacy configuration ports were read and at least one function
+          # answered. The summary line is the evidence; each function has its own `pci:` line.
+          if ! grep -Eq 'pci: [1-9][0-9]* function\(s\), [0-9]+ bridge\(s\) refused' build/serial.log; then
+            echo "PCI discovery did not report any function"
+            exit 1
+          fi
+          # BAR sizing: the probe found at least one implemented BAR on a type-0 function, with a
+          # decoded base and a power-of-two window size (the QEMU VGA device has BARs).
+          if ! grep -Eq 'pci: [0-9a-f]{2}:[0-9a-f]{2}\.[0-7] bar[0-5] (io|mem32|mem64) 0x[0-9a-f]+ size 0x[0-9a-f]+' build/serial.log; then
+            echo "PCI BAR sizing did not report any implemented BAR"
+            exit 1
+          fi
+          # virtio block: the device was found, its features negotiated, queue 0 enabled, and
+          # DRIVER_OK set; then sector 0 was read through the queue and matches the disk image.
+          if ! grep -Eq 'virtio-blk: [0-9a-f]{2}:[0-9a-f]{2}\.[0-7] capacity [1-9][0-9]* sectors \([0-9]+ bytes\), queue size [0-9]+, driver ok' build/serial.log; then
+            echo "the virtio block device did not reach driver ok"
+            exit 1
+          fi
+          if ! grep -Eq 'virtio-blk: wrote 4 sectors at 1600, read back, crc32 0x[0-9a-f]{8} matches the written data' build/serial.log; then
+            echo "the virtio round trip did not verify"
+            exit 1
+          fi
+          # NOLXFS: the kernel wrote a file on the first partition's volume, committed, mounted
+          # the volume again from the disk, and read the file back with the same checksum.
+          if ! grep -Eq 'virtio-blk: nolxfs file checksum.bin: 8192 bytes written, committed, mounted again, read back, crc32 0x[0-9a-f]{8} matches the written data' build/serial.log; then
+            echo "the NOLXFS file did not verify after the remount"
+            exit 1
+          fi
+          # GPT: the header and its table pass the rules, and the two partitions the disk tool
+          # wrote are printed with their LBA ranges and names.
+          if ! grep -Fq 'virtio-blk: gpt: header and table verified, 2 partitions in use' build/serial.log; then
+            echo "the GPT header and table did not verify"
+            exit 1
+          fi
+          if ! grep -Fq 'virtio-blk: gpt partition 0: LBA 40-1039 (1000 sectors), name nolx-data' build/serial.log; then
+            echo "the first GPT partition was not reported as the disk tool wrote it"
+            exit 1
+          fi
+          if ! grep -Fq 'virtio-blk: gpt partition 1: LBA 1200-1299 (100 sectors), name nolx-log' build/serial.log; then
+            echo "the second GPT partition was not reported as the disk tool wrote it"
+            exit 1
+          fi
+          if ! grep -Fq 'virtio-blk: bound and started through nolx-df' build/serial.log; then
+            echo "the virtio-blk driver did not bind and start through nolx-df"
+            exit 1
+          fi
+          if ! grep -Fq 'ahci: bound and started through nolx-df' build/serial.log; then
+            echo "the ahci driver did not bind and start through nolx-df"
+            exit 1
+          fi
+          if ! grep -Fq 'nvme: bound and started through nolx-df' build/serial.log; then
+            echo "the nvme driver did not bind and start through nolx-df"
+            exit 1
+          fi
+          if ! grep -Fq 'virtio-blk: sector 0 read, status ok, first 16 bytes match the disk image' build/serial.log; then
+            echo "the virtio block read did not return the disk image's sector 0"
+            exit 1
+          fi
+          # AHCI: the same sector 0, read through a command slot on a SATA port the controller
+          # found by its class code, from the same disk image.
+          if ! grep -Eq 'ahci: [0-9a-f]{2}:[0-9a-f]{2}\.[0-9] abar 0x[0-9a-f]+, ports 0x[0-9a-f]+, port [0-9]+ is a SATA disk' build/serial.log; then
+            echo "the AHCI controller and SATA port were not reported"
+            exit 1
+          fi
+          if ! grep -Eq 'ahci: port [0-9]+ sector 0 read, status ok, first 16 bytes match the disk image' build/serial.log; then
+            echo "the AHCI read did not return the disk image's sector 0"
+            exit 1
+          fi
+          # AHCI round trip: the pattern written to sectors 1600 to 1603 reads back and is
+          # checked by CRC-32 in the kernel. The checksum step below checks the copy on disk.
+          if ! grep -Eq 'ahci: wrote 4 sectors at 1600, read back, crc32 0x[0-9a-f]{8} matches the written data' build/serial.log; then
+            echo "the AHCI round trip did not verify"
+            exit 1
+          fi
+          # NVMe: the controller found by its class code, the namespace it reports, sector 0 read
+          # through an I/O queue, and the same CRC-32 round trip the other drivers run.
+          if ! grep -Eq 'nvme: [0-9a-f]{2}:[0-9a-f]{2}\.[0-9] bar0 0x[0-9a-f]+, namespace 1: [0-9]+ sectors of 512 bytes' build/serial.log; then
+            echo "the NVMe controller and namespace were not reported"
+            exit 1
+          fi
+          if ! grep -Fq 'nvme: sector 0 read, status ok, first 16 bytes match the disk image' build/serial.log; then
+            echo "the NVMe read did not return the disk image's sector 0"
+            exit 1
+          fi
+          # NVMe completions arrive as MSI-X interrupts: every I/O command raised one on the
+          # I/O queue's entry, and the count matches the number of commands submitted.
+          if ! grep -Eq 'nvme: msi-x completion interrupts: ([1-9][0-9]*) of \1 I/O commands, vector 0x50' build/serial.log; then
+            echo "the NVMe completions did not arrive as MSI-X interrupts, one per command"
+            exit 1
+          fi
+          # virtio-blk completions arrive as MSI-X interrupts on vector 0x51, one per request.
+          if ! grep -Eq 'virtio-blk: msi-x completion interrupts: ([1-9][0-9]*) of \1 requests, vector 0x51' build/serial.log; then
+            echo "the virtio-blk completions did not arrive as MSI-X interrupts, one per request"
+            exit 1
+          fi
+          if ! grep -Eq 'nvme: wrote 4 sectors at 1600, read back, crc32 0x[0-9a-f]{8} matches the written data' build/serial.log; then
+            echo "the NVMe round trip did not verify"
+            exit 1
+          fi
+          # xHCI: the controller found by its class code, reset to a halted state, and its root
+          # ports reported. The keyboard CI attaches is on a root port, and its connection state is
+          # printed but not asserted here.
+          if ! grep -Eq 'xhci: [0-9a-f]{2}:[0-9a-f]{2}\.[0-9] bar0 0x[0-9a-f]+, version 0x[0-9a-f]+, [0-9]+ ports, [0-9]+ slots' build/serial.log; then
+            echo "the xHCI controller was not reported"
+            exit 1
+          fi
+          if ! grep -Fq 'xhci: controller reset, halted' build/serial.log; then
+            echo "the xHCI controller was not reset to a halted state"
+            exit 1
+          fi
+          if ! grep -Eq 'xhci: port [0-9]+ (connected|empty)' build/serial.log; then
+            echo "the xHCI root ports were not reported"
+            exit 1
+          fi
+          if ! grep -Eq 'xhci: [0-9]+ of [0-9]+ ports connected' build/serial.log; then
+            echo "the xHCI port summary was not reported"
+            exit 1
+          fi
+          # e1000: the controller found by its vendor and device ID, its MAC address read from
+          # the EEPROM, a frame transmitted with its descriptor marked done, and the driver bound
+          # and started through the driver framework.
+          if ! grep -Eq 'e1000: [0-9a-f]{2}:[0-9a-f]{2}\.[0-9] bar0 0x[0-9a-f]+, mac ([0-9a-f]{2}:){5}[0-9a-f]{2}, link (up|down)' build/serial.log; then
+            echo "the e1000 controller and its MAC address were not reported"
+            exit 1
+          fi
+          if ! grep -Fq 'e1000: transmitted a 60-byte frame, descriptor done' build/serial.log; then
+            echo "the e1000 transmit did not complete"
+            exit 1
+          fi
+          if ! grep -Fq 'e1000: bound and started through nolx-df' build/serial.log; then
+            echo "the e1000 driver was not bound and started through the framework"
+            exit 1
+          fi
+          # ACPI sleep control: the FADT names the PM1a control port, and the DSDT names the S5
+          # soft-off type. The kernel reads both and enters neither state.
+          if ! grep -Eq 'acpi: PM1a control block at 0x[0-9a-f]+, DSDT at 0x[0-9a-f]+' build/serial.log; then
+            echo "the FADT's PM1a control block and DSDT were not reported"
+            exit 1
+          fi
+          if ! grep -Eq 'acpi: S5 sleep type [0-7], soft-off word would be 0x[0-9a-f]+, not entered' build/serial.log; then
+            echo "the S5 sleep type was not read from the DSDT"
+            exit 1
+          fi
+          # Block queues: every read and write the kernel issued went through a device's queue,
+          # and each one completed. The count is at least one and the two numbers are equal.
+          if ! grep -Eq 'blockdev: ([1-9][0-9]*) requests dispatched, \1 completed' build/serial.log; then
+            echo "the block requests did not all go through the queues and complete"
+            exit 1
+          fi
+          # MMIO windows: a device register range is mapped uncached through the window above the
+          # direct map, and reads the same value as the direct map (the local APIC version).
+          if ! grep -Eq 'mm: mmio: LAPIC 0x[0-9a-f]+ at 0x[0-9a-f]+: uncached=true, version 0x[0-9a-f]+ read through the window matches the direct map' build/serial.log; then
+            echo "the MMIO window check did not pass"
+            exit 1
+          fi
           # The pools are charged by the code that consumes memory -- the heap takes the
           # nonpaged pool, page tables take the system PTE pool -- and the report is the
           # executive's view of the same numbers.
@@ -389,5 +648,126 @@ jobs:
       # comment is.
       - uses: ./.github/actions/report-serial
         if: always()
+      # Diagnostic: the serial log as one error annotation, newlines encoded, so a failed boot can be
+      # read through the checks API. Runs only on failure.
+      - name: Annotate the serial log on failure
+        if: failure()
+        run: |
+          tr -cd '\11\12\40-\176' < build/serial.log | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
+      - uses: ./.github/actions/report-failure
+        if: failure()
+
+  # ---------------------------------------------------------------- T2 with each storage backend
+  #
+  # The boot runs once per storage backend, with that backend's disk as the only one the kernel can
+  # find. Each run must bind its driver through nolx-df, write a checksummed pattern, read it back,
+  # reach the end of boot, and find the other two controllers absent. The disk image is checksummed
+  # after QEMU exits, so a match means the write reached the disk. The NOLXFS file check runs only on
+  # the virtio backend, the one the volume code is on.
+  storage-backends:
+    name: Boot with ${{ matrix.backend }} storage only
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [virtio, ahci, nvme]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.88.0
+          targets: x86_64-unknown-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install QEMU
+        run: |
+          sudo apt-get update 2>&1 | tail -1
+          sudo apt-get install -y qemu-system-x86 2>&1 | tail -3
+      - name: Build
+        run: make kernel 2>&1 | tee /tmp/job.log
+      - name: Boot with this backend's disk only
+        run: |
+          set -o pipefail
+          python3 tools/make-test-disk.py build/disk.img
+          case "${{ matrix.backend }}" in
+            virtio) DRIVE="-drive file=build/disk.img,if=none,id=vd0,format=raw -device virtio-blk-pci,drive=vd0" ;;
+            ahci)   DRIVE="-drive file=build/disk.img,if=none,id=sata0,format=raw -device ahci,id=ahci -device ide-hd,drive=sata0,bus=ahci.0" ;;
+            nvme)   DRIVE="-drive file=build/disk.img,if=none,id=nvme0,format=raw -device nvme,drive=nvme0,serial=nolx0" ;;
+            *) echo "unknown backend"; exit 1 ;;
+          esac
+          # 90 seconds, as in the boot smoke test. Word splitting of $DRIVE is intended.
+          timeout 90 qemu-system-x86_64 \
+            -kernel build/nolx.elf \
+            -m 512M -nographic -no-reboot \
+            $DRIVE \
+            -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 \
+            -netdev user,id=net0 -device e1000,netdev=net0 \
+            | tee build/serial.log || true
+          cat build/serial.log >> /tmp/job.log
+      - name: The boot reached its end, and the other backends are absent
+        run: |
+          set -e
+          need() {
+            if ! grep -Fq "$1" build/serial.log; then
+              echo "missing: $1"
+              exit 1
+            fi
+          }
+          need 'NOLX: init sequence complete, halting the boot processor'
+          case "${{ matrix.backend }}" in
+            virtio)
+              need 'virtio-blk: bound and started through nolx-df'
+              need 'ahci: not brought up: NoController'
+              need 'nvme: not brought up: NoController'
+              ;;
+            ahci)
+              need 'ahci: bound and started through nolx-df'
+              need 'virtio-blk: not brought up: NoDevice'
+              need 'nvme: not brought up: NoController'
+              ;;
+            nvme)
+              need 'nvme: bound and started through nolx-df'
+              need 'virtio-blk: not brought up: NoDevice'
+              need 'ahci: not brought up: NoController'
+              ;;
+          esac
+      - name: The written sectors are on the disk image
+        run: |
+          set -e
+          case "${{ matrix.backend }}" in
+            virtio) prefix='virtio-blk' ;;
+            ahci)   prefix='ahci' ;;
+            nvme)   prefix='nvme' ;;
+          esac
+          line=$(grep -Eo "$prefix: wrote 4 sectors at 1600, read back, crc32 0x[0-9a-f]{8} matches" build/serial.log | head -1 || true)
+          if [ -z "$line" ]; then
+            echo "the $prefix round trip did not report a checksum"
+            exit 1
+          fi
+          want=$(echo "$line" | grep -Eo '0x[0-9a-f]{8}')
+          got=$(python3 -c "import zlib; d=open('build/disk.img','rb').read()[1600*512:1604*512]; print('0x%08x' % (zlib.crc32(d) & 0xffffffff))")
+          echo "the kernel wrote crc32 $want through $prefix; the disk image's sectors 1600 to 1603 have crc32 $got"
+          if [ "$want" != "$got" ]; then
+            echo "the disk image does not hold the data the kernel wrote"
+            exit 1
+          fi
+      - name: The NOLXFS file holds the pattern (virtio only)
+        if: matrix.backend == 'virtio'
+        run: |
+          set -e
+          line=$(grep -Eo 'nolxfs file checksum.bin: 8192 bytes written, committed, mounted again, read back, crc32 0x[0-9a-f]{8} matches' build/serial.log | head -1 || true)
+          if [ -z "$line" ]; then
+            echo "the NOLXFS file did not verify after the remount"
+            exit 1
+          fi
+          want=$(echo "$line" | grep -Eo '0x[0-9a-f]{8}')
+          got=$(python3 -c "b=bytes((((i & 0xFF) * 7) & 0xFF) ^ ((((i >> 8) & 0xFF) * 131) & 0xFF) ^ 0xA5 for i in range(8192)); import zlib; print('0x%08x' % (zlib.crc32(b) & 0xffffffff))")
+          if [ "$want" != "$got" ]; then
+            echo "the file read back is not the pattern the kernel wrote"
+            exit 1
+          fi
+      - name: Annotate the serial log on failure
+        if: failure()
+        run: |
+          tr -cd '\11\12\40-\176' < build/serial.log | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
       - uses: ./.github/actions/report-failure
         if: failure()

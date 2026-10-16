@@ -27,6 +27,7 @@
 //! the thing that hands out memory cannot itself be handed out.
 
 pub mod heap;
+pub mod mmio;
 pub mod numa;
 pub mod phys;
 pub mod pool;

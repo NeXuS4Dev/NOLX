@@ -1,0 +1,12 @@
+[package]
+name = "nolx-net-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-testable networking rules for NOLX: virtio-net device identity, features, configuration, and net header, plus Ethernet frame and MAC address rules"
+readme = "../../README.md"
+publish = false
+
+[lib]
+path = "src/lib.rs"
