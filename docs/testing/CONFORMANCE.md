@@ -11,13 +11,13 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | Status | Assertions | Cumulative verified at or above status |
 |---|---|---|
 | `unimplemented` | 0 | 100.0% |
-| `implemented` | 9 | 100.0% |
-| `tested-T1` | 230 | 96.7% |
-| `pending-T2` | 1 | — |
-| `tested-T2` | 61 | 20.3% |
+| `implemented` | 5 | 100.0% |
+| `tested-T1` | 234 | 98.3% |
+| `pending-T2` | 0 | — |
+| `tested-T2` | 62 | 20.6% |
 | `tested-T3` | 0 | 0.0% |
 
-**291 of 301 assertions have a passing automated test; 1 are awaiting T2 results.**
+**296 of 301 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
@@ -37,7 +37,7 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | nvme | 13 | 13 | 9 | 0 | 4 | 0 |
 | nxfs | 15 | 15 | 14 | 0 | 1 | 0 |
 | obj | 14 | 14 | 9 | 0 | 5 | 0 |
-| pci | 18 | 18 | 11 | 1 | 2 | 0 |
+| pci | 18 | 18 | 15 | 0 | 3 | 0 |
 | power | 8 | 8 | 7 | 0 | 1 | 0 |
 | ps2 | 7 | 7 | 7 | 0 | 0 | 0 |
 | usb | 8 | 8 | 6 | 0 | 2 | 0 |
@@ -47,7 +47,7 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 
 None.
 
-## Implemented but untested (9)
+## Implemented but untested (5)
 
 | ID | Specification reference |
 |---|---|
@@ -56,16 +56,10 @@ None.
 | HAL-019 | APIC arithmetic: x2APIC MSRs, compressed TPR priority classes, timer divisors, and HPET-based counter calibration are checked |
 | HAL-020 | HPET clocksource: 32-bit MMIO reads and wrap extension produce monotonic nanoseconds |
 | HAL-021 | I/O APIC routes: GSI windows and ISA overrides are validated, redirections start masked, and NMI sources use MADT polarity/trigger flags |
-| PCI-014 | PCI Firmware MCFG / NOLX M9 ECAM allocation: base is bus-zero-relative and 1 MiB aligned, bus range is ordered, and the highest byte cannot overflow u64 |
-| PCI-015 | NOLX M9 ECAM access: segment and bus must belong to the allocation, device and function are bounded, and byte/word/dword offsets are aligned and contained in 4 KiB |
-| PCI-016 | NOLX M9 ECAM layout: all 256 buses, 32 devices, and 8 functions resolve to distinct consecutive 4 KiB pages |
-| PCI-017 | PCI Firmware MCFG / NOLX M9 parsing: SDT signature, checksum, declared length, fixed payload and record widths are checked; malformed ranges, overflow, physical aliases, same-segment bus overlaps and capacity exhaustion are refused |
 
-## Pending T2 verification (1)
+## Pending T2 verification (0)
 
-| ID | Specification reference | Configured test |
-|---|---|---|
-| PCI-018 | NOLX M9 ECAM boot probe: Q35 segment-zero identities match legacy reads through uncached function-page mappings and extended headers are readable; an i440FX boot without MCFG retains legacy configuration and reaches timer ticks | scripts/check-pci-ecam.sh in boot-smoke CI (not yet executed) |
+None.
 
 ## All assertions
 
@@ -301,11 +295,11 @@ None.
 | PCI-011 | pci | NOLX M9 MSI capability: the message address names the local APIC in bits 19:12 of 0xFEE00000, the data carries a vector of 32 or more, and the Message Control word gives the 64-bit flag, per-vector masking, and a capacity of 1 to 32 vectors (encodings 6 and 7 are reserved) | `tested-T1` | nolx-pci-core msi::tests::a_message_address_names_the_local_apic_and_data_names_the_vector, msi::tests::msi_control_reports_64_bit_masking_and_the_vector_capacity |
 | PCI-012 | pci | NOLX M9 MSI enable and layout: enabling asks for a power-of-two vector count within the capacity and keeps the other control bits; the data word and mask bits move with the address width | `tested-T1` | nolx-pci-core msi::tests::msi_enable_keeps_other_bits_and_refuses_bad_counts, msi::tests::msi_layout_moves_data_and_mask_with_the_address_width |
 | PCI-013 | pci | NOLX M9 MSI-X table: the table size is the 11-bit field plus one, the table and pending-bit array are located by BIR and 8-byte-aligned offset, both must fit inside their BARs, the enable step clears the function mask, and an entry's vector control holds the mask bit; an unaligned address or a vector below 32 is refused | `tested-T1` | nolx-pci-core msi::tests::msix_control_gives_the_table_size_and_its_bar_offsets, msi::tests::pba_is_one_bit_per_entry_rounded_to_qwords, msi::tests::a_table_must_fit_inside_its_bar, msi::tests::msix_enable_sets_enable_and_clears_function_mask, msi::tests::an_msix_entry_holds_address_data_and_mask_in_its_fields, msi::tests::an_msix_entry_refuses_unaligned_addresses_and_low_vectors Workflow [38567825680](https://github.com/NeXuS4Dev/NOLX/actions/runs/38567825680) passed all six jobs. |
-| PCI-014 | pci | PCI Firmware MCFG / NOLX M9 ECAM allocation: base is bus-zero-relative and 1 MiB aligned, bus range is ordered, and the highest byte cannot overflow u64 | `implemented` | nolx-pci-core ecam::tests::nonzero_start_bus_uses_bus_zero_base, ecam::tests::allocations_reject_bad_alignment_ranges_and_overflow (not yet executed) |
-| PCI-015 | pci | NOLX M9 ECAM access: segment and bus must belong to the allocation, device and function are bounded, and byte/word/dword offsets are aligned and contained in 4 KiB | `implemented` | nolx-pci-core ecam::tests::segment_bus_and_unchecked_bdf_are_validated, ecam::tests::offsets_preserve_width_alignment_and_function_boundaries (not yet executed) |
-| PCI-016 | pci | NOLX M9 ECAM layout: all 256 buses, 32 devices, and 8 functions resolve to distinct consecutive 4 KiB pages | `implemented` | nolx-pci-core ecam::tests::all_functions_have_distinct_nonoverlapping_pages (not yet executed) |
-| PCI-017 | pci | PCI Firmware MCFG / NOLX M9 parsing: SDT signature, checksum, declared length, fixed payload and record widths are checked; malformed ranges, overflow, physical aliases, same-segment bus overlaps and capacity exhaustion are refused | `implemented` | nolx-hal-core acpi::mcfg::tests (not yet executed) |
-| PCI-018 | pci | NOLX M9 ECAM boot probe: Q35 segment-zero identities match legacy reads through uncached function-page mappings and extended headers are readable; an i440FX boot without MCFG retains legacy configuration and reaches timer ticks | `pending-T2` | scripts/check-pci-ecam.sh in boot-smoke CI (not yet executed) |
+| PCI-014 | pci | PCI Firmware MCFG / NOLX M9 ECAM allocation: base is bus-zero-relative and 1 MiB aligned, bus range is ordered, and the highest byte cannot overflow u64 | `tested-T1` | nolx-pci-core ecam::tests::nonzero_start_bus_uses_bus_zero_base, ecam::tests::allocations_reject_bad_alignment_ranges_and_overflow; host-test job in CI run [38947112092](https://github.com/NeXuS4Dev/NOLX/actions/runs/38947112092) on revision `b4747b4` passed |
+| PCI-015 | pci | NOLX M9 ECAM access: segment and bus must belong to the allocation, device and function are bounded, and byte/word/dword offsets are aligned and contained in 4 KiB | `tested-T1` | nolx-pci-core ecam::tests::segment_bus_and_unchecked_bdf_are_validated, ecam::tests::offsets_preserve_width_alignment_and_function_boundaries; host-test job in CI run [38947112092](https://github.com/NeXuS4Dev/NOLX/actions/runs/38947112092) on revision `b4747b4` passed |
+| PCI-016 | pci | NOLX M9 ECAM layout: all 256 buses, 32 devices, and 8 functions resolve to distinct consecutive 4 KiB pages | `tested-T1` | nolx-pci-core ecam::tests::all_functions_have_distinct_nonoverlapping_pages; host-test job in CI run [38947112092](https://github.com/NeXuS4Dev/NOLX/actions/runs/38947112092) on revision `b4747b4` passed |
+| PCI-017 | pci | PCI Firmware MCFG / NOLX M9 parsing: SDT signature, checksum, declared length, fixed payload and record widths are checked; malformed ranges, overflow, physical aliases, same-segment bus overlaps and capacity exhaustion are refused | `tested-T1` | nolx-hal-core acpi::mcfg::tests; host-test job in CI run [38947112092](https://github.com/NeXuS4Dev/NOLX/actions/runs/38947112092) on revision `b4747b4` passed |
+| PCI-018 | pci | NOLX M9 ECAM boot probe: Q35 segment-zero identities match legacy reads through uncached function-page mappings and extended headers are readable; an i440FX boot without MCFG retains legacy configuration and reaches timer ticks | `tested-T2` | scripts/check-pci-ecam.sh in boot-smoke CI; Q35 and i440FX checks passed in CI run [38947112092](https://github.com/NeXuS4Dev/NOLX/actions/runs/38947112092) on revision `b4747b4` (all nine jobs passed) |
 | PN-001 | vfs | XBD 4.12 Pathname Resolution: a pathname beginning with a slash resolves against the root | `tested-T1` | crates/nolx-vfs path::tests::leading_slash_ignores_the_start_node |
 | PN-002 | vfs | XBD 4.12 Pathname Resolution: the empty pathname is invalid | `tested-T1` | crates/nolx-vfs path::tests::empty_path_is_enoent |
 | PN-003 | vfs | XBD 4.12 Pathname Resolution: the last component may be empty, and then refers to the directory itself | `tested-T1` | crates/nolx-vfs path::tests::trailing_slash_requires_a_directory |

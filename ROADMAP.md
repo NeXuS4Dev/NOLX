@@ -688,15 +688,15 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   operation runs the bring-up. BLK-034 is `tested-T2` (run [38704280940](https://github.com/NeXuS4Dev/NOLX/actions/runs/38704280940)).
   Not yet done: interrupts, and the storage paths for sleep states.
 
-### M9 continuation — 2026-10-16: ECAM address groundwork
+### M9 continuation — 2026-10-16: MCFG discovery and ECAM read verification
 
 `crates/nolx-pci-core/src/ecam.rs` now models a validated MCFG allocation and
 resolves byte/word/dword accesses across the full 4 KiB function space. It checks
 segment and bus membership, device/function bounds, alignment, and physical-address
 overflow. Nonzero starting buses retain the bus-zero-relative MCFG base. Five unit
 tests cover those rules, including an exhaustive function-page uniqueness check.
-These tests have **not been executed here**: this sandbox has no Rust toolchain.
-PCI-014 to PCI-016 are therefore only `implemented`, not `tested-T1`.
+These five tests and the four MCFG parser tests pass both locally and in CI.
+PCI-014 to PCI-017 are now `tested-T1`.
 
 Continuation in the same session: `nolx-hal-core::acpi::mcfg` now parses checksummed
 MCFG tables with a 32-allocation capacity, rejecting malformed records, bus overlaps
@@ -705,14 +705,23 @@ now maps individual segment-zero function pages uncached, compares their identit
 to legacy discovery, and reads offset 0x100. Drivers still use legacy configuration
 ports for all writes; absent/refused MCFG mappings leave that behavior unchanged.
 `check-pci-ecam.sh` adds Q35 identity/extended-header checks and an i440FX fallback
-boot to CI. PCI-017 is `implemented`; PCI-018 is `pending-T2`. Neither the new Rust
-tests nor these QEMU boots have been run in this sandbox (Rust and QEMU are absent).
+boot to CI. PCI-018 is now `tested-T2`: both boots passed in workflow
+[38947112092](https://github.com/NeXuS4Dev/NOLX/actions/runs/38947112092) on revision
+`b4747b4`. All nine jobs passed, including formatting/Clippy, host tests, the kernel
+build, boot smoke, and independent virtio/AHCI/NVMe storage boots. The initial run
+found formatting differences; applying Rust 1.88's formatter resolved them.
 
-Next: run formatting, host tests for `nolx-pci-core` and `nolx-hal-core`, the kernel
-build, and `scripts/check-pci-ecam.sh`. Only then promote the assertions. Full ECAM
-transport selection for drivers and multi-segment enumeration remain future work.
+Local verification used Rust 1.88 components distributed through the npm registry
+(`@rustbin`), installed outside the repository: formatting checks, host Clippy,
+kernel-target Clippy, all host tests, and a release kernel build passed. The two
+host-test commands exercised 1,332 test executions (overlapping unit-test coverage);
+the directly affected crates have 34 HAL and 30 PCI tests, including nine new tests.
+QEMU was run in CI, not locally.
 
-Not yet done: PCIe ECAM kernel access, MSI/MSI-X in the other drivers (NVMe uses MSI-X, see below), and every driver below.
+Next: full ECAM transport selection for drivers and multi-segment enumeration.
+This checkpoint proves read-only ECAM access, not a complete PCIe transport.
+
+Not yet done: PCIe ECAM driver transport, MSI/MSI-X in the other drivers (NVMe uses MSI-X, see below), and every driver below.
 
 - PCI/PCIe enumeration, BAR assignment, MSI/MSI-X, capability walking.
 - Storage: AHCI (SATA), NVMe, virtio-blk; block layer with partitions (GPT), request
