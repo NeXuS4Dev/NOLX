@@ -244,6 +244,23 @@ impl InterruptGuard {
         unsafe { asm!("cli", options(nomem, nostack)) }
         Self { enabled }
     }
+
+    /// Restore IF and halt atomically with respect to maskable interrupt delivery.
+    ///
+    /// The guard must have been acquired with interrupts enabled, and the caller
+    /// must have an armed interrupt source. Keeping IF clear until STI/HLT avoids
+    /// losing a wakeup between dropping the guard and executing a separate HLT.
+    pub fn halt_until_interrupt(mut self) {
+        assert!(
+            self.enabled,
+            "halting requires a previously enabled interrupt source"
+        );
+        self.enabled = false;
+        // SAFETY: ring-0 caller holds IF clear through this guard and promises an
+        // armed interrupt source. STI's interrupt shadow covers the adjacent HLT.
+        // The consumed guard must not restore IF a second time on return.
+        unsafe { asm!("sti", "hlt", options(nomem, nostack)) };
+    }
 }
 
 impl Drop for InterruptGuard {

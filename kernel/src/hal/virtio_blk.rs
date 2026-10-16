@@ -6,9 +6,10 @@
 //! This module supplies what the rules cannot: register access through [`mmio`] windows, queue
 //! memory from the frame allocator and reached through the direct map, and the polling.
 //!
-//! The probe is synchronous and polled. There are no interrupts yet, so each request waits for
-//! the used ring to move before its result is read. Every wait is bounded, so a device that
-//! never answers is reported as a timeout instead of hanging boot.
+//! The probe is synchronous: it polls the used ring, then verifies MSI-X completion delivery.
+//! With HPET available, polling allows two seconds for host disk I/O instead of relying on a
+//! CPU-speed-dependent spin count. Both clocked and fallback waits have iteration ceilings,
+//! so a device that never answers is reported as a timeout instead of hanging boot.
 //!
 //! After the sector-0 read, the probe reads the GUID Partition Table: the primary header in LBA 1
 //! and the table it names, checked with the `nolx-block-core` rules, then prints the partitions in
@@ -39,7 +40,7 @@ use nolx_virtio_core::{self as virtio, common, VirtioCap, VirtioError};
 
 /// The queue size the driver asks for, or the device's maximum if that is smaller.
 const QUEUE_SIZE_WANTED: u16 = 8;
-/// How many times a bounded wait looks before it gives up.
+/// Fallback polling ceiling without HPET; the clocked path has a 100x hard ceiling.
 const POLL_LIMIT: u32 = 1_000_000;
 /// Where the request header, status byte, and data buffer sit in the request page.
 const REQUEST_HEADER: u64 = 0;
@@ -438,14 +439,25 @@ const fn at(offset: u8) -> u64 {
     offset as u64
 }
 
-/// Poll `ready` until it returns true, at most [`POLL_LIMIT`] times.
+/// Poll with a two-second HPET budget when available, otherwise a bounded spin count.
+/// A hard iteration ceiling also bounds the wait if the firmware clock stops advancing.
 fn poll(
     mut ready: impl FnMut() -> Result<bool, Failure>,
     step: &'static str,
 ) -> Result<(), Failure> {
-    for _ in 0..POLL_LIMIT {
+    let clock = super::hpet::counter().zip(super::hpet::frequency_hz());
+    for iteration in 0..POLL_LIMIT * 100 {
         if ready()? {
             return Ok(());
+        }
+        match (clock, super::hpet::counter()) {
+            (Some((start, frequency)), Some(now)) => {
+                if super::hpet::elapsed_ticks(start, now) >= frequency.saturating_mul(2) {
+                    break;
+                }
+            }
+            _ if iteration >= POLL_LIMIT - 1 => break,
+            _ => {}
         }
         core::hint::spin_loop();
     }

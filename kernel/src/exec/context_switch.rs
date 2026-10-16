@@ -205,12 +205,16 @@ fn run_worker(worker: usize, label: u8) -> ! {
         }
         let mut console = Console::new();
         console.put_byte(label);
-        drop(interrupt_guard);
         if step + 1 < WORKER_STEPS {
-            crate::hal::context::halt_for_interrupt();
+            // Do not enable IF before HLT: a tick in that gap can switch away,
+            // leaving this worker to sleep through its next scheduled quantum.
+            interrupt_guard.halt_until_interrupt();
+        } else {
+            // Publish completion before a final tick can preempt this worker.
+            WORKER_DONE[worker].store(true, Ordering::Release);
+            drop(interrupt_guard);
         }
     }
-    WORKER_DONE[worker].store(true, Ordering::Release);
     loop {
         crate::hal::context::halt_for_interrupt();
     }

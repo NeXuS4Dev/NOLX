@@ -718,6 +718,16 @@ host-test commands exercised 1,332 test executions (overlapping unit-test covera
 the directly affected crates have 34 HAL and 30 PCI tests, including nine new tests.
 QEMU was run in CI, not locally.
 
+The final documentation-only rerun exposed an intermittent virtio-only boot failure
+(run [38947875339](https://github.com/NeXuS4Dev/NOLX/actions/runs/38947875339)), while
+the same revision's push run [38947869208](https://github.com/NeXuS4Dev/NOLX/actions/runs/38947869208)
+passed all nine jobs. Its log showed a block-request polling timeout and an invalid
+round-robin trace. The follow-up closes the worker's interrupt-enable-to-HLT window
+with an adjacent STI/HLT pair under the interrupt guard, publishes final worker
+completion before unmasking interrupts, and gives virtio polling an HPET-based
+two-second budget with bounded fallback/hard iteration ceilings. No test assertions
+were relaxed. Follow-up CI evidence is recorded in PR #14.
+
 Next: full ECAM transport selection for drivers and multi-segment enumeration.
 This checkpoint proves read-only ECAM access, not a complete PCIe transport.
 
