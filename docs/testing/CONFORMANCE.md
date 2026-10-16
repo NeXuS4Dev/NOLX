@@ -12,12 +12,12 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 |---|---|---|
 | `unimplemented` | 0 | 100.0% |
 | `implemented` | 5 | 100.0% |
-| `tested-T1` | 245 | 97.8% |
-| `pending-T2` | 2 | — |
-| `tested-T2` | 72 | 22.2% |
+| `tested-T1` | 245 | 98.5% |
+| `pending-T2` | 0 | — |
+| `tested-T2` | 74 | 22.8% |
 | `tested-T3` | 0 | 0.0% |
 
-**317 of 324 assertions have a passing automated test; 2 are awaiting T2 results.**
+**319 of 324 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
@@ -38,7 +38,7 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | nxfs | 15 | 15 | 14 | 0 | 1 | 0 |
 | obj | 14 | 14 | 9 | 0 | 5 | 0 |
 | pci | 21 | 21 | 17 | 0 | 4 | 0 |
-| power | 11 | 11 | 8 | 2 | 1 | 0 |
+| power | 11 | 11 | 8 | 0 | 3 | 0 |
 | ps2 | 10 | 10 | 9 | 0 | 1 | 0 |
 | usb | 8 | 8 | 6 | 0 | 2 | 0 |
 | vfs | 48 | 48 | 46 | 0 | 2 | 0 |
@@ -57,12 +57,9 @@ None.
 | HAL-020 | HPET clocksource: 32-bit MMIO reads and wrap extension produce monotonic nanoseconds |
 | HAL-021 | I/O APIC routes: GSI windows and ISA overrides are validated, redirections start masked, and NMI sources use MADT polarity/trigger flags |
 
-## Pending T2 verification (2)
+## Pending T2 verification (0)
 
-| ID | Specification reference | Configured test |
-|---|---|---|
-| PWR-010 | NOLX M9 Actual S5 hardware entry: after complete memory tests in a no-active-DMA VM, enable ACPI mode and issue SLP_EN; QMP must report guest-shutdown and QEMU must exit zero on pc and Q35 | scripts/check-power-s5.py and hal-power-test-s5 feature; passed locally with QEMU 11.0.2, dedicated acpi-s5 CI job configured |
-| PWR-011 | NOLX M9 Conservative S5 test precondition: an active virtio-net PCI bus master prevents the test from issuing S5, and no guest SHUTDOWN event occurs | scripts/check-power-s5.py active-DMA negative boot; production global quiescence policy remains separate and unimplemented |
+None.
 
 ## All assertions
 
@@ -361,8 +358,8 @@ None.
 | PWR-007 | power | NOLX M9 FADT refusal: a FADT with a bad checksum, the wrong signature, a cut-short length, no DSDT, or no 16-bit PM1a port is refused with its reason | `tested-T1` | nolx-power-core tests::a_fadt_that_is_damaged_or_incomplete_is_refused_with_its_reason |
 | PWR-008 | power | NOLX M9 Sleep types in the kernel: the kernel reads the FADT and the DSDT at boot, reports the PM1a control port, and reads the S5 soft-off type from the DSDT's AML; it reports the S5 word it would write and enters no state | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `acpi: PM1a control block at 0x...` and `acpi: S5 sleep type N, soft-off word would be 0x..., not entered`; kernel/src/hal/acpi.rs |
 | PWR-009 | power | NOLX M9 S5 register contract: preserve all PM1 bits outside SLP_TYP/SLP_EN; decode ACPI enable port/command and PM1 width without truncating an out-of-range SMI port | `tested-T1` | nolx-power-core tests::sleep_control_preserves_every_unrelated_bit and tests::fadt_records_acpi_enable_and_control_width_without_truncating_ports; passed locally with Rust 1.88.0 |
-| PWR-010 | power | NOLX M9 Actual S5 hardware entry: after complete memory tests in a no-active-DMA VM, enable ACPI mode and issue SLP_EN; QMP must report guest-shutdown and QEMU must exit zero on pc and Q35 | `pending-T2` | scripts/check-power-s5.py and hal-power-test-s5 feature; passed locally with QEMU 11.0.2, dedicated acpi-s5 CI job configured |
-| PWR-011 | power | NOLX M9 Conservative S5 test precondition: an active virtio-net PCI bus master prevents the test from issuing S5, and no guest SHUTDOWN event occurs | `pending-T2` | scripts/check-power-s5.py active-DMA negative boot; production global quiescence policy remains separate and unimplemented |
+| PWR-010 | power | NOLX M9 Actual S5 hardware entry: after complete memory tests in a no-active-DMA VM, enable ACPI mode and issue SLP_EN; QMP must report guest-shutdown and QEMU must exit zero on pc and Q35 | `tested-T2` | scripts/check-power-s5.py and hal-power-test-s5 feature; CI run [38962036000](https://github.com/NeXuS4Dev/NOLX/actions/runs/38962036000) on 9f8c704 passed all eleven jobs; positive Q35 fixture disables SATA to satisfy the no-active-DMA precondition |
+| PWR-011 | power | NOLX M9 Conservative S5 test precondition: an active virtio-net PCI bus master prevents the test from issuing S5, and no guest SHUTDOWN event occurs | `tested-T2` | scripts/check-power-s5.py active-DMA negative boot; CI run [38962036000](https://github.com/NeXuS4Dev/NOLX/actions/runs/38962036000) passed all eleven jobs; production global quiescence policy remains separate and unimplemented |
 | UN-001 | vfs | XSH unlink: an entry is removed but an open file remains accessible until the last descriptor closes | `tested-T1` | crates/nolx-vfs vfs::tests::un001_unlink_removes_entry_while_open_file_remains_accessible_until_last_close |
 | UN-002 | vfs | XSH link: creating a hard link to a directory fails with EPERM unless privileged | `tested-T1` | crates/nolx-vfs vfs::tests::un002_hard_link_to_directory_fails_with_eperm |
 | UN-003 | vfs | XSH rename: renaming a directory onto one of its own descendants fails with EINVAL | `tested-T1` | crates/nolx-vfs vfs::tests::un003_rename_directory_into_own_descendant_fails_with_einval |

@@ -173,3 +173,13 @@ active PCI bus masters. `scripts/check-power-s5.py` locally observed QMP `SHUTDO
 the positive Q35 no-DMA fixture). An active virtio-net interface was refused without a
 shutdown event. Portable tests cover preserved control bits and validated ACPI-enable/port
 fields. A dedicated CI job is configured; this does **not** close S3 or device-power policy.
+
+S5/full-regression run [38962036000](https://github.com/NeXuS4Dev/NOLX/actions/runs/38962036000) on `9f8c704` passed
+**all eleven jobs**: the new QMP shutdown/refusal job, six virtio-net configurations,
+three persisted-file/reboot/malformed-media backend jobs, complete boot smoke, host tests,
+lint/unsafe audit and image/layout checks. PWR-010/011 are now `tested-T2`. Locally, both
+overlapping host commands passed 692 tests each (zero failures), default and S5-feature
+release kernel Clippy passed, all 241 unsafe blocks had safety invariants, and the final
+image passed all 21 layout checks. No PR has been opened. **M9 is still not complete:**
+BAR/bridge allocation, persistent/multi-device lifecycle, xHCI/HID/input objects, evaluated
+AML/resources and global power-quiesce/S3 remain the unchecked acceptance gates.
