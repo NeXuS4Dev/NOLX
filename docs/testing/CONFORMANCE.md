@@ -11,20 +11,20 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | Status | Assertions | Cumulative verified at or above status |
 |---|---|---|
 | `unimplemented` | 0 | 100.0% |
-| `implemented` | 6 | 100.0% |
-| `tested-T1` | 230 | 98.0% |
+| `implemented` | 5 | 100.0% |
+| `tested-T1` | 230 | 98.3% |
 | `pending-T2` | 0 | — |
-| `tested-T2` | 60 | 20.3% |
+| `tested-T2` | 61 | 20.6% |
 | `tested-T3` | 0 | 0.0% |
 
-**290 of 296 assertions have a passing automated test; 0 are awaiting T2 results.**
+**291 of 296 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
 | Area | Assertions | Implemented | Tested (T1) | Pending (T2) | Tested (T2) | Tested (T3) |
 |---|---|---|---|---|---|---|
 | ahci | 11 | 11 | 8 | 0 | 3 | 0 |
-| blk | 36 | 36 | 27 | 0 | 7 | 0 |
+| blk | 36 | 36 | 27 | 0 | 8 | 0 |
 | df | 7 | 7 | 7 | 0 | 0 | 0 |
 | drv | 21 | 21 | 16 | 0 | 5 | 0 |
 | e1000 | 10 | 10 | 7 | 0 | 3 | 0 |
@@ -47,12 +47,11 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 
 None.
 
-## Implemented but untested (6)
+## Implemented but untested (5)
 
 | ID | Specification reference |
 |---|---|
 | BLK-028 | NOLX M9 Per-device queues, attachment: a device is attached once, with a nonzero in-flight limit; an unattached or out-of-range device refuses work; a device with queued or in-flight requests cannot be detached |
-| BLK-036 | NOLX M9 virtio-blk completions by MSI-X: the device's queue_msix_vector is set to table entry 1 and read back before the queue is enabled; each request's completion arrives as an interrupt on vector 0x51, and the driver takes that interrupt before it submits the next request, so the boot prints as many interrupts as requests |
 | HAL-018 | ACPI MADT: legacy/x2APIC processor entries, local NMI routes, I/O APIC routes, ISA overrides, and I/O APIC NMI sources decode from length-checked records |
 | HAL-019 | APIC arithmetic: x2APIC MSRs, compressed TPR priority classes, timer divisors, and HPET-based counter calibration are checked |
 | HAL-020 | HPET clocksource: 32-bit MMIO reads and wrap extension produce monotonic nanoseconds |
@@ -112,7 +111,7 @@ None.
 | BLK-033 | blk | NOLX M9 Kernel request path: every read and write the kernel issues to the virtio, AHCI, and NVMe disks is submitted to that device's queue, dispatched, run, and completed; the boot report shows the same number dispatched as completed, at least one | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `blockdev: N requests dispatched, N completed`; kernel/src/hal/blockdev.rs; kernel/src/hal/virtio_blk.rs, ahci.rs, nvme.rs |
 | BLK-034 | blk | NOLX M9 Storage drivers in the framework: the virtio-blk, AHCI, and NVMe drivers are each registered with nolx-df, bound to their controller by a match rule, and started; the start operation runs the bring-up and its output is replayed on the console | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `<driver>: bound and started through nolx-df` for each of the three; kernel/src/hal/driver_start.rs; kernel/src/hal/virtio_blk.rs, ahci.rs, nvme.rs |
 | BLK-035 | blk | NOLX M9 Storage backends at T2: the kernel boots to its end with virtio-blk, AHCI, or NVMe as the only storage the kernel can find; the driver binds through nolx-df, the other two controllers are absent, the written sectors are checksummed by the kernel and the same sectors of the disk image match; the NOLXFS file check applies to the virtio backend | `tested-T2` | `.github/workflows/ci.yml` job `storage-backends` (matrix virtio, ahci, nvme) |
-| BLK-036 | blk | NOLX M9 virtio-blk completions by MSI-X: the device's queue_msix_vector is set to table entry 1 and read back before the queue is enabled; each request's completion arrives as an interrupt on vector 0x51, and the driver takes that interrupt before it submits the next request, so the boot prints as many interrupts as requests | `implemented` | `.github/workflows/ci.yml` boot-smoke asserts `virtio-blk: msi-x completion interrupts: N of N requests, vector 0x51`; kernel/src/hal/virtio_blk.rs issue |
+| BLK-036 | blk | NOLX M9 virtio-blk completions by MSI-X: the device's queue_msix_vector is set to table entry 1 and read back before the queue is enabled; each request's completion arrives as an interrupt on vector 0x51, and the driver takes that interrupt before it submits the next request, so the boot prints as many interrupts as requests | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `virtio-blk: msi-x completion interrupts: N of N requests, vector 0x51`; kernel/src/hal/virtio_blk.rs issue |
 | DF-001 | df | NOLX M9 Match rules: a rule compares only the fields it sets (vendor and device, or class, subclass, and optionally programming interface), and a rule that sets a different field does not match | `tested-T1` | nolx-df-core tests::a_match_rule_compares_only_the_fields_it_sets |
 | DF-002 | df | NOLX M9 Binding: a device binds to the first registered driver that has a matching rule and whose probe accepts the device; a device no driver accepts stays discovered and can bind when a suitable driver is added later | `tested-T1` | nolx-df-core tests::a_device_binds_to_the_first_driver_whose_probe_accepts_it, tests::a_device_with_no_accepting_driver_stays_discovered_and_can_bind_later |
 | DF-003 | df | NOLX M9 Lifecycle: a device must be bound before it starts, a started device stops, a stopped device starts again, and a bound device cannot be bound again | `tested-T1` | nolx-df-core tests::the_lifecycle_moves_through_start_stop_and_start_again |

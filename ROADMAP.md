@@ -670,6 +670,11 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   with virtio-blk, AHCI, or NVMe alone; each binds through `nolx-df`, writes and reads back a checksummed
   pattern, and the disk image matches. The NOLXFS file check runs on virtio. BLK-035 is `tested-T2`
   (run [38884801713](https://github.com/NeXuS4Dev/NOLX/actions/runs/38884801713)).
+- MSI-X for virtio-blk (`kernel/src/hal/msix.rs`, shared with NVMe): the device's queue is given table
+  entry 1 and vector 0x51, read back before the queue is enabled, and each request's completion is taken
+  as an interrupt before the next request is submitted. BLK-036 is `tested-T2` (run
+  [38909420793](https://github.com/NeXuS4Dev/NOLX/actions/runs/38909420793)). Not yet done: MSI or
+  MSI-X for AHCI and e1000.
 - ACPI in the kernel (`kernel/src/hal/acpi.rs`): the FADT gives the PM1a control port and the DSDT; the
   S5 soft-off type is read from the DSDT's AML, and the kernel reports the word it would write. PWR-008
   is `tested-T2` (run [38730057305](https://github.com/NeXuS4Dev/NOLX/actions/runs/38730057305)). Not yet
