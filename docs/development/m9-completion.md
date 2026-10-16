@@ -105,3 +105,11 @@ This closes the filesystem-test gap, **not the milestone**. Persistent controlle
 multi-device binding, BAR allocation, USB HID, virtio-net, AML and power remain open.
 CI now applies the file, host-mount, reboot and malformed-media checks to every storage
 backend. Do not treat a local result as a CI result; final CI evidence is recorded separately.
+
+CI run [38958403492](https://github.com/NeXuS4Dev/NOLX/actions/runs/38958403492) on `a9239d7` passed **all nine jobs**,
+including all three file-persistence/reboot/malformed-media matrix jobs and the complete
+hardware boot smoke regression. BLK-038/039 are now `tested-T2`. Both overlapping local
+host test commands passed 686 tests each (zero failures); host/kernel Clippy and formatting,
+235-block unsafe audit, boot/layout checks and all 21 image checks passed. Existing ECAM,
+PIC/PIT/AHCI fallback and injected PS/2 scripts also passed locally. No pull request was
+created for this work. M9 remains incomplete for the unchecked gates above.

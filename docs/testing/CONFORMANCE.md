@@ -12,19 +12,19 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 |---|---|---|
 | `unimplemented` | 0 | 100.0% |
 | `implemented` | 5 | 100.0% |
-| `tested-T1` | 242 | 97.8% |
-| `pending-T2` | 2 | — |
-| `tested-T2` | 68 | 21.5% |
+| `tested-T1` | 242 | 98.4% |
+| `pending-T2` | 0 | — |
+| `tested-T2` | 70 | 22.1% |
 | `tested-T3` | 0 | 0.0% |
 
-**310 of 317 assertions have a passing automated test; 2 are awaiting T2 results.**
+**312 of 317 assertions have a passing automated test; 0 are awaiting T2 results.**
 
 ## By area
 
 | Area | Assertions | Implemented | Tested (T1) | Pending (T2) | Tested (T2) | Tested (T3) |
 |---|---|---|---|---|---|---|
 | ahci | 13 | 13 | 8 | 0 | 5 | 0 |
-| blk | 40 | 40 | 29 | 2 | 8 | 0 |
+| blk | 40 | 40 | 29 | 0 | 10 | 0 |
 | df | 7 | 7 | 7 | 0 | 0 | 0 |
 | drv | 21 | 21 | 16 | 0 | 5 | 0 |
 | e1000 | 12 | 12 | 7 | 0 | 5 | 0 |
@@ -57,12 +57,9 @@ None.
 | HAL-020 | HPET clocksource: 32-bit MMIO reads and wrap extension produce monotonic nanoseconds |
 | HAL-021 | I/O APIC routes: GSI windows and ISA overrides are validated, redirections start masked, and NMI sources use MADT polarity/trigger flags |
 
-## Pending T2 verification (2)
+## Pending T2 verification (0)
 
-| ID | Specification reference | Configured test |
-|---|---|---|
-| BLK-038 | NOLX M9 File persistence on each storage backend: virtio, AHCI and NVMe commit/remount an 8192-byte file; the host independently mounts it after QEMU exits; another boot reads the old commit before writing again | storage-backends matrix and scripts/check-storage-files.py; local QEMU 11.0.2 passes on pc and q35, including AHCI no-APIC, 2026-10-16; CI evidence pending |
-| BLK-039 | NOLX M9 Fail-closed storage probing: damaged GPT, corrupt filesystem metadata and erased superblocks do not authorize formatting or otherwise modifying the image | scripts/check-storage-files.py tests bad-gpt, bad-volume and erased-superblock on all three backends; passed locally, CI evidence pending |
+None.
 
 ## All assertions
 
@@ -118,8 +115,8 @@ None.
 | BLK-035 | blk | NOLX M9 Storage backends at T2: the kernel boots to its end with virtio-blk, AHCI, or NVMe as the only storage the kernel can find; the driver binds through nolx-df, the other two controllers are absent, the written sectors are checksummed by the kernel and the same sectors of the disk image match; the NOLXFS file check applies to the virtio backend | `tested-T2` | `.github/workflows/ci.yml` job `storage-backends` (matrix virtio, ahci, nvme) |
 | BLK-036 | blk | NOLX M9 virtio-blk completions by MSI-X: the device's queue_msix_vector is set to table entry 1 and read back before the queue is enabled; each request's completion arrives as an interrupt on vector 0x51, and the driver takes that interrupt before it submits the next request, so the boot prints as many interrupts as requests | `tested-T2` | `.github/workflows/ci.yml` boot-smoke asserts `virtio-blk: msi-x completion interrupts: N of N requests, vector 0x51`; kernel/src/hal/virtio_blk.rs issue |
 | BLK-037 | blk | NOLX M9 Generic partition adapter: 4096-byte blocks map to eight 512-byte sectors within a validated partition, invalid buffers and overflowing/out-of-range blocks are refused, transport errors and cache flushes propagate | `tested-T1` | nolxfs sector::tests (four tests), passed locally with Rust 1.88.0 on 2026-10-16 |
-| BLK-038 | blk | NOLX M9 File persistence on each storage backend: virtio, AHCI and NVMe commit/remount an 8192-byte file; the host independently mounts it after QEMU exits; another boot reads the old commit before writing again | `pending-T2` | storage-backends matrix and scripts/check-storage-files.py; local QEMU 11.0.2 passes on pc and q35, including AHCI no-APIC, 2026-10-16; CI evidence pending |
-| BLK-039 | blk | NOLX M9 Fail-closed storage probing: damaged GPT, corrupt filesystem metadata and erased superblocks do not authorize formatting or otherwise modifying the image | `pending-T2` | scripts/check-storage-files.py tests bad-gpt, bad-volume and erased-superblock on all three backends; passed locally, CI evidence pending |
+| BLK-038 | blk | NOLX M9 File persistence on each storage backend: virtio, AHCI and NVMe commit/remount an 8192-byte file; the host independently mounts it after QEMU exits; another boot reads the old commit before writing again | `tested-T2` | storage-backends matrix and scripts/check-storage-files.py; CI run [38958403492](https://github.com/NeXuS4Dev/NOLX/actions/runs/38958403492) on a9239d7 passed all nine jobs; local QEMU 11.0.2 also passed pc/q35 and AHCI no-APIC variants |
+| BLK-039 | blk | NOLX M9 Fail-closed storage probing: damaged GPT, corrupt filesystem metadata and erased superblocks do not authorize formatting or otherwise modifying the image | `tested-T2` | scripts/check-storage-files.py tests bad-gpt, bad-volume and erased-superblock on all three backends; CI run [38958403492](https://github.com/NeXuS4Dev/NOLX/actions/runs/38958403492) on a9239d7 passed all nine jobs |
 | BLK-040 | blk | NOLX M9 Durable checkpoint transports: virtio negotiates FLUSH and sends a header/status-only chain, ATA identifies real capacity and flushes with a no-data command, NVMe flush names the namespace without PRPs | `tested-T1` | nolx-virtio-core flush_tests, nolx-ahci-core cache_tests and nolx-nvme-core flush_tests (five tests), passed locally with Rust 1.88.0 on 2026-10-16 |
 | DF-001 | df | NOLX M9 Match rules: a rule compares only the fields it sets (vendor and device, or class, subclass, and optionally programming interface), and a rule that sets a different field does not match | `tested-T1` | nolx-df-core tests::a_match_rule_compares_only_the_fields_it_sets |
 | DF-002 | df | NOLX M9 Binding: a device binds to the first registered driver that has a matching rule and whose probe accepts the device; a device no driver accepts stays discovered and can bind when a suitable driver is added later | `tested-T1` | nolx-df-core tests::a_device_binds_to_the_first_driver_whose_probe_accepts_it, tests::a_device_with_no_accepting_driver_stays_discovered_and_can_bind_later |
