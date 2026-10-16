@@ -651,3 +651,118 @@ jobs:
           tr -cd '\11\12\40-\176' < build/serial.log | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
       - uses: ./.github/actions/report-failure
         if: failure()
+
+  # ---------------------------------------------------------------- T2 with each storage backend
+  #
+  # The boot runs once per storage backend, with that backend's disk as the only one the kernel can
+  # find. Each run must bind its driver through nolx-df, write a checksummed pattern, read it back,
+  # reach the end of boot, and find the other two controllers absent. The disk image is checksummed
+  # after QEMU exits, so a match means the write reached the disk. The NOLXFS file check runs only on
+  # the virtio backend, the one the volume code is on.
+  storage-backends:
+    name: Boot with ${{ matrix.backend }} storage only
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [virtio, ahci, nvme]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.88.0
+          targets: x86_64-unknown-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install QEMU
+        run: |
+          sudo apt-get update 2>&1 | tail -1
+          sudo apt-get install -y qemu-system-x86 2>&1 | tail -3
+      - name: Build
+        run: make kernel 2>&1 | tee /tmp/job.log
+      - name: Boot with this backend's disk only
+        run: |
+          set -o pipefail
+          python3 tools/make-test-disk.py build/disk.img
+          case "${{ matrix.backend }}" in
+            virtio) DRIVE="-drive file=build/disk.img,if=none,id=vd0,format=raw -device virtio-blk-pci,drive=vd0" ;;
+            ahci)   DRIVE="-drive file=build/disk.img,if=none,id=sata0,format=raw -device ahci,id=ahci -device ide-hd,drive=sata0,bus=ahci.0" ;;
+            nvme)   DRIVE="-drive file=build/disk.img,if=none,id=nvme0,format=raw -device nvme,drive=nvme0,serial=nolx0" ;;
+            *) echo "unknown backend"; exit 1 ;;
+          esac
+          # 90 seconds, as in the boot smoke test. Word splitting of $DRIVE is intended.
+          timeout 90 qemu-system-x86_64 \
+            -kernel build/nolx.elf \
+            -m 512M -nographic -no-reboot \
+            $DRIVE \
+            -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 \
+            -netdev user,id=net0 -device e1000,netdev=net0 \
+            | tee build/serial.log || true
+          cat build/serial.log >> /tmp/job.log
+      - name: The boot reached its end, and the other backends are absent
+        run: |
+          set -e
+          need() {
+            if ! grep -Fq "$1" build/serial.log; then
+              echo "missing: $1"
+              exit 1
+            fi
+          }
+          need 'NOLX: init sequence complete, halting the boot processor'
+          case "${{ matrix.backend }}" in
+            virtio)
+              need 'virtio-blk: bound and started through nolx-df'
+              need 'ahci: not brought up: NoController'
+              need 'nvme: not brought up: NoController'
+              ;;
+            ahci)
+              need 'ahci: bound and started through nolx-df'
+              need 'virtio-blk: not brought up: NoDevice'
+              need 'nvme: not brought up: NoController'
+              ;;
+            nvme)
+              need 'nvme: bound and started through nolx-df'
+              need 'virtio-blk: not brought up: NoDevice'
+              need 'ahci: not brought up: NoController'
+              ;;
+          esac
+      - name: The written sectors are on the disk image
+        run: |
+          set -e
+          case "${{ matrix.backend }}" in
+            virtio) prefix='virtio-blk' ;;
+            ahci)   prefix='ahci' ;;
+            nvme)   prefix='nvme' ;;
+          esac
+          line=$(grep -Eo "$prefix: wrote 4 sectors at 1600, read back, crc32 0x[0-9a-f]{8} matches" build/serial.log | head -1 || true)
+          if [ -z "$line" ]; then
+            echo "the $prefix round trip did not report a checksum"
+            exit 1
+          fi
+          want=$(echo "$line" | grep -Eo '0x[0-9a-f]{8}')
+          got=$(python3 -c "import zlib; d=open('build/disk.img','rb').read()[1600*512:1604*512]; print('0x%08x' % (zlib.crc32(d) & 0xffffffff))")
+          echo "the kernel wrote crc32 $want through $prefix; the disk image's sectors 1600 to 1603 have crc32 $got"
+          if [ "$want" != "$got" ]; then
+            echo "the disk image does not hold the data the kernel wrote"
+            exit 1
+          fi
+      - name: The NOLXFS file holds the pattern (virtio only)
+        if: matrix.backend == 'virtio'
+        run: |
+          set -e
+          line=$(grep -Eo 'nolxfs file checksum.bin: 8192 bytes written, committed, mounted again, read back, crc32 0x[0-9a-f]{8} matches' build/serial.log | head -1 || true)
+          if [ -z "$line" ]; then
+            echo "the NOLXFS file did not verify after the remount"
+            exit 1
+          fi
+          want=$(echo "$line" | grep -Eo '0x[0-9a-f]{8}')
+          got=$(python3 -c "b=bytes((((i & 0xFF) * 7) & 0xFF) ^ ((((i >> 8) & 0xFF) * 131) & 0xFF) ^ 0xA5 for i in range(8192)); import zlib; print('0x%08x' % (zlib.crc32(b) & 0xffffffff))")
+          if [ "$want" != "$got" ]; then
+            echo "the file read back is not the pattern the kernel wrote"
+            exit 1
+          fi
+      - name: Annotate the serial log on failure
+        if: failure()
+        run: |
+          tr -cd '\11\12\40-\176' < build/serial.log | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
+      - uses: ./.github/actions/report-failure
+        if: failure()
