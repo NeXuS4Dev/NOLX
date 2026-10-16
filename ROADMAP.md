@@ -666,6 +666,10 @@ CI run [38359528564](https://github.com/NeXuS4Dev/NOLX/actions/runs/38359528564)
   (run [38630855644](https://github.com/NeXuS4Dev/NOLX/actions/runs/38630855644)). Not yet done: receive
   checks, interrupts, and the network stack above the driver.
 
+- Storage backends at T2 (`.github/workflows/ci.yml`, job `storage-backends`): the kernel boots to its end
+  with virtio-blk, AHCI, or NVMe alone; each binds through `nolx-df`, writes and reads back a checksummed
+  pattern, and the disk image matches. The NOLXFS file check runs on virtio. BLK-035 is `tested-T2`
+  (run [38884801713](https://github.com/NeXuS4Dev/NOLX/actions/runs/38884801713)).
 - ACPI in the kernel (`kernel/src/hal/acpi.rs`): the FADT gives the PM1a control port and the DSDT; the
   S5 soft-off type is read from the DSDT's AML, and the kernel reports the word it would write. PWR-008
   is `tested-T2` (run [38730057305](https://github.com/NeXuS4Dev/NOLX/actions/runs/38730057305)). Not yet
