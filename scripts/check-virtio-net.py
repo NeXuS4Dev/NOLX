@@ -52,7 +52,7 @@ def boot(machine, modern, present=True, apic=True):
         try:
             deadline = time.monotonic() + 90
             while process.poll() is None and time.monotonic() < deadline:
-                if 'NOLX: timer reached 100 ticks' in log.read_text(errors='replace'):
+                if 'NOLX: address space selftest:' in log.read_text(errors='replace'):
                     break
                 time.sleep(.05)
         finally:
@@ -66,6 +66,8 @@ def boot(machine, modern, present=True, apic=True):
     assert not re.search(r'PANIC|BUGCHECK|CPU exception', text), text
     assert 'NOLX: init sequence complete' in text, text
     assert 'NOLX: timer reached 100 ticks' in text, text
+    assert 'NOLX: address space selftest:' in text, text
+    assert re.search(r'NOLX: kernel heap selftest: .*in use 0 -> 0 bytes, integrity ok', text), text
     if not present:
         assert 'virtio-net: not brought up: NoDevice' in text, text
     elif not apic:
