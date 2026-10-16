@@ -182,6 +182,68 @@ pub fn msix_entry(address: u64, vector: u8, masked: bool) -> Option<[u8; 16]> {
     Some(out)
 }
 
+/// Failure before MSI registers can be safely programmed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MsiProgramError {
+    /// No MSI capability was found.
+    NoCapability,
+    /// A register would extend beyond legacy configuration space.
+    InvalidLayout,
+    /// The vector belongs to CPU exceptions.
+    InvalidVector,
+    /// The capability advertises a reserved vector-count encoding.
+    InvalidControl,
+}
+
+/// Program a single fixed-delivery MSI, enabling it only after address/data/masks are ready.
+///
+/// PCI command writes keep status W1C bits clear, and INTx is disabled once MSI is enabled.
+/// All layout/encoding checks precede any write. The caller supplies the APIC destination.
+pub fn program_msi<C: crate::ConfigSpace>(
+    cfg: &mut C,
+    bdf: crate::Bdf,
+    destination: u8,
+    vector: u8,
+) -> Result<(), MsiProgramError> {
+    let data = message_data(vector).ok_or(MsiProgramError::InvalidVector)?;
+    let cap = crate::capabilities(cfg, bdf)
+        .find(CAP_MSI)
+        .ok_or(MsiProgramError::NoCapability)?;
+    let header = cfg.read_u32(bdf, cap.offset);
+    let control = (header >> 16) as u16;
+    let enabled = msi_enable_control(control, 1).ok_or(MsiProgramError::InvalidControl)?;
+    let layout = msi_layout(control);
+    let last = layout.mask.unwrap_or(layout.data);
+    if u16::from(cap.offset) + u16::from(last) > 252 {
+        return Err(MsiProgramError::InvalidLayout);
+    }
+    cfg.write_u32(
+        bdf,
+        cap.offset,
+        (header & 0xffff) | (u32::from(control & !MSI_CTRL_ENABLE) << 16),
+    );
+    cfg.write_u32(bdf, cap.offset + 4, message_address(destination));
+    if let Some(high) = layout.address_high {
+        cfg.write_u32(bdf, cap.offset + high, 0);
+    }
+    let data_offset = cap.offset + layout.data;
+    let old_data = cfg.read_u32(bdf, data_offset);
+    cfg.write_u32(bdf, data_offset, (old_data & 0xffff_0000) | u32::from(data));
+    if let Some(mask) = layout.mask {
+        let offset = cap.offset + mask;
+        let old = cfg.read_u32(bdf, offset);
+        cfg.write_u32(bdf, offset, old & !1);
+    }
+    cfg.write_u32(
+        bdf,
+        cap.offset,
+        (header & 0xffff) | (u32::from(enabled) << 16),
+    );
+    let command = cfg.read_u32(bdf, 4) & 0xffff;
+    cfg.write_u32(bdf, 4, command | (1 << 10));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +359,81 @@ mod tests {
     fn an_msix_entry_refuses_unaligned_addresses_and_low_vectors() {
         assert!(msix_entry(0xFEE0_1002, 0x41, false).is_none());
         assert!(msix_entry(0xFEE0_1000, 0x1F, false).is_none());
+    }
+}
+
+#[cfg(test)]
+mod programming_tests {
+    use super::*;
+    use crate::{Bdf, ConfigSpace};
+
+    struct Model {
+        registers: [u32; 64],
+        writes: Vec<(u8, u32)>,
+    }
+    impl Model {
+        fn new(control: u16, offset: u8) -> Self {
+            let mut registers = [0; 64];
+            registers[1] = 0xffff_0007;
+            registers[1] |= 1 << 20;
+            registers[0x34 / 4] = u32::from(offset);
+            registers[usize::from(offset) / 4] = 5 | (u32::from(control) << 16);
+            Self {
+                registers,
+                writes: Vec::new(),
+            }
+        }
+    }
+    impl ConfigSpace for Model {
+        fn read_u32(&mut self, _: Bdf, offset: u8) -> u32 {
+            self.registers[usize::from(offset) / 4]
+        }
+        fn write_u32(&mut self, _: Bdf, offset: u8, value: u32) {
+            self.registers[usize::from(offset) / 4] = value;
+            self.writes.push((offset, value));
+        }
+    }
+    #[test]
+    fn programs_32_and_64_bit_msi_enabling_last_and_preserving_registers() {
+        for control in [0, MSI_CTRL_64BIT | MSI_CTRL_PER_VECTOR_MASK] {
+            let mut cfg = Model::new(control, 0x40);
+            let layout = msi_layout(control);
+            cfg.registers[usize::from(0x40 + layout.data) / 4] = 0xabcd_0000;
+            if let Some(mask) = layout.mask {
+                cfg.registers[usize::from(0x40 + mask) / 4] = u32::MAX;
+            }
+            program_msi(&mut cfg, Bdf::default(), 3, 0x52).unwrap();
+            assert_eq!(cfg.registers[0x44 / 4], 0xfee0_3000);
+            assert_eq!(
+                cfg.registers[usize::from(0x40 + layout.data) / 4],
+                0xabcd_0052
+            );
+            assert_eq!(cfg.writes[0], (0x40, 5 | (u32::from(control) << 16)));
+            assert_eq!(
+                cfg.writes[cfg.writes.len() - 2],
+                (0x40, 5 | (u32::from(control | 1) << 16))
+            );
+            assert_eq!(cfg.writes.last(), Some(&(4, 0x407)));
+            if let Some(mask) = layout.mask {
+                assert_eq!(cfg.registers[usize::from(0x40 + mask) / 4], u32::MAX - 1);
+            }
+        }
+    }
+    #[test]
+    fn refuses_invalid_vectors_controls_and_truncated_layout_without_writing() {
+        for (control, offset, vector, error) in [
+            (0, 0x40, 31, MsiProgramError::InvalidVector),
+            (6 << 1, 0x40, 0x52, MsiProgramError::InvalidControl),
+            (
+                MSI_CTRL_64BIT | MSI_CTRL_PER_VECTOR_MASK,
+                0xf0,
+                0x52,
+                MsiProgramError::InvalidLayout,
+            ),
+        ] {
+            let mut cfg = Model::new(control, offset);
+            assert_eq!(program_msi(&mut cfg, Bdf::default(), 0, vector), Err(error));
+            assert!(cfg.writes.is_empty());
+        }
     }
 }

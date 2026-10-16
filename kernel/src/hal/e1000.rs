@@ -23,7 +23,7 @@ use nolx_mm_core::mmio::MmioError;
 use nolx_pci_core::{Bar, Bdf, ConfigSpace};
 
 use super::dma::Dma;
-use super::pci::LegacyPorts;
+use super::pci::ConfigAccess;
 use crate::mm::mmio::{self, Region};
 use crate::sync::IrqMutex;
 
@@ -215,7 +215,7 @@ fn stop_device(_dev: usize) -> bool {
 fn bring_up() -> Result<(Rings, Report), Failure> {
     let (bdf, _) = find_controller().ok_or(Failure::NoController)?;
     enable_device(bdf);
-    let bars = nolx_pci_core::read_bars(&mut LegacyPorts, bdf);
+    let bars = nolx_pci_core::read_bars(&mut ConfigAccess, bdf);
     let base = match bars.slots[BAR0_SLOT] {
         Bar::Memory32 { base, .. } => u64::from(base),
         Bar::Memory64 { base, .. } => base,
@@ -332,7 +332,7 @@ fn write_address(regs: &Region, low: u64, address: u64) -> Result<(), Failure> {
 }
 
 fn enable_device(bdf: Bdf) {
-    let mut cfg = LegacyPorts;
+    let mut cfg = ConfigAccess;
     let command = cfg.read_u32(bdf, PCI_COMMAND) & 0xFFFF;
     cfg.write_u32(
         bdf,
@@ -343,7 +343,7 @@ fn enable_device(bdf: Bdf) {
 
 /// The first e1000 on the bus, with the identity the framework matches on.
 fn find_controller() -> Option<(Bdf, DeviceId)> {
-    let inventory = nolx_pci_core::enumerate(&mut LegacyPorts);
+    let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
     inventory
         .as_slice()
         .iter()

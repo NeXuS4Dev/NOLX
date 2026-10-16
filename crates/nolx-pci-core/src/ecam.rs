@@ -111,6 +111,43 @@ impl EcamWindow {
     }
 }
 
+/// Segment-aware full configuration-space transactions supplied by a kernel or test model.
+/// Implementations must reject unsupported segments rather than alias them to segment zero.
+pub trait ExtendedConfigSpace {
+    /// Read an aligned dword within a function's 4 KiB configuration space.
+    fn read_dword(&mut self, segment: u16, bdf: Bdf, offset: u16) -> Result<u32, EcamError>;
+    /// Write an aligned dword within a function's 4 KiB configuration space.
+    fn write_dword(
+        &mut self,
+        segment: u16,
+        bdf: Bdf,
+        offset: u16,
+        value: u32,
+    ) -> Result<(), EcamError>;
+}
+
+/// Bind the existing enumeration/BAR/capability algorithms to one explicit PCI segment.
+pub struct SegmentConfig<'a, C: ExtendedConfigSpace> {
+    /// Underlying configuration transport.
+    pub transport: &'a mut C,
+    /// PCI segment selected for every operation.
+    pub segment: u16,
+}
+
+impl<C: ExtendedConfigSpace> crate::ConfigSpace for SegmentConfig<'_, C> {
+    fn read_u32(&mut self, bdf: Bdf, offset: u8) -> u32 {
+        self.transport
+            .read_dword(self.segment, bdf, u16::from(offset & !3))
+            .unwrap_or(u32::MAX)
+    }
+
+    fn write_u32(&mut self, bdf: Bdf, offset: u8, value: u32) {
+        let _ = self
+            .transport
+            .write_dword(self.segment, bdf, u16::from(offset & !3), value);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +247,90 @@ mod tests {
             }
         }
         assert_eq!(expected, 1 << 28);
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+    use crate::ConfigSpace;
+    use std::collections::BTreeMap;
+
+    #[derive(Default)]
+    struct Model(BTreeMap<(u16, u8, u8, u8, u16), u32>);
+
+    impl ExtendedConfigSpace for Model {
+        fn read_dword(&mut self, segment: u16, bdf: Bdf, offset: u16) -> Result<u32, EcamError> {
+            Ok(*self
+                .0
+                .get(&(segment, bdf.bus, bdf.device, bdf.function, offset))
+                .unwrap_or(&u32::MAX))
+        }
+        fn write_dword(
+            &mut self,
+            segment: u16,
+            bdf: Bdf,
+            offset: u16,
+            value: u32,
+        ) -> Result<(), EcamError> {
+            self.0
+                .insert((segment, bdf.bus, bdf.device, bdf.function, offset), value);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn identical_bdfs_in_distinct_segments_never_alias() {
+        let mut model = Model::default();
+        let bdf = Bdf::new(64, 2, 0).unwrap();
+        for (segment, value) in [(0, 0x1234_5678), (7, 0xabcd_1234)] {
+            SegmentConfig {
+                transport: &mut model,
+                segment,
+            }
+            .write_u32(bdf, 1, value);
+        }
+        for (segment, value) in [(0, 0x1234_5678), (7, 0xabcd_1234)] {
+            let mut cfg = SegmentConfig {
+                transport: &mut model,
+                segment,
+            };
+            assert_eq!(cfg.read_u32(bdf, 0), value);
+            let found = crate::enumerate_range(&mut cfg, 64, 64);
+            assert_eq!(found.len, 1);
+            assert_eq!(found.as_slice()[0].bdf, bdf);
+            assert_eq!(found.as_slice()[0].vendor_id, value as u16);
+        }
+        assert!(crate::enumerate_range(
+            &mut SegmentConfig {
+                transport: &mut model,
+                segment: 7
+            },
+            65,
+            64
+        )
+        .as_slice()
+        .is_empty());
+    }
+
+    #[test]
+    fn declared_root_range_includes_both_ends_but_not_bus_zero() {
+        let mut model = Model::default();
+        for bus in [0, 40, 41, 42] {
+            model
+                .write_dword(1, Bdf::new(bus, 0, 0).unwrap(), 0, 0x1000_8086)
+                .unwrap();
+        }
+        let found = crate::enumerate_range(
+            &mut SegmentConfig {
+                transport: &mut model,
+                segment: 1,
+            },
+            40,
+            41,
+        );
+        assert_eq!(found.len, 2);
+        assert_eq!(found.as_slice()[0].bdf.bus, 40);
+        assert_eq!(found.as_slice()[1].bdf.bus, 41);
     }
 }

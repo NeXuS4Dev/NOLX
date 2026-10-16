@@ -32,6 +32,9 @@ extern "C" fn nolx_interrupt_dispatch(frame_pointer: *mut InterruptFrame) -> *mu
         return frame_pointer;
     }
 
+    if vector == super::ahci::COMPLETION_VECTOR {
+        return device_completion(frame_pointer, super::ahci::on_completion_interrupt);
+    }
     if vector == super::nvme::COMPLETION_VECTOR {
         return device_completion(frame_pointer, super::nvme::on_completion_interrupt);
     }

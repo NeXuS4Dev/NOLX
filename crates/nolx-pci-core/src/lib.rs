@@ -496,9 +496,19 @@ impl Inventory {
 /// a bridge that breaks that rule is counted in [`Inventory::refused_bridges`] and not followed,
 /// which also makes the scan terminate on any input.
 pub fn enumerate<C: ConfigSpace>(cfg: &mut C) -> Inventory {
+    enumerate_range(cfg, 0, 0)
+}
+
+/// Enumerate declared root buses in an inclusive firmware range and their bridges.
+///
+/// Unlike [`enumerate`], every bus in the supplied range is a root. This supports
+/// MCFG allocations with nonzero first buses. A reversed range yields an empty inventory.
+pub fn enumerate_range<C: ConfigSpace>(cfg: &mut C, first: u8, last: u8) -> Inventory {
     let mut inventory = Inventory::default();
     let mut reached = [false; 256];
-    reached[0] = true;
+    if first <= last {
+        reached[usize::from(first)..=usize::from(last)].fill(true);
+    }
     let mut bus = 0usize;
     while bus < 256 {
         if reached[bus] {

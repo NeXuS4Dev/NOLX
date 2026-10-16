@@ -613,6 +613,9 @@ jobs:
               raise SystemExit("wall clock did not advance from its RTC/monotonic anchor")
           PY
 
+      - name: Assert AHCI MSI completions
+        run: grep -F 'ahci: MSI completion interrupts: 3 of 3 commands, vector 0x52' build/serial.log
+
       - name: Exercise PCIe ECAM and legacy-only configuration
         run: scripts/check-pci-ecam.sh 2>&1 | tee -a /tmp/job.log
 
@@ -717,6 +720,10 @@ jobs:
             fi
           }
           need 'NOLX: init sequence complete, halting the boot processor'
+          if grep -qE "PANIC|BUGCHECK|CPU exception" build/serial.log; then
+            echo 'storage backend boot faulted after initialization'
+            exit 1
+          fi
           case "${{ matrix.backend }}" in
             virtio)
               need 'virtio-blk: bound and started through nolx-df'
@@ -725,6 +732,7 @@ jobs:
               ;;
             ahci)
               need 'ahci: bound and started through nolx-df'
+              need 'ahci: MSI completion interrupts: 3 of 3 commands, vector 0x52'
               need 'virtio-blk: not brought up: NoDevice'
               need 'nvme: not brought up: NoController'
               ;;

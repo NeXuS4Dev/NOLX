@@ -25,11 +25,31 @@ use nolx_pci_core::{Bar, Bdf};
 use nolx_virtio_core::crc32;
 
 use super::dma::Dma;
-use super::pci::LegacyPorts;
+use super::pci::ConfigAccess;
 use super::virtio_blk::fill_pattern;
 use crate::mm::mmio::{self, Region};
 use crate::sync::IrqMutex;
-use core::sync::atomic::{fence, Ordering};
+use core::sync::atomic::{fence, AtomicUsize, Ordering};
+
+/// Dedicated AHCI MSI completion vector.
+pub const COMPLETION_VECTOR: u8 = 0x52;
+static COMPLETIONS: AtomicUsize = AtomicUsize::new(0);
+static INTERRUPT_REGISTERS: IrqMutex<Option<(Region, u8)>> = IrqMutex::new(None);
+
+/// Clear port/controller causes before local APIC EOI. Never acquires the driver's state lock.
+pub fn on_completion_interrupt() {
+    let registers = INTERRUPT_REGISTERS.lock();
+    if let Some((hba, number)) = *registers {
+        let status_offset = ahci::port_register(number, ahci::PORT_IS).unwrap_or(0);
+        let status = hba.read32(status_offset).unwrap_or(0);
+        let global = hba.read32(ahci::HBA_IS).unwrap_or(0);
+        let _ = hba.write32(status_offset, status);
+        let _ = hba.write32(ahci::HBA_IS, global);
+        if status & 1 != 0 {
+            COMPLETIONS.fetch_add(1, Ordering::Release);
+        }
+    }
+}
 
 /// The base address register that holds the HBA's registers. AHCI puts them in BAR 5.
 const ABAR_SLOT: usize = 5;
@@ -55,6 +75,10 @@ const ROUND_TRIP_BYTES: usize = ROUND_TRIP_SECTORS as usize * SECTOR_BYTES as us
 /// Why the probe stopped.
 #[derive(Debug)]
 pub enum Failure {
+    /// MSI programming failed.
+    Msi(super::msix::Error),
+    /// A command completed without its interrupt being delivered.
+    Interrupt,
     /// The block queue refused the request, or did not hand it back.
     Queue(QueueError),
     /// No AHCI controller is on the PCI bus.
@@ -176,7 +200,7 @@ fn stop_device(_dev: usize) -> bool {
 
 fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     let (bdf, _) = find_controller().ok_or(Failure::NoController)?;
-    let bars = nolx_pci_core::read_bars(&mut LegacyPorts, bdf);
+    let bars = nolx_pci_core::read_bars(&mut ConfigAccess, bdf);
     let abar = match bars.slots[ABAR_SLOT] {
         Bar::Memory32 { base, .. } => u64::from(base),
         Bar::Memory64 { base, .. } => base,
@@ -204,6 +228,11 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     port.write(ahci::PORT_SERR, u32::MAX)?;
     port.write(ahci::PORT_IS, u32::MAX)?;
     port.start()?;
+    *INTERRUPT_REGISTERS.lock() = Some((hba, number));
+    super::msix::enable_msi(bdf, COMPLETION_VECTOR).map_err(Failure::Msi)?;
+    // Enable only D2H register-FIS interrupts, one per completed DMA EXT command.
+    port.write(0x14, 1)?;
+    hba.write32(ahci::HBA_GHC, hba.read32(ahci::HBA_GHC)? | 2)?;
 
     // Sector 0 first: its first bytes are the pattern CI wrote into the image.
     data.write(0, &[0u8; SECTOR_BYTES as usize]);
@@ -258,6 +287,11 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     if back != written {
         return Err(Failure::RoundTrip);
     }
+    let _ = writeln!(
+        console,
+        "ahci: MSI completion interrupts: {} of 3 commands, vector {COMPLETION_VECTOR:#x}",
+        COMPLETIONS.load(Ordering::Acquire)
+    );
     let checksum = crc32(&back);
     let _ = writeln!(
         console,
@@ -269,7 +303,7 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
 
 /// The first AHCI controller on the bus, if there is one.
 fn find_controller() -> Option<(Bdf, DeviceId)> {
-    let inventory = nolx_pci_core::enumerate(&mut LegacyPorts);
+    let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
     inventory
         .as_slice()
         .iter()
@@ -332,6 +366,7 @@ fn transfer(port: &Port, page: &Dma, data: &Dma, command: Command) -> Result<(),
 
 /// Issue the command in the port's slot 0 and wait for it. Called through [`transfer`].
 fn issue(port: &Port, page: &Dma, data: &Dma, command: Command) -> Result<(), Failure> {
+    let expected = COMPLETIONS.load(Ordering::Acquire) + 1;
     let bytes = u32::from(command.sectors) * SECTOR_BYTES;
     let header = ahci::encode_command_header(&CommandHeader {
         fis_dwords: 5,
@@ -363,6 +398,9 @@ fn issue(port: &Port, page: &Dma, data: &Dma, command: Command) -> Result<(), Fa
         },
         "command issue",
     )?;
+    if super::msix::wait_for_interrupts(&COMPLETIONS, expected) < expected {
+        return Err(Failure::Interrupt);
+    }
     fence(Ordering::SeqCst);
     Ok(())
 }

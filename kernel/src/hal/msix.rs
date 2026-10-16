@@ -11,7 +11,7 @@ use nolx_pci_core::{msi, Bar, BarSet, Bdf, ConfigSpace};
 
 use super::apic;
 use super::cpu::interrupts_enabled;
-use super::pci::LegacyPorts;
+use super::pci::ConfigAccess;
 use crate::mm::mmio::{self, Region};
 use crate::mm::PAGE_SHIFT;
 
@@ -25,6 +25,8 @@ const WAIT_LIMIT: u32 = 1_000_000;
 pub enum Error {
     /// The function has no MSI-X capability.
     NoCapability,
+    /// MSI capability/layout validation failed.
+    Msi(msi::MsiProgramError),
     /// The entry is past the table, or the table is not in a memory BAR.
     Layout,
     /// The table's MMIO window was refused.
@@ -64,11 +66,11 @@ fn bar_base(bars: &BarSet, slot: u8) -> Result<u64, Error> {
 /// [`Error`] for a missing capability, a table outside a memory BAR or past its end, a refused
 /// mapping or register access, or an encoding the message cannot carry.
 pub fn enable(bdf: Bdf, bars: &BarSet, entry: u16, vector: u8) -> Result<(), Error> {
-    let list = nolx_pci_core::capabilities(&mut LegacyPorts, bdf);
+    let list = nolx_pci_core::capabilities(&mut ConfigAccess, bdf);
     let cap = list.find(msi::CAP_MSI_X).ok_or(Error::NoCapability)?;
-    let header = LegacyPorts.read_u32(bdf, cap.offset);
-    let table = LegacyPorts.read_u32(bdf, cap.offset + 4);
-    let pba = LegacyPorts.read_u32(bdf, cap.offset + 8);
+    let header = ConfigAccess.read_u32(bdf, cap.offset);
+    let table = ConfigAccess.read_u32(bdf, cap.offset + 4);
+    let pba = ConfigAccess.read_u32(bdf, cap.offset + 8);
     let control = (header >> 16) as u16;
     let msix = msi::parse_msix(control, table, pba);
     if entry >= msix.table_size {
@@ -93,12 +95,21 @@ pub fn enable(bdf: Bdf, bars: &BarSet, entry: u16, vector: u8) -> Result<(), Err
 
     // Enable MSI-X with the whole function unmasked, keeping the rest of the header dword.
     let enabled = msi::msix_enable(control);
-    LegacyPorts.write_u32(
+    ConfigAccess.write_u32(
         bdf,
         cap.offset,
         (u32::from(enabled) << 16) | (header & 0xFFFF),
     );
     Ok(())
+}
+
+/// Program a single MSI for a controller without an MSI-X table.
+pub fn enable_msi(bdf: Bdf, vector: u8) -> Result<(), Error> {
+    if !apic::is_enabled() {
+        return Err(Error::Encoding);
+    }
+    let destination = u8::try_from(apic::current_apic_id()).map_err(|_| Error::Encoding)?;
+    msi::program_msi(&mut ConfigAccess, bdf, destination, vector).map_err(Error::Msi)
 }
 
 /// Let interrupts through until `counter` reaches `expected`, or the bounded wait runs out, and

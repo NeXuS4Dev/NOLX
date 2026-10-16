@@ -28,7 +28,7 @@ use nolx_block_core::{self as gpt, GptError, Header};
 use nolxfs::on_disk::FsError;
 
 use super::dma::Dma;
-use crate::hal::pci::LegacyPorts;
+use crate::hal::pci::ConfigAccess;
 use crate::mm::mmio::{self, Region};
 use crate::sync::IrqMutex;
 use core::sync::atomic::{fence, AtomicUsize, Ordering};
@@ -226,8 +226,8 @@ fn stop_device(_dev: usize) -> bool {
 
 fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     let (bdf, _) = find_device().ok_or(Failure::NoDevice)?;
-    let bars = nolx_pci_core::read_bars(&mut LegacyPorts, bdf);
-    let caps = virtio::discover(&mut LegacyPorts, bdf);
+    let bars = nolx_pci_core::read_bars(&mut ConfigAccess, bdf);
+    let caps = virtio::discover(&mut ConfigAccess, bdf);
     let common_cap = caps.common.ok_or(Failure::NoCapability("common"))?;
     let notify_cap = caps.notify.ok_or(Failure::NoCapability("notify"))?;
     let device_cap = caps.device.ok_or(Failure::NoCapability("device"))?;
@@ -405,7 +405,7 @@ pub(crate) fn fill_pattern(out: &mut [u8]) {
 
 /// The first virtio block device on the bus, if there is one.
 fn find_device() -> Option<(Bdf, DeviceId)> {
-    let inventory = nolx_pci_core::enumerate(&mut LegacyPorts);
+    let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
     inventory
         .as_slice()
         .iter()
