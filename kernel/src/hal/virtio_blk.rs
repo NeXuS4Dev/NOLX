@@ -212,9 +212,9 @@ fn accept(_: &DeviceId) -> bool {
 }
 
 /// The framework's start operation: the whole bring-up. Its output and result go to [`STATE`].
-fn start_device(_dev: usize) -> bool {
+fn start_device(dev: usize) -> bool {
     let mut log = Log::new();
-    let result = bring_up(&mut log);
+    let result = bring_up(dev, &mut log);
     let started = result.is_ok();
     let mut state = STATE.lock();
     state.log = log;
@@ -246,7 +246,7 @@ pub(crate) fn with_disk<T>(
     result
 }
 
-fn bring_up(console: &mut dyn HalConsole) -> Result<Disk, Failure> {
+fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<Disk, Failure> {
     let (bdf, _) = find_device().ok_or(Failure::NoDevice)?;
     let command = ConfigAccess.read_u32(bdf, 4) & 0xffff;
     ConfigAccess.write_u32(bdf, 4, command | 6);
@@ -255,9 +255,9 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<Disk, Failure> {
     let common_cap = caps.common.ok_or(Failure::NoCapability("common"))?;
     let notify_cap = caps.notify.ok_or(Failure::NoCapability("notify"))?;
     let device_cap = caps.device.ok_or(Failure::NoCapability("device"))?;
-    let common = map_cap(&bars, common_cap)?;
-    let notify = map_cap(&bars, notify_cap)?;
-    let config = map_cap(&bars, device_cap)?;
+    let common = map_cap(dev, &bars, common_cap)?;
+    let notify = map_cap(dev, &bars, notify_cap)?;
+    let config = map_cap(dev, &bars, device_cap)?;
 
     // Reset, then the status steps in the order the rules give.
     common.write8(at(common::DEVICE_STATUS), 0)?;
@@ -273,7 +273,7 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<Disk, Failure> {
     common.write8(at(common::DEVICE_STATUS), virtio::INIT_STATUS_SEQUENCE[2])?;
     virtio::check_features_ok(common.read8(at(common::DEVICE_STATUS))?)?;
 
-    msix::enable(bdf, &bars, MSIX_ENTRY, COMPLETION_VECTOR)?;
+    msix::enable(dev, bdf, &bars, MSIX_ENTRY, COMPLETION_VECTOR)?;
     let queue = setup_queue(&common, MSIX_ENTRY)?;
     common.write8(at(common::DEVICE_STATUS), virtio::INIT_STATUS_SEQUENCE[3])?;
 
@@ -457,13 +457,14 @@ fn find_device() -> Option<(Bdf, DeviceId)> {
 }
 
 /// Map the region a capability describes: `bar` plus the capability's offset, for its length.
-fn map_cap(bars: &BarSet, cap: VirtioCap) -> Result<Region, Failure> {
+fn map_cap(dev: usize, bars: &BarSet, cap: VirtioCap) -> Result<Region, Failure> {
     let base = match bars.slots[usize::from(cap.bar)] {
         Bar::Memory32 { base, .. } => u64::from(base),
         Bar::Memory64 { base, .. } => base,
         _ => return Err(Failure::BarNotMemory(cap.bar)),
     };
-    mmio::map(base + u64::from(cap.offset), u64::from(cap.length)).map_err(Failure::Window)
+    mmio::map_owned(dev, base + u64::from(cap.offset), u64::from(cap.length))
+        .map_err(Failure::Window)
 }
 
 /// The byte offset of a common-configuration field, widened for the register accessors.

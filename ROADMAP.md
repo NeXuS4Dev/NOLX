@@ -974,3 +974,14 @@ from lifecycle operations and requires Started state. **M9 remains in progress**
 ownership, reusable MMIO/IRQ resources and multiple instances/segments remain open alongside
 USB HID, AML resource discovery, BAR/bridge allocation and production S3/power policy.
 See the [completion gate](docs/development/m9-completion.md) for precise evidence and limits.
+
+
+### M9 owned MMIO lifecycle checkpoint (2026-10-17)
+
+Healthy native stop now retires driver-owned register/MSI-X windows; restart reuses their
+virtual ranges through a bounded generation-checked allocator. Mapping mutations are serialized,
+partial-map failures roll back, lower page tables are reclaimed and the shared MMIO root stays
+stable across address spaces. Expanded lifecycle tests cover stale-access refusal, OOM rollback,
+VA reuse and exact restart mapping counts. This supersedes the previous healthy-path monotonic
+MMIO limitation, **not** failure-path cleanup, multi-instance binding, IRQ resource release or
+SMP TLB shootdown. M9 remains in progress; see the completion gate for verified limits.

@@ -196,9 +196,9 @@ fn accept(_: &DeviceId) -> bool {
 }
 
 /// The framework's start operation: the whole bring-up. Its output and result go to [`STATE`].
-fn start_device(_dev: usize) -> bool {
+fn start_device(dev: usize) -> bool {
     let mut log = Log::new();
-    let result = bring_up(&mut log);
+    let result = bring_up(dev, &mut log);
     let started = result.is_ok();
     let mut state = STATE.lock();
     state.log = log;
@@ -259,7 +259,7 @@ impl Queue {
     }
 }
 
-fn bring_up(console: &mut dyn HalConsole) -> Result<Disk, Failure> {
+fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<Disk, Failure> {
     let (bdf, _) = find_controller().ok_or(Failure::NoController)?;
     enable_device(bdf);
     let bars = nolx_pci_core::read_bars(&mut ConfigAccess, bdf);
@@ -268,7 +268,7 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<Disk, Failure> {
         Bar::Memory64 { base, .. } => base,
         _ => return Err(Failure::BarNotMemory),
     };
-    let regs = mmio::map(base, REGISTERS_BYTES)?;
+    let regs = mmio::map_owned(dev, base, REGISTERS_BYTES)?;
     let cap = read64(&regs, nvme::REG_CAP)?;
     let stride = nvme::cap_doorbell_stride(cap);
     if stride > STRIDE_MAX {
@@ -320,7 +320,7 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<Disk, Failure> {
     // One I/O queue pair: the completion queue first, since the submission queue names it.
     let io_cq = Dma::new().ok_or(Failure::Memory)?;
     let io_sq = Dma::new().ok_or(Failure::Memory)?;
-    msix::enable(bdf, &bars, MSIX_ENTRY, COMPLETION_VECTOR)?;
+    msix::enable(dev, bdf, &bars, MSIX_ENTRY, COMPLETION_VECTOR)?;
     let command = nvme::create_io_cq_msix(
         next_cid(&mut cid),
         IO_QUEUE,

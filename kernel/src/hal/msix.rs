@@ -65,7 +65,7 @@ fn bar_base(bars: &BarSet, slot: u8) -> Result<u64, Error> {
 /// # Errors
 /// [`Error`] for a missing capability, a table outside a memory BAR or past its end, a refused
 /// mapping or register access, or an encoding the message cannot carry.
-pub fn enable(bdf: Bdf, bars: &BarSet, entry: u16, vector: u8) -> Result<(), Error> {
+pub fn enable(owner: usize, bdf: Bdf, bars: &BarSet, entry: u16, vector: u8) -> Result<(), Error> {
     let list = nolx_pci_core::capabilities(&mut ConfigAccess, bdf);
     let cap = list.find(msi::CAP_MSI_X).ok_or(Error::NoCapability)?;
     let header = ConfigAccess.read_u32(bdf, cap.offset);
@@ -82,7 +82,7 @@ pub fn enable(bdf: Bdf, bars: &BarSet, entry: u16, vector: u8) -> Result<(), Err
     let table_end = table_at + u64::from(msix.table_size) * msi::MSIX_ENTRY_BYTES;
     let page = table_at & !(PAGE - 1);
     let length = (table_end - page).div_ceil(PAGE) * PAGE;
-    let region: Region = mmio::map(page, length)?;
+    let region: Region = mmio::map_owned(owner, page, length)?;
 
     let apic_id = u8::try_from(apic::current_apic_id()).map_err(|_| Error::Encoding)?;
     let address = u64::from(msi::message_address(apic_id));

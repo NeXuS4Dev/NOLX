@@ -110,9 +110,9 @@ pub fn probe(console: &mut dyn HalConsole) {
         }
     }
 }
-fn start(_: usize) -> bool {
+fn start(dev: usize) -> bool {
     let mut log = Log::new();
-    let outcome = bring_up(&mut log).map(|nic| {
+    let outcome = bring_up(dev, &mut log).map(|nic| {
         *DEVICE.lock() = Some(nic);
     });
     let good = outcome.is_ok();
@@ -165,13 +165,14 @@ fn find() -> Option<(Bdf, DeviceId)> {
             )
         })
 }
-fn map(bars: &BarSet, cap: VirtioCap) -> Result<Region, Failure> {
+fn map(dev: usize, bars: &BarSet, cap: VirtioCap) -> Result<Region, Failure> {
     let base = match bars.slots.get(usize::from(cap.bar)) {
         Some(Bar::Memory32 { base, .. }) => u64::from(*base),
         Some(Bar::Memory64 { base, .. }) => *base,
         _ => return Err(Failure::Configuration),
     };
-    mmio::map(
+    mmio::map_owned(
+        dev,
         base.checked_add(u64::from(cap.offset))
             .ok_or(Failure::Configuration)?,
         u64::from(cap.length),
@@ -332,7 +333,7 @@ impl Nic {
     }
 }
 
-fn bring_up(console: &mut dyn HalConsole) -> Result<Nic, Failure> {
+fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<Nic, Failure> {
     let (bdf, _) = find().ok_or(Failure::NoDevice)?;
     if !super::apic::is_enabled() {
         return Err(Failure::Interrupt);
@@ -341,10 +342,10 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<Nic, Failure> {
     ConfigAccess.write_u32(bdf, 4, command | 6);
     let bars = nolx_pci_core::read_bars(&mut ConfigAccess, bdf);
     let caps = virtio::discover(&mut ConfigAccess, bdf);
-    let common = map(&bars, caps.common.ok_or(Failure::Configuration)?)?;
+    let common = map(dev, &bars, caps.common.ok_or(Failure::Configuration)?)?;
     let cap = caps.notify.ok_or(Failure::Configuration)?;
-    let notify = map(&bars, cap)?;
-    let config = map(&bars, caps.device.ok_or(Failure::Configuration)?)?;
+    let notify = map(dev, &bars, cap)?;
+    let config = map(dev, &bars, caps.device.ok_or(Failure::Configuration)?)?;
     common.write8(u64::from(common::DEVICE_STATUS), 0)?;
     poll(|| Ok(common.read8(u64::from(common::DEVICE_STATUS))? == 0))?;
     for status in &virtio::INIT_STATUS_SEQUENCE[..2] {
@@ -374,8 +375,8 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<Nic, Failure> {
     if mac == [0; 6] || mac[0] & 1 != 0 {
         return Err(Failure::Configuration);
     }
-    msix::enable(bdf, &bars, 0, RX_VECTOR)?;
-    msix::enable(bdf, &bars, 1, TX_VECTOR)?;
+    msix::enable(dev, bdf, &bars, 0, RX_VECTOR)?;
+    msix::enable(dev, bdf, &bars, 1, TX_VECTOR)?;
     let rx = Queue::new(&common, notify, cap, 0)?;
     let tx = Queue::new(&common, notify, cap, 1)?;
     let mut nic = Nic {

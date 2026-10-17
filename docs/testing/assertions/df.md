@@ -5,7 +5,8 @@ third-party drivers are a device object + dispatch table, not kernel patches") a
 These rules are NOLX's own design, not a published specification. The rules cover device identity,
 driver match rules, binding order, the device lifecycle, the dispatch table, and registry capacity. The
 kernel binds five native PCI driver kinds through a persistent shared registry. Multi-instance
-contexts, failed-initialization cleanup and reusable MMIO/IRQ resources remain open.
+contexts, failed-initialization cleanup and IRQ resource reclamation remain open.
+Healthy-stop MMIO window reuse is covered below; remote TLB shootdown is not implemented.
 
 Rows are pipe-delimited: `ID | specification reference | status | test`.
 
@@ -23,3 +24,6 @@ DF-001 through DF-007 are `tested-T1` (original CI workflow 38614702136).
 DF-008 | NOLX M9 Persistent healthy native lifecycle: virtio-blk, AHCI, NVMe, e1000 and virtio-net retain state beyond probe return, reclaim and reacquire exactly their owned DMA on three stop/restart cycles, verify fresh I/O, refuse running removal and refuse restart after removal; no claim of failed-start cleanup or MMIO unmapping | tested-T2 | scripts/check-driver-lifecycle.py; kernel/src/hal/driver_start.rs lifecycle_selftest; CI 38968513895 Persistent five-driver hardware lifecycle on 66c5d8e, five isolated fixtures plus one of each kind together, each ends with zero pinned DMA pages
 DF-009 | NOLX M9 Framework exclusion: recursive framework and public block-I/O entry from a start callback return Busy rather than waiting under the registry IRQ lock | tested-T2 | kernel/src/hal/driver_start.rs lifecycle_selftest reenter; scripts/check-driver-lifecycle.py; CI 38968513895 Persistent five-driver hardware lifecycle on 66c5d8e
 DF-010 | NOLX M9 Stable driver identity: driver lookup and bound-device driver names remain valid across stop, restart and removal; unbound and unknown handles report errors | tested-T1 | nolx-df-core tests::driver_identity_survives_stop_restart_and_removal; CI 38968513895 Host tests on 66c5d8e
+
+DF-011 | NOLX M9 MMIO reservation identity: bounded first-fit reservations preserve guard pages, isolate owners, reject stale or double release, and reuse holes without aliasing live windows | tested-T1 | nolx-mm-core mmio::reuse_tests (3 tests)
+DF-012 | NOLX M9 Healthy BSP MMIO lifecycle: successful native stop retires owned mappings, restart restores exactly the original count, stale register accesses are refused after VA reuse, partial-map allocation failure rolls back, and unmap retains the shared MMIO PML4 child | tested-T2 | scripts/check-driver-lifecycle.py; kernel/src/mm/mmio.rs lifecycle_selftest; local QEMU 11.0.2 six fixtures passed 2026-10-17; nolx-mm-core paging::tests::shared_unmap_retains_root_child_seen_by_another_address_space and shared_unmap_prunes_empty_paths_left_by_failed_first_leaf; no concurrent-unmap/SMP claim

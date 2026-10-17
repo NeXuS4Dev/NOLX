@@ -188,9 +188,9 @@ fn accept(_: &DeviceId) -> bool {
 }
 
 /// The framework's start operation: the whole bring-up. Its output and result go to [`STATE`].
-fn start_device(_dev: usize) -> bool {
+fn start_device(dev: usize) -> bool {
     let mut log = Log::new();
-    let result = bring_up(&mut log);
+    let result = bring_up(dev, &mut log);
     let started = result.is_ok();
     let mut state = STATE.lock();
     state.log = log;
@@ -222,7 +222,7 @@ pub(crate) fn with_disk<T>(
     result
 }
 
-fn bring_up(console: &mut dyn HalConsole) -> Result<Disk, Failure> {
+fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<Disk, Failure> {
     let (bdf, _) = find_controller().ok_or(Failure::NoController)?;
     let initial_completions = COMPLETIONS.load(Ordering::Acquire);
     let command = ConfigAccess.read_u32(bdf, 4) & 0xffff;
@@ -233,7 +233,7 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<Disk, Failure> {
         Bar::Memory64 { base, .. } => base,
         _ => return Err(Failure::BarNotMemory),
     };
-    let hba = mmio::map(abar, ahci::HBA_REGION_BYTES)?;
+    let hba = mmio::map_owned(dev, abar, ahci::HBA_REGION_BYTES)?;
     let ports = hba.read32(ahci::HBA_PI)?;
     // Put the controller in AHCI mode. The port registers are only meaningful in that mode.
     let ghc = hba.read32(ahci::HBA_GHC)?;

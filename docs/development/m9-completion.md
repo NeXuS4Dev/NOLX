@@ -19,7 +19,9 @@ M9 to the already implemented boot probes. Check items only with executable evid
 - [ ] Bind supported devices beyond the current one-device, segment-zero boot probes.
 - [x] Persistent system registry; retain native storage/network state past probe return;
       healthy stop/restart/removal with hardware quiescence and exact DMA reclamation.
-- [ ] Complete failed-start/failed-stop recovery and MMIO/interrupt-resource reclamation;
+- [x] Serialized, reusable, generation-checked MMIO windows with partial-map rollback
+      and shared-root-preserving unmap on healthy stop (BSP only).
+- [ ] Complete failed-start/failed-stop recovery and interrupt-resource reclamation;
       multi-controller contexts and binding remain a separate gate above.
 
 ## Storage integration
@@ -231,3 +233,33 @@ boot smoke, three storage persistence/corruption jobs, native virtio-net and act
 DF-008/009 record only the newly proven healthy native lifecycle/reentry properties as T2;
 DF-010 records stable identity as T1. The updated database has 327 assertions / zero problems.
 No PR was opened; the full lifecycle and M9 completion gates remain unchecked as described above.
+
+
+## Owned reusable MMIO windows (2026-10-17)
+
+The boot-only monotonic mapper limitation above is superseded for healthy BSP lifecycle
+operations. MMIO reservations and page-table edits now share an IRQ lock; no hardware wait
+runs under it. A bounded first-fit allocator reuses retired ranges with guard pages and
+non-wrapping generation identities. Register access through a retired `Region` returns Stale,
+even after its address/slot is reused. Every native driver passes its framework handle explicitly
+through mapping helpers, including MSI-X table setup; platform/ECAM mappings stay unowned.
+Only successful stop retires owned mappings after the callback has detached CPU/IRQ users.
+Failed-start mappings remain pinned with potentially active DMA rather than being freed blindly.
+
+Unmap reclaims lower tables but preserves the shared MMIO PML4 child, so address spaces made
+before driver restart keep seeing the same subtree. The kernel invalidates BSP translations
+before recycling reservations. A failed map rolls back its partial leaves/empty lower tables
+and reservation. Unmapping is explicitly unsafe: all window/raw-pointer/IRQ users must already
+be retired; this is **not** a general concurrent-unmap or SMP TLB-shootdown implementation.
+
+Five new portable tests cover hole/guard reuse, stale/double release, owner/capacity isolation,
+shared-root visibility through a second address space, and failed-leaf cleanup. The six native
+lifecycle fixtures now check MMIO mapping counts decrease at stop and return exactly at restart
+on every cycle. An after-boot selftest forces table-allocation OOM, checks reservation/frame
+rollback, fills then invalidates a real LAPIC alias, verifies stale read/write refusal after
+VA reuse, and checks shared-root identity. These checks passed locally on QEMU 11.0.2.
+
+Local regression: 700 tests passed per overlapping host command; host/feature kernel Clippy,
+formatting, all six lifecycle fixtures, all six native virtio-net configurations, 21 kernel-image
+checks and unsafe audit (249 blocks, zero missing invariants) passed. Multi-controller binding,
+failure recovery, interrupt-route/vector reclamation and the other unchecked M9 gates remain open.

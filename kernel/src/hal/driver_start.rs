@@ -114,7 +114,15 @@ pub fn start(dev: usize) -> Result<(), Error> {
 }
 /// Quiesce a started device through its original dispatch table.
 pub fn stop(dev: usize) -> Result<(), Error> {
-    with_registry(|registry| registry.stop(dev))
+    with_registry(|registry| {
+        registry.stop(dev)?;
+        // SAFETY: successful native stop has detached IRQ-visible register users and transport
+        // state, and the checked-out registry excludes concurrent public I/O/start/stop.
+        unsafe {
+            crate::mm::mmio::release_owned(dev);
+        }
+        Ok(())
+    })
 }
 /// Remove a non-running device. Running devices must first successfully stop.
 pub fn remove(dev: usize) -> Result<(), Error> {
@@ -207,6 +215,7 @@ pub fn lifecycle_selftest(console: &mut dyn HalConsole) {
         console,
         "driver: recursive framework and public I/O callbacks refused with Busy"
     );
+    crate::mm::mmio::lifecycle_selftest(console);
     let devices = started().unwrap();
     let mut tested = 0;
     for (handle, name) in devices.into_iter().flatten() {
@@ -221,8 +230,13 @@ pub fn lifecycle_selftest(console: &mut dyn HalConsole) {
         assert_eq!(remove(handle), Err(Error::Busy));
         for cycle in 1..=3 {
             let before = super::dma::live_pages();
+            let mappings_before = crate::mm::mmio::live_mappings();
             stop(handle).expect("driver hardware quiesce failed");
             assert_eq!(state(handle), Ok(State::Stopped));
+            assert!(
+                crate::mm::mmio::live_mappings() < mappings_before,
+                "driver did not release MMIO mappings"
+            );
             assert_eq!(
                 super::dma::live_pages() + pages,
                 before,
@@ -247,6 +261,11 @@ pub fn lifecycle_selftest(console: &mut dyn HalConsole) {
             }
             restarted.expect("driver restart failed");
             assert_eq!(state(handle), Ok(State::Started));
+            assert_eq!(
+                crate::mm::mmio::live_mappings(),
+                mappings_before,
+                "restart leaked MMIO mappings"
+            );
             assert_eq!(super::dma::live_pages(), before, "restart leaked DMA pages");
             if let Some(disk) = disk {
                 super::blockdev::bounds_selftest(disk);
@@ -269,6 +288,10 @@ pub fn lifecycle_selftest(console: &mut dyn HalConsole) {
         assert_eq!(state(handle), Ok(State::Removed));
         assert_eq!(start(handle), Err(Error::BadState));
         tested += 1;
+        let _ = writeln!(
+            console,
+            "driver: {name} MMIO mappings released and reused across all three cycles"
+        );
         let _ = writeln!(console, "driver: {name} Removed, restart refused");
     }
     assert!(tested > 0, "lifecycle hardware test had no devices");

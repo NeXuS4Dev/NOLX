@@ -239,8 +239,8 @@ fn accept(_: &DeviceId) -> bool {
 }
 
 /// The framework's start operation: the whole bring-up. The result goes to [`STATE`].
-fn start_device(_dev: usize) -> bool {
-    let result = bring_up();
+fn start_device(dev: usize) -> bool {
+    let result = bring_up(dev);
     let mut state = STATE.lock();
     match result {
         Ok((rings, report)) => {
@@ -308,7 +308,7 @@ fn stop_device(_dev: usize) -> bool {
     true
 }
 
-fn bring_up() -> Result<(Rings, Report), Failure> {
+fn bring_up(dev: usize) -> Result<(Rings, Report), Failure> {
     let initial_interrupts = RX_INTERRUPTS.load(Ordering::Acquire);
     let (bdf, _) = find_controller().ok_or(Failure::NoController)?;
     enable_device(bdf);
@@ -318,7 +318,7 @@ fn bring_up() -> Result<(Rings, Report), Failure> {
         Bar::Memory64 { base, .. } => base,
         _ => return Err(Failure::BarNotMemory),
     };
-    let regs = mmio::map(base, REGISTERS_BYTES)?;
+    let regs = mmio::map_owned(dev, base, REGISTERS_BYTES)?;
 
     // Reset, then set the link up. The reset bit clears itself when the reset is done.
     regs.write32(
