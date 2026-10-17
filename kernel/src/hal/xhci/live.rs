@@ -8,7 +8,8 @@ use nolx_input_core::objects::{Class, DeviceId, Location};
 use nolx_usb_core::device as wire;
 const SLOTS: usize = 8;
 const PORTS: usize = 16;
-static HOST: IrqMutex<Option<Host>> = IrqMutex::new(None);
+static HOSTS: [IrqMutex<Option<Host>>; driver_start::DEVICES] =
+    [const { IrqMutex::new(None) }; driver_start::DEVICES];
 struct Ring {
     page: Dma,
     next: u16,
@@ -506,7 +507,8 @@ fn allocate_pages<const N: usize>() -> Result<[Dma; N], Failure> {
 }
 fn release(d: Device) {
     // SAFETY: callers either have not installed any device DMA pointer, or observed successful
-    // Disable Slot completion and removed the DCBAA pointer. No engine can access these pages.
+    // Disable Slot completion and removed the DCBAA pointer, or proved full controller
+    // halt/reset and PCI DMA exclusion. No engine can access these pages.
     unsafe {
         d.input.release();
         d.output.release();
@@ -516,6 +518,7 @@ fn release(d: Device) {
     }
 }
 pub(super) fn start(
+    dev: usize,
     controller: u32,
     regs: Region,
     op: u64,
@@ -539,8 +542,12 @@ pub(super) fn start(
     if enabled == 0 {
         return Err(Failure::Unsupported);
     }
+    let mut guard = HOSTS[dev].lock();
+    if guard.is_some() {
+        return Err(Failure::Busy);
+    }
     let [command, event, table] = allocate_pages::<3>()?;
-    let mut host = Host {
+    *guard = Some(Host {
         regs,
         op,
         runtime,
@@ -555,7 +562,8 @@ pub(super) fn start(
         devices: core::array::from_fn(|_| None),
         blocked: [false; PORTS],
         controller,
-    };
+    });
+    let host = guard.as_mut().unwrap();
     host.table
         .write(0x100, &host.event.address(0).to_le_bytes());
     dword(&host.table, 0x108, 256);
@@ -569,18 +577,24 @@ pub(super) fn start(
     fence(Ordering::Release);
     host.regs.write32(op, usb::USBCMD_RUN)?;
     poll(|| Ok(host.regs.read32(op + 4)? & 1 == 0), "run")?;
+    #[cfg(feature = "hal-xhci-start-fault-test")]
+    {
+        static INJECT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+        if INJECT.swap(false, Ordering::AcqRel) {
+            return Err(Failure::Timeout("injected post-run start failure"));
+        }
+    }
     host.command(0, 23, 0)?; // No-op completion proves command/event DMA before device enumeration.
     let _ = writeln!(
         console,
         "xhci: command/event rings online, context={context}, polled HID"
     );
     host.scan(console)?;
-    *HOST.lock() = Some(host);
     Ok(())
 }
 /// Service bounded event batches from the idle consumer, never from an ISR.
-pub(super) fn poll_events(console: &mut dyn HalConsole) {
-    let mut guard = HOST.lock();
+pub(super) fn poll_events(dev: usize, console: &mut dyn HalConsole) {
+    let mut guard = HOSTS[dev].lock();
     let Some(host) = guard.as_mut() else {
         return;
     };
@@ -595,6 +609,33 @@ pub(super) fn poll_events(console: &mut dyn HalConsole) {
     }
 }
 
-pub(super) fn active() -> bool {
-    HOST.lock().is_some()
+pub(super) fn active(dev: usize) -> bool {
+    HOSTS[dev].lock().is_some()
+}
+/// End software producers even when hardware cannot be stopped safely.
+pub(super) fn retire(dev: usize) {
+    if let Some(host) = HOSTS[dev].lock().as_mut() {
+        for device in host.devices.iter_mut().flatten() {
+            if let Some(id) = device.object.take() {
+                let _ = super::super::input::disconnect(id);
+            }
+            device.pending = 0;
+        }
+    }
+}
+/// # Safety
+/// Caller proved controller halt/reset and disabled/read back PCI bus mastering while excluding
+/// polling and starts. No controller engine can access any host/device page being released.
+pub(super) unsafe fn release_host(dev: usize) {
+    if let Some(host) = HOSTS[dev].lock().take() {
+        for device in host.devices.into_iter().flatten() {
+            release(device);
+        }
+        // SAFETY: caller established DMA exclusion for this uniquely moved controller state.
+        unsafe {
+            host.command.page.release();
+            host.event.release();
+            host.table.release();
+        }
+    }
 }

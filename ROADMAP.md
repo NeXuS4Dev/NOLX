@@ -1071,3 +1071,11 @@ objects with independent reader FIFOs, atomic subscription snapshots, explicit o
 and per-device disconnect/neutral EOF. Real hardware observers verify identity/order, subscriber
 isolation and stale-handle refusal. Executive/process-handle/security/waitable/user-device bindings
 remain separate open gates; this is not a new syscall or POSIX input ABI.
+
+
+M9 xHCI lifecycle checkpoint: segment-zero controllers now bind persistently per handle, with
+owned MMIO/DMA, serialized polling and checked stop/restart/removal. Two-controller PC/Q35 fixtures
+require fresh keyboard input after three restarts and mouse input while its peer is stopped;
+post-run startup rollback and failed-stop DMA/MMIO quarantine are separate executable modes.
+Supersedes earlier single-host/framework limitations. General USB, interrupts, quarantine recovery,
+Executive/user input bindings and global power/S3 remain open; M9 is not complete.

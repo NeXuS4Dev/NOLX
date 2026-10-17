@@ -207,7 +207,10 @@ pub(crate) unsafe fn release_owned(owner: usize) {
 }
 
 /// Live mappings, rather than cumulative restart allocations.
-#[cfg(feature = "hal-driver-lifecycle-test")]
+#[cfg(any(
+    feature = "hal-driver-lifecycle-test",
+    feature = "hal-xhci-lifecycle-test"
+))]
 pub(crate) fn live_mappings() -> usize {
     ARENA.lock().live()
 }

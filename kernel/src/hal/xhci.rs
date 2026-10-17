@@ -7,9 +7,16 @@
 //!
 //! The live transport retains bounded rings and direct-root USB2 boot-HID devices. It polls
 //! completions in idle context; disconnect disables the slot before its DMA pages are freed.
-//! Hubs, SuperSpeed devices, multiple host controllers and framework/power integration remain open.
+//! Each framework handle owns its controller/MMIO/DMA; polling excludes lifecycle callbacks.
+//! Hubs, SuperSpeed, interrupt delivery and power integration remain open.
 
 mod live;
+#[cfg(feature = "hal-xhci-lifecycle-test")]
+mod tests;
+use super::driver_start;
+use crate::sync::IrqMutex;
+use core::fmt::Write;
+use nolx_df_core::{DeviceId, Dispatch, Driver, Match};
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
 use nolx_pci_core::{Bdf, ConfigSpace};
@@ -42,6 +49,8 @@ const POLL_LIMIT: u32 = 1_000_000;
 pub enum Failure {
     /// No xHCI controller is on the PCI bus.
     NoController,
+    /// Framework checkout or a retained hardware owner refuses this operation.
+    Busy,
     /// A DMA allocation could not be obtained.
     Memory,
     /// Controller/device features exceed the supported direct-root boot-HID profile.
@@ -70,25 +79,132 @@ impl From<mmio::Failure> for Failure {
     }
 }
 
-/// Probe for an xHCI controller, bring it to a halted, reset state, and report its root ports.
-/// Failure is reported on the console and does not stop boot.
+struct Binding {
+    bdf: Option<Bdf>,
+    region: Option<Region>,
+    log: driver_start::Log,
+}
+static BINDINGS: [IrqMutex<Binding>; driver_start::DEVICES] = [const {
+    IrqMutex::new(Binding {
+        bdf: None,
+        region: None,
+        log: driver_start::Log::new(),
+    })
+}; driver_start::DEVICES];
+static MATCHES: &[Match] = &[Match::by_class(
+    XHCI_CLASS,
+    XHCI_SUBCLASS,
+    Some(XHCI_PROG_IF),
+)];
+
+/// Bind every discovered controller once; a failed/quarantined identity is never rebound.
 pub fn probe(console: &mut dyn HalConsole) {
-    if live::active() {
-        let _ = writeln!(console, "xhci: duplicate active probe refused");
-        return;
+    let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
+    let mut found = false;
+    for info in inventory.as_slice().iter().filter(|info| {
+        info.class == XHCI_CLASS && info.subclass == XHCI_SUBCLASS && info.prog_if == XHCI_PROG_IF
+    }) {
+        found = true;
+        if BINDINGS
+            .iter()
+            .any(|binding| binding.lock().bdf == Some(info.bdf))
+        {
+            let _ = writeln!(console, "xhci: duplicate PCI binding refused");
+            continue;
+        }
+        let driver = Driver {
+            name: "xhci",
+            matches: MATCHES,
+            ops: Dispatch {
+                probe: |_| true,
+                start: start_device,
+                stop: stop_device,
+            },
+        };
+        let result = driver_start::attach_prepared(
+            driver,
+            DeviceId {
+                vendor: info.vendor_id,
+                device: info.device_id,
+                class: info.class,
+                subclass: info.subclass,
+                prog_if: info.prog_if,
+            },
+            |dev| {
+                if BINDINGS
+                    .iter()
+                    .any(|binding| binding.lock().bdf == Some(info.bdf))
+                {
+                    return Err(nolx_df_core::Error::Busy);
+                }
+                BINDINGS[dev].lock().bdf = Some(info.bdf);
+                Ok(())
+            },
+        );
+        for (dev, binding) in BINDINGS.iter().enumerate() {
+            let binding = binding.lock();
+            if binding.bdf == Some(info.bdf) {
+                binding.log.replay(console);
+                let _ = writeln!(
+                    console,
+                    "xhci: instance {dev} PCI {:?}, framework {result:?}",
+                    info.bdf
+                );
+            }
+        }
     }
-    if let Err(failure) = bring_up(console) {
-        let _ = writeln!(console, "xhci: not brought up: {failure:?}");
+    if !found {
+        let _ = writeln!(console, "xhci: no controller on the PCI bus");
     }
 }
 
-fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
-    let bdf = find_controller().ok_or(Failure::NoController)?;
+fn start_device(dev: usize) -> bool {
+    let mut log = driver_start::Log::new();
+    #[cfg(feature = "hal-xhci-start-fault-test")]
+    let baseline = (super::dma::live_pages(), mmio::live_mappings());
+    let result = bring_up(dev, &mut log);
+    if let Err(error) = &result {
+        let _ = writeln!(log, "xhci: not brought up: {error:?}");
+        #[cfg(feature = "hal-xhci-start-fault-test")]
+        if matches!(error, Failure::Timeout("injected post-run start failure")) {
+            assert!(
+                live::active(dev),
+                "exposed host lost ownership on start failure"
+            );
+            assert_eq!(
+                (super::dma::live_pages(), mmio::live_mappings()),
+                (baseline.0 + 3, baseline.1 + 1)
+            );
+        }
+        if stop_device(dev) {
+            // SAFETY: rollback proved halt/reset and PCI DMA exclusion, detached all host state;
+            // the framework remains checked out throughout the failed-start callback.
+            unsafe {
+                mmio::release_owned(dev);
+            }
+            let _ = writeln!(log, "xhci: failed-start rollback reclaimed MMIO/DMA");
+            #[cfg(feature = "hal-xhci-start-fault-test")]
+            assert_eq!((super::dma::live_pages(), mmio::live_mappings()), baseline);
+        } else {
+            let _ = writeln!(log, "xhci: failed-start quarantine retains MMIO/DMA");
+        }
+    }
+    BINDINGS[dev].lock().log = log;
+    result.is_ok()
+}
+
+fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<(), Failure> {
+    if live::active(dev) || BINDINGS[dev].lock().region.is_some() {
+        return Err(Failure::Busy);
+    }
+    let bdf = BINDINGS[dev].lock().bdf.ok_or(Failure::NoController)?;
     enable_device(bdf);
     let bars = nolx_pci_core::read_bars(&mut ConfigAccess, bdf);
     let base =
         nolx_pci_core::assigned_memory_base(bars.slots[BAR0_SLOT]).ok_or(Failure::BarNotMemory)?;
-    let regs = mmio::map(base, REGISTERS_BYTES)?;
+    let regs = mmio::map_owned(dev, base, REGISTERS_BYTES)?;
+    // Retain the mapping before any subsequent fallible operation.
+    BINDINGS[dev].lock().region = Some(regs);
     let caplength = regs.read8(usb::CAP_CAPLENGTH)?;
     let version = regs.read16(CAP_HCIVERSION)?;
     let hcsparams1 = regs.read32(usb::CAP_HCSPARAMS1)?;
@@ -109,6 +225,7 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     let _ = writeln!(console, "xhci: controller reset, halted");
     report_ports(console, &regs, caplength, ports)?;
     live::start(
+        dev,
         u32::from(bdf.bus) << 16 | u32::from(bdf.device) << 8 | u32::from(bdf.function),
         regs,
         op,
@@ -181,18 +298,47 @@ fn enable_device(bdf: Bdf) {
     );
 }
 
-/// The first xHCI controller on the bus, if there is one.
-fn find_controller() -> Option<Bdf> {
-    let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
-    inventory
-        .as_slice()
-        .iter()
-        .find(|info| {
-            info.class == XHCI_CLASS
-                && info.subclass == XHCI_SUBCLASS
-                && info.prog_if == XHCI_PROG_IF
-        })
-        .map(|info| info.bdf)
+fn stop_device(dev: usize) -> bool {
+    let (bdf, region) = {
+        let binding = BINDINGS[dev].lock();
+        (binding.bdf, binding.region)
+    };
+    let Some(bdf) = bdf else {
+        return false;
+    };
+    // Retire producers even on failed quiescence, but never free hardware-visible storage then.
+    live::retire(dev);
+    #[cfg(feature = "hal-xhci-stop-fault-test")]
+    if tests::inject_stop(dev) {
+        return false;
+    }
+    if let Some(regs) = region {
+        let quiesced = (|| {
+            let op = u64::from(regs.read8(usb::CAP_CAPLENGTH)?);
+            halt(&regs, op)?;
+            reset(&regs, op)
+        })();
+        if quiesced.is_err() {
+            return false;
+        }
+    }
+    let command = ConfigAccess.read_u32(bdf, PCI_COMMAND) & 0xffff;
+    ConfigAccess.write_u32(bdf, PCI_COMMAND, command & !COMMAND_BUS_MASTER);
+    if ConfigAccess.read_u32(bdf, PCI_COMMAND) & COMMAND_BUS_MASTER != 0 {
+        return false;
+    }
+    // SAFETY: halt/reset acknowledged (or no register/DMA exposure ever occurred), PCI bus
+    // mastering reads disabled, framework checkout excludes polling/submission, producers retired.
+    unsafe {
+        live::release_host(dev);
+    }
+    BINDINGS[dev].lock().region = None;
+    true
+}
+
+/// Failed callbacks may quarantine DMA. Preserve their framework record until recovery exists.
+pub(crate) fn removable(dev: usize) -> bool {
+    BINDINGS[dev].lock().region.is_none() && !live::active(dev)
 }
 
 /// Poll `ready` until it returns true, at most [`POLL_LIMIT`] times.
@@ -211,5 +357,35 @@ fn poll(
 
 /// Poll native USB HID completions and consume source-tagged input in idle context.
 pub fn poll_events(console: &mut dyn HalConsole) {
-    live::poll_events(console);
+    if let Ok(started) = driver_start::started() {
+        for (dev, name) in started.into_iter().flatten() {
+            if name == "xhci" {
+                let _ = poll_on(dev, console);
+            }
+        }
+    }
+}
+
+/// Stopped/stale/wrong-driver handles never touch registers.
+pub fn poll_on(dev: usize, console: &mut dyn HalConsole) -> Result<(), Failure> {
+    driver_start::device_operation_handle(
+        dev,
+        "xhci",
+        || {
+            live::poll_events(dev, console);
+            Ok(())
+        },
+        |error| {
+            if error == nolx_df_core::Error::Busy {
+                Failure::Busy
+            } else {
+                Failure::NoController
+            }
+        },
+    )
+}
+#[cfg(feature = "hal-xhci-lifecycle-test")]
+/// Exercise real two-controller input and checked lifecycle from the idle test path.
+pub fn lifecycle_selftest(console: &mut dyn HalConsole) {
+    tests::step(console);
 }

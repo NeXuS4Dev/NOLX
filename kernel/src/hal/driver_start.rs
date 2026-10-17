@@ -136,7 +136,12 @@ pub fn stop(dev: usize) -> Result<(), Error> {
 }
 /// Remove a non-running device. Running devices must first successfully stop.
 pub fn remove(dev: usize) -> Result<(), Error> {
-    with_registry(|registry| registry.remove(dev))
+    with_registry(|registry| {
+        if registry.driver_name(dev) == Ok("xhci") && !super::xhci::removable(dev) {
+            return Err(Error::Busy);
+        }
+        registry.remove(dev)
+    })
 }
 
 /// A stable snapshot of started handles and their driver names, without retaining a registry lock.
@@ -230,6 +235,10 @@ pub fn lifecycle_selftest(console: &mut dyn HalConsole) {
         let mut sector = [0; 512];
         state(dev) == Err(Error::Busy)
             && super::blockdev::read_sectors(0, 0, &mut sector) == Err(nolxfs::DevError::Io(16))
+            && matches!(
+                super::xhci::poll_on(0, &mut Log::new()),
+                Err(super::xhci::Failure::Busy)
+            )
             && matches!(
                 super::virtio_net::send_frame_on(0, &[0; 60]),
                 Err(super::virtio_net::Failure::Busy)

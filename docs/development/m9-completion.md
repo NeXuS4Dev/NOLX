@@ -51,7 +51,8 @@ M9 to the already implemented boot probes. Check items only with executable evid
 - [x] PS/2 controller initialization, keyboard and mouse IRQ paths.
 - [ ] xHCI command/event/transfer rings, slots, addressing and device enumeration.
       Direct-root USB2 boot-HID rings/slots/addressing and hotplug are now exercised on PC/Q35;
-      hubs, SuperSpeed, multiple controllers and full framework lifecycle remain open.
+      two controllers now have framework stop/restart/removal and failure-quarantine checks;
+      hubs, SuperSpeed, interrupt delivery and full failed-controller recovery remain open.
 - [x] HID boot keyboard/mouse reports delivered to bounded kernel input event objects,
       with independent subscriptions, source/device identity, state resync and stale-handle refusal.
 - [ ] Executive/process-handle, security/namespace and waitable/user-facing input bindings;
@@ -60,7 +61,7 @@ M9 to the already implemented boot probes. Check items only with executable evid
       resources or leave DMA active after device removal.
 - [x] Inject PS/2 keyboard/mouse events under QEMU and assert delivered event contents.
       USB injection and bounded kernel-object consumers now also have PC/Q35 hardware checks;
-      general USB, Executive bindings and controller lifecycle remain open.
+      general USB, Executive bindings and full failed-controller recovery remain open.
 
 ## Networking
 
@@ -742,3 +743,49 @@ default and observer PS/2. Host/observer-native Clippy, formatting, the unchange
 audit (zero missing invariants), all 21 default image checks and the 354-assertion conformance
 database passed. Default and observer verifiers use distinct socket/log names so their evidence
 cannot accidentally come from another running VM.
+
+
+## Persistent xHCI controller lifecycle checkpoint (2026-10-17)
+
+Supersedes the preceding single-host/non-framework limitations, not the general USB or power gates.
+Every matching segment-zero PCI xHCI function is now offered to the persistent registry exactly once.
+Each handle retains its own BDF, log, owned MMIO window, command/event/DCBAA pages, root slots and
+input producers. Idle polling admits only the exact Started xHCI handle under framework checkout;
+callbacks run outside the framework IRQ lock and reentrant public polling returns Busy. Duplicate
+probe and removed/failed identities cannot create a second owner. This remains the bounded direct-root
+USB2 boot-HID profile (eight slots/sixteen ports per host, shared input/framework capacity limits),
+not arbitrary PCI segments, hubs, composites, SuperSpeed or interrupt-driven USB.
+
+Stop first retires input producers, giving readers neutral state and EOF independently of DMA.
+Only acknowledged halt/reset plus PCI bus-master-disable readback permit releasing device and host
+DMA. Successful framework stop then releases owned MMIO; old Region generations stay invalid after
+restart. Host metadata is installed **before** exposing the first DMA pointer, so a post-run start
+error can execute the same checked rollback. Unproven quiescence leaves all DMA/MMIO owned and pinned;
+failed-handle polling/start/removal refuse. There is deliberately no force-free or automatic recovery
+from quarantine. Removal of a safely rolled-back failed record is allowed.
+
+`scripts/check-xhci-lifecycle.py` runs three images on **both PC and Q35**, each with two physical PCI
+controllers: a keyboard on one and a mouse on its peer. The healthy image performs three full restarts,
+requires distinct real key presses after every restart, and gates progress on new mouse motion while
+the keyboard host is stopped. It verifies persistent peer input identity, neutral keyboard/pointer EOF,
+stale producer/reader/open/MMIO rejection, duplicate probes, bus-master readback, DMA/MMIO baselines,
+allocator audits and final removal. DMA follows **16 -> 8 -> 16** for three cycles, then **16 -> 8 -> 0**.
+The start-fault image injects failure after Run with three exposed host pages and proves retained owner
+metadata, rollback to the pre-start DMA/MMIO baseline, live peer input and safe failed-record removal.
+The stop-fault image withholds quiescence proof on the final peer: **eight pages and its MMIO stay
+pinned with PCI bus mastering still enabled**, input becomes neutral/EOF and removal is refused.
+This last fixture intentionally does not claim reclamation or shutdown safety.
+
+All six new native fixtures passed locally with QEMU 11.0.2. CI includes these modes in the USB job;
+the exact revision CI result is recorded separately. Existing default/independent-observer USB and
+PS/2 paths remain regression requirements. **M9 is still incomplete**: Executive/user input bindings,
+general USB/interrupt delivery, quarantine recovery, global power quiescence/S3, general AML/PCI roots
+and nonzero-segment binding remain open. No PR is created by this checkpoint.
+
+
+Checkpoint verification also passed **785 host tests** in each overlapping suite, host and native
+feature Clippy, all six default/observer USB/PS2 regressions, and seven storage/network framework
+lifecycle fixtures including combined PC/Q35 and recursive USB-poll Busy refusal. Formatting,
+**254 unsafe blocks / zero missing invariants**, boot/layout/generated-file checks, **21 default
+image checks** and **357 conformance assertions** passed. The verifier waits for complete terminal
+messages (not partially written serial prefixes) before evaluating final ownership evidence.

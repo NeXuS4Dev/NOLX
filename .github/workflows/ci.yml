@@ -712,7 +712,7 @@ jobs:
         if: failure()
 
   usb-hid:
-    name: Native USB HID input and root-port reclamation
+    name: Native USB HID input, multi-controller lifecycle and DMA safety
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -735,10 +735,16 @@ jobs:
         run: python3 scripts/check-usb-input.py --objects 2>&1 | tee -a /tmp/job.log
       - name: Verify PS/2 through the same input-object API
         run: python3 scripts/check-ps2-input.py --objects 2>&1 | tee -a /tmp/job.log
+      - name: Verify two-controller restart, post-run rollback and failed-stop quarantine
+        run: |
+          for mode in lifecycle start-fault stop-fault; do
+            make kernel KERNEL_FEATURES=hal-xhci-${mode}-test 2>&1 | tee -a /tmp/job.log
+            python3 scripts/check-xhci-lifecycle.py --mode "$mode" 2>&1 | tee -a /tmp/job.log
+          done
       - name: Annotate USB serial logs on failure
         if: failure()
         run: |
-          for log in build/input-usb-*.log; do
+          for log in build/input-usb-*.log build/input-xhci-lifecycle-*.log; do
             tr -cd '\11\12\40-\176' < "$log" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
           done
       - uses: ./.github/actions/report-failure
