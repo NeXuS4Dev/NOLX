@@ -57,6 +57,7 @@ def boot(qemu, kernel, names, machine="pc"):
                 process.wait()
     text = log.read_text(errors='replace')
     assert complete in text, f'{log}\n{text}'
+    assert 'driver: unaudited failed-driver recovery refused without stop retry' in text, text
     if machine == 'q35':
         assert 'pci: configuration transport=ECAM segment 0' in text, text
         assert re.search(r'pci: ECAM driver accesses: [1-9][0-9]* reads, [1-9][0-9]* writes', text), text

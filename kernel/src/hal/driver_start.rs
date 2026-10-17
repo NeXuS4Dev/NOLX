@@ -134,6 +134,26 @@ pub fn stop(dev: usize) -> Result<(), Error> {
         Ok(())
     })
 }
+/// Retry failed-controller quiescence, without restarting it or reopening shutdown admission.
+/// Only xHCI has audited partial-start/failed-stop ownership; other native drivers refuse.
+pub fn recover(dev: usize) -> Result<(), Error> {
+    with_registry(|registry| {
+        if registry.frozen() {
+            return Err(Error::Busy);
+        }
+        if registry.driver_name(dev)? != "xhci" {
+            return Err(Error::BadState);
+        }
+        registry.recover(dev)?;
+        // SAFETY: the original xHCI stop callback proved halt/reset and disabled PCI DMA,
+        // detached all host/input state and released owned DMA; registry checkout excludes I/O.
+        unsafe {
+            crate::mm::mmio::release_owned(dev);
+        }
+        Ok(())
+    })
+}
+
 /// Remove a non-running device. Running devices must first successfully stop.
 pub fn remove(dev: usize) -> Result<(), Error> {
     with_registry(|registry| {
@@ -275,6 +295,7 @@ pub fn lifecycle_selftest(console: &mut dyn HalConsole) {
     fn reenter(dev: usize) -> bool {
         let mut sector = [0; 512];
         state(dev) == Err(Error::Busy)
+            && recover(dev) == Err(Error::Busy)
             && super::blockdev::read_sectors(0, 0, &mut sector) == Err(nolxfs::DevError::Io(16))
             && matches!(
                 super::xhci::poll_on(0, &mut Log::new()),
@@ -289,6 +310,8 @@ pub fn lifecycle_selftest(console: &mut dyn HalConsole) {
                 Err(super::e1000::Failure::Busy)
             )
     }
+    static UNSUPPORTED_STOPS: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
     static RULES: &[Match] = &[Match::by_ids(0xffff, 0xfffe)];
     let synthetic = attach(
         Driver {
@@ -297,7 +320,14 @@ pub fn lifecycle_selftest(console: &mut dyn HalConsole) {
             ops: Dispatch {
                 probe: |_| true,
                 start: reenter,
-                stop: |_| true,
+                stop: |_| {
+                    assert_eq!(
+                        UNSUPPORTED_STOPS.fetch_add(1, core::sync::atomic::Ordering::AcqRel),
+                        0,
+                        "unsupported recovery retried an unaudited stop"
+                    );
+                    false
+                },
             },
         },
         DeviceId {
@@ -309,8 +339,18 @@ pub fn lifecycle_selftest(console: &mut dyn HalConsole) {
         },
     )
     .expect("framework reentry exclusion failed");
-    stop(synthetic).unwrap();
+    assert_eq!(stop(synthetic), Err(Error::OpFailed));
+    assert_eq!(state(synthetic), Ok(State::Failed));
+    assert_eq!(recover(synthetic), Err(Error::BadState));
+    assert_eq!(
+        UNSUPPORTED_STOPS.load(core::sync::atomic::Ordering::Acquire),
+        1
+    );
     remove(synthetic).unwrap();
+    let _ = writeln!(
+        console,
+        "driver: unaudited failed-driver recovery refused without stop retry"
+    );
     let _ = writeln!(
         console,
         "driver: recursive framework and public I/O callbacks refused with Busy"

@@ -11,6 +11,8 @@
 //! Hubs, SuperSpeed, interrupt delivery and power integration remain open.
 
 mod live;
+#[cfg(feature = "hal-xhci-recovery-test")]
+mod recovery;
 #[cfg(feature = "hal-xhci-lifecycle-test")]
 mod tests;
 use super::driver_start;
@@ -308,6 +310,10 @@ fn stop_device(dev: usize) -> bool {
     };
     // Retire producers even on failed quiescence, but never free hardware-visible storage then.
     live::retire(dev);
+    #[cfg(feature = "hal-xhci-recovery-test")]
+    if recovery::refuse_stop(dev) {
+        return false;
+    }
     #[cfg(feature = "hal-xhci-stop-fault-test")]
     if tests::inject_stop(dev) {
         return false;
@@ -340,7 +346,7 @@ fn stop_device(dev: usize) -> bool {
     true
 }
 
-/// Failed callbacks may quarantine DMA. Preserve their framework record until recovery exists.
+/// Failed callbacks may quarantine DMA. Preserve their record until checked recovery succeeds.
 pub(crate) fn removable(dev: usize) -> bool {
     BINDINGS[dev].lock().region.is_none() && !live::active(dev)
 }
@@ -392,4 +398,10 @@ pub fn poll_on(dev: usize, console: &mut dyn HalConsole) -> Result<(), Failure> 
 /// Exercise real two-controller input and checked lifecycle from the idle test path.
 pub fn lifecycle_selftest(console: &mut dyn HalConsole) {
     tests::step(console);
+}
+
+/// Exercise repeated failed quiescence and successful recovery with real two-controller input.
+#[cfg(feature = "hal-xhci-recovery-test")]
+pub fn recovery_selftest(console: &mut dyn HalConsole) {
+    recovery::step(console);
 }

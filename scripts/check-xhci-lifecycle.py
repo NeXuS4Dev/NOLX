@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Real input across two xHCI instances and three framework restarts (PC and Q35).
 
-Requires hal-xhci-lifecycle-test. Keyboard and mouse deliberately use different PCI
-controllers; a fresh peer mouse report gates every restart, not a boot-only marker.
+Each mode requires its hal-xhci-<mode>-test image (default mode: lifecycle).
+Keyboard and mouse deliberately use different PCI controllers; fresh peer input
+gates restart/recovery, not a boot-only marker.
 """
 import argparse
 import json
@@ -39,7 +40,8 @@ def boot(qemu, kernel, machine, mode):
                     assert process.poll() is None, text
                     time.sleep(.005)
                 raise AssertionError(f'missing {marker}:\n{log.read_text(errors="replace")}')
-            wait('xhci-test: start fault armed peer=' if mode == 'start-fault' else 'xhci-test: armed cycle=0')
+            initial = {'start-fault': 'xhci-test: start fault armed peer=', 'recovery': 'xhci-recovery: armed startup quarantine'}
+            wait(initial.get(mode, 'xhci-test: armed cycle=0'))
             connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             connection.settimeout(5)
             connection.connect(str(qmp))
@@ -60,6 +62,26 @@ def boot(qemu, kernel, machine, mode):
                 execute('input-send-event', {'events': [{'type': 'key', 'data': {
                     'down': down, 'key': {'type': 'qcode', 'data': name}}}]})
 
+            if mode == 'recovery':
+                def mouse(dx):
+                    execute('input-send-event', {'events': [
+                        {'type': 'rel', 'data': {'axis': 'x', 'value': dx}},
+                        {'type': 'btn', 'data': {'down': True, 'button': 'left'}}]})
+                mouse(7)
+                wait('xhci-recovery: armed first restarted keyboard')
+                key('a', True)
+                wait('xhci-recovery: armed stop quarantine')
+                key('a', False)
+                mouse(8)
+                wait('xhci-recovery: armed second restarted keyboard')
+                key('b', True)
+                text = wait('removal and shutdown freeze; DMA 0')
+                assert 'injected quarantined post-run failure' in text, text
+                assert 'failed-start quarantine retains MMIO/DMA' in text, text
+                assert 'repeated failed cleanup retains 11 DMA pages/MMIO' in text, text
+                assert 'repeated cleanup failure retain 16 DMA pages/MMIO' in text, text
+                print(f'PASS: xhci-recovery-{machine}: failed start/stop, repeated cleanup refusal pins DMA/MMIO, checked recovery and fresh hardware input, live peer, neutral EOF/stale identities, final DMA 0 and frozen-shutdown recovery refusal', flush=True)
+                return
             if mode == 'start-fault':
                 execute('input-send-event', {'events': [
                     {'type': 'rel', 'data': {'axis': 'x', 'value': 7}},
@@ -105,7 +127,7 @@ def boot(qemu, kernel, machine, mode):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kernel', type=Path, default=ROOT / 'build' / 'nolx.elf')
-    parser.add_argument('--mode', choices=('lifecycle', 'start-fault', 'stop-fault'), default='lifecycle')
+    parser.add_argument('--mode', choices=('lifecycle', 'start-fault', 'stop-fault', 'recovery'), default='lifecycle')
     args = parser.parse_args()
     for machine in ('pc', 'q35'):
         boot(os.environ.get('QEMU', 'qemu-system-x86_64'), args.kernel.resolve(), machine, args.mode)

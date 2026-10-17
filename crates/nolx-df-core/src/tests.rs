@@ -124,7 +124,7 @@ fn the_lifecycle_moves_through_start_stop_and_start_again() {
 }
 
 #[test]
-fn a_failed_start_marks_the_device_failed_and_only_allows_removal() {
+fn a_failed_start_requires_checked_recovery_before_restart() {
     let mut reg: Registry<2, 2> = Registry::new();
     let broken = Driver {
         name: "broken",
@@ -309,4 +309,97 @@ fn empty_shutdown_is_valid_but_not_reusable() {
     let mut reg: Registry<0, 0> = Registry::new();
     assert_eq!(reg.quiesce(|_, _| panic!(), |_| panic!()), Ok(0));
     assert_eq!(reg.quiesce(|_, _| panic!(), |_| panic!()), Err(Error::Busy));
+}
+
+#[test]
+fn failed_start_recovery_calls_only_original_stop_and_never_starts_or_touches_peer() {
+    static CLEANED: AtomicUsize = AtomicUsize::new(usize::MAX);
+    let mut reg: Registry<2, 2> = Registry::new();
+    reg.add_driver(Driver {
+        name: "failed-start",
+        matches: NIC_RULES,
+        ops: Dispatch {
+            probe: accept,
+            start: fail,
+            stop: |d| {
+                CLEANED.store(d, Ordering::SeqCst);
+                true
+            },
+        },
+    })
+    .unwrap();
+    reg.add_driver(Driver {
+        name: "peer",
+        matches: STORAGE_RULES,
+        ops: Dispatch {
+            probe: accept,
+            start: ok,
+            stop: |_| panic!("recovery touched peer"),
+        },
+    })
+    .unwrap();
+    let dev = reg.add_device(NIC).unwrap();
+    let peer = reg.add_device(STORAGE).unwrap();
+    reg.bind(dev).unwrap();
+    reg.bind(peer).unwrap();
+    reg.start(peer).unwrap();
+    assert_eq!(reg.start(dev), Err(Error::OpFailed));
+    assert_eq!(reg.recover(dev), Ok(()));
+    assert_eq!(CLEANED.load(Ordering::SeqCst), dev);
+    assert_eq!(reg.state(dev), Ok(State::Stopped));
+    assert_eq!(reg.driver_name(dev), Ok("failed-start"));
+    assert_eq!(reg.state(peer), Ok(State::Started));
+    // No implicit start: this driver's start still fails on explicit retry.
+    assert_eq!(reg.start(dev), Err(Error::OpFailed));
+}
+#[test]
+fn repeated_recovery_failure_preserves_failed_until_checked_stop_succeeds() {
+    use core::sync::atomic::AtomicBool;
+    static REFUSE: AtomicBool = AtomicBool::new(true);
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    let mut reg: Registry<1, 1> = Registry::new();
+    let mut driver = good_driver(NIC_RULES);
+    driver.ops.stop = |_| {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        !REFUSE.load(Ordering::SeqCst)
+    };
+    reg.add_driver(driver).unwrap();
+    let dev = reg.add_device(NIC).unwrap();
+    reg.bind(dev).unwrap();
+    reg.start(dev).unwrap();
+    assert_eq!(reg.stop(dev), Err(Error::OpFailed));
+    for _ in 0..3 {
+        assert_eq!(reg.recover(dev), Err(Error::OpFailed));
+        assert_eq!(reg.state(dev), Ok(State::Failed));
+    }
+    REFUSE.store(false, Ordering::SeqCst);
+    reg.recover(dev).unwrap();
+    assert_eq!(CALLS.load(Ordering::SeqCst), 5);
+    assert_eq!(reg.state(dev), Ok(State::Stopped));
+    reg.start(dev).unwrap();
+    assert_eq!(reg.state(dev), Ok(State::Started));
+}
+#[test]
+fn recovery_requires_failed_exact_handle_and_cannot_thaw_failed_shutdown() {
+    let mut reg: Registry<1, 1> = Registry::new();
+    assert_eq!(reg.recover(usize::MAX), Err(Error::UnknownDevice));
+    let dev = reg.add_device(NIC).unwrap();
+    assert_eq!(reg.recover(dev), Err(Error::BadState));
+    reg.add_driver(good_driver(NIC_RULES)).unwrap();
+    reg.bind(dev).unwrap();
+    assert_eq!(reg.recover(dev), Err(Error::BadState));
+    reg.start(dev).unwrap();
+    assert_eq!(reg.recover(dev), Err(Error::BadState));
+    reg.stop(dev).unwrap();
+    assert_eq!(reg.recover(dev), Err(Error::BadState));
+    reg.remove(dev).unwrap();
+    assert_eq!(reg.recover(dev), Err(Error::BadState));
+    let mut failed = shutdown_registry(fail);
+    assert_eq!(failed.stop(1), Err(Error::OpFailed));
+    assert_eq!(
+        failed.quiesce(|_, _| panic!(), |_| panic!()),
+        Err(Error::BadState)
+    );
+    assert_eq!(failed.recover(1), Err(Error::Busy));
+    assert_eq!(failed.state(1), Ok(State::Failed));
 }

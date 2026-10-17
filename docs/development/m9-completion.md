@@ -52,7 +52,8 @@ M9 to the already implemented boot probes. Check items only with executable evid
 - [ ] xHCI command/event/transfer rings, slots, addressing and device enumeration.
       Direct-root USB2 boot-HID rings/slots/addressing and hotplug are now exercised on PC/Q35;
       two controllers now have framework stop/restart/removal and failure-quarantine checks;
-      hubs, SuperSpeed, interrupt delivery and full failed-controller recovery remain open.
+      checked xHCI failed-start/failed-stop recovery is now exercised with repeated refusal;
+      hubs, SuperSpeed, interrupt delivery and general device/endpoint recovery remain open.
 - [x] HID boot keyboard/mouse reports delivered to bounded kernel input event objects,
       with independent subscriptions, source/device identity, state resync and stale-handle refusal.
 - [ ] Executive/process-handle, security/namespace and waitable/user-facing input bindings;
@@ -61,7 +62,7 @@ M9 to the already implemented boot probes. Check items only with executable evid
       resources or leave DMA active after device removal.
 - [x] Inject PS/2 keyboard/mouse events under QEMU and assert delivered event contents.
       USB injection and bounded kernel-object consumers now also have PC/Q35 hardware checks;
-      general USB, Executive bindings and full failed-controller recovery remain open.
+      general USB, Executive bindings and general device/endpoint recovery remain open.
 
 ## Networking
 
@@ -845,3 +846,53 @@ Final local hygiene also passed host/native Clippy, formatting, all **256 unsafe
 zero missing invariants**, **21 default image checks**, boot/layout/generated-file checks and
 **361 conformance assertions**. Existing default USB PC/Q35 and PS/2 input, seven storage/network
 lifecycle fixtures, and the original three primitive-only S5 fixtures passed as regressions.
+
+
+## Checked xHCI quarantine recovery checkpoint (2026-10-17)
+
+This supersedes the earlier statement that quarantined xHCI records have no explicit recovery.
+`Registry::recover` admits **only Failed** records while admission is open and invokes that record's
+original stop callback, never its start callback. Failure preserves Failed; success moves to Stopped
+without starting hardware. Explicit start is a separate operation. Frozen shutdown admission always
+returns Busy, including after failed shutdown; recovery cannot thaw it. Diagnostics/driver identity
+remain stable. Platform admission is deliberately restricted to **xHCI**: the other native drivers'
+partial-start cleanup is not yet audited and their recovery requests refuse.
+
+The native wrapper holds framework checkout across the retry and MMIO release. xHCI reuses its
+existing halt/reset, PCI bus-master-disable/readback and unique DMA-owner teardown. If any proof is
+missing, host metadata, pages and mapping stay owned. Only successful callback completion permits
+MMIO release. Duplicate PCI probes cannot create a second owner while the record is quarantined.
+Old input objects remain retired/neutral/EOF through recovery; explicit restart allocates new object
+and MMIO generations. No implicit enumeration/restart, forced DMA free, or automatic retry is added.
+
+Three new portable framework tests cover original-driver/selected-handle dispatch, failed startup,
+repeated cleanup refusal, successful transition without implicit start, peer isolation, invalid states
+and recovery refusal after failed shutdown. **793 host tests** pass in each overlapping suite.
+`scripts/check-xhci-lifecycle.py --mode recovery` (`hal-xhci-recovery-test`) passed on local PC and
+Q35 with two physical controllers. Its dedicated hooks inject failure after Run, refuse startup
+rollback and one explicit recovery, and prove **11 DMA pages/MMIO stay pinned**. Real mouse input
+on the peer then gates successful cleanup and explicit restart, followed by a fresh actual key press.
+It next refuses stop and one cleanup retry with a held key: **16 pages/MMIO remain pinned**, the
+old reader drains neutral EOF, and old producer/reader/open tokens refuse. A new peer mouse report
+gates successful recovery and restart; a different real key proves the new producer works. Stale
+MMIO never revives, peer identity stays unchanged, final successful stops/removal yield **DMA 0**,
+and a final admission freeze refuses recovery. Allocator audits and DMA/MMIO baselines are checked.
+These are deliberate proof-refusal hooks, not a claim that a physically broken controller was repaired.
+
+The existing power-quiescence fixtures additionally assert recovery Busy for every handle after
+shutdown freeze, including the Failed xHCI in the injected stop-failure fixture. The reentrant
+framework test asserts recovery Busy during callbacks and proves an unaudited Failed synthetic
+driver cannot invoke its stop callback again through native recovery. CI includes the new recovery mode in the
+USB job; exact revision CI evidence is recorded separately. No PR is created.
+
+M9 remains incomplete. This is bounded controller recovery for polled direct-root USB2 boot HID,
+not general endpoint/stall recovery, hubs/composites/SuperSpeed, USB interrupts, other drivers'
+failed-start recovery, IRQ/vector resource reclamation, Executive/user input bindings, general
+AML/PCI segment support, higher-layer/SMP shutdown orchestration, D-state policy or S3 resume.
+
+
+Final local verification passed all **20 native fixtures** in this checkpoint: eight xHCI
+recovery/lifecycle/fault PC/Q35 boots, default USB PC/Q35 and PS/2, seven storage/network lifecycle
+boots and two failed-shutdown boots with recovery refusal. Host/native Clippy, formatting,
+**257 unsafe blocks / zero missing invariants**, **21 default image checks**, boot/layout/generated
+checks and **363 conformance assertions** passed. These local results are separate from CI evidence.

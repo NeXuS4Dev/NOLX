@@ -584,6 +584,10 @@ pub(super) fn start(
             return Err(Failure::Timeout("injected post-run start failure"));
         }
     }
+    #[cfg(feature = "hal-xhci-recovery-test")]
+    if super::recovery::fail_start(dev) {
+        return Err(Failure::Timeout("injected quarantined post-run failure"));
+    }
     host.command(0, 23, 0)?; // No-op completion proves command/event DMA before device enumeration.
     let _ = writeln!(
         console,

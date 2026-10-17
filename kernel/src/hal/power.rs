@@ -197,6 +197,7 @@ pub fn quiesce_selftest(console: &mut dyn HalConsole) {
     );
     for &(dev, _) in &handles {
         assert_eq!(driver_start::start(dev), Err(nolx_df_core::Error::Busy));
+        assert_eq!(driver_start::recover(dev), Err(nolx_df_core::Error::Busy));
     }
     assert!(matches!(
         super::virtio_net::send_frame_on(0, &[0; 60]),

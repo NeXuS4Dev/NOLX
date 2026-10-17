@@ -12,6 +12,7 @@
 //! Discovered --bind--> Bound --start--> Started --stop--> Stopped --start--> Started
 //!     |                  |                 \                  |
 //!     +-- (no driver) ---+                  +-- failure --> Failed
+//! Failed --recover (checked stop succeeds)--> Stopped
 //! any state except Started --remove--> Removed
 //! ```
 //!
@@ -126,7 +127,7 @@ pub enum State {
     Started,
     /// The driver stopped the device; it can be started again.
     Stopped,
-    /// A start or stop failed. The device can only be removed.
+    /// A start or stop failed. Checked recovery may quiesce it; otherwise resources stay owned.
     Failed,
     /// Removed from the framework. Terminal.
     Removed,
@@ -342,6 +343,27 @@ impl<const D: usize, const N: usize> Registry<D, N> {
         } else {
             Err(Error::OpFailed)
         }
+    }
+
+    /// Retry the original driver's stop callback for a failed device, never its start callback.
+    /// Success moves only this record to Stopped; failure preserves Failed and ownership. The
+    /// platform must admit this operation only for drivers whose stop handles partial startup.
+    /// It must release platform resources only after this operation returns success. Shutdown
+    /// freeze forbids recovery even after a failed shutdown; this is not an admission thaw.
+    pub fn recover(&mut self, dev: usize) -> Result<(), Error> {
+        if self.frozen {
+            return Err(Error::Busy);
+        }
+        let record = *self.device(dev)?;
+        if record.state != State::Failed {
+            return Err(Error::BadState);
+        }
+        let ops = self.ops_for(record.driver)?;
+        if !(ops.stop)(dev) {
+            return Err(Error::OpFailed);
+        }
+        self.device_mut(dev)?.state = State::Stopped;
+        Ok(())
     }
 
     /// Remove a device from the framework. A started device must be stopped first.

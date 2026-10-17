@@ -1087,3 +1087,11 @@ six-driver fixtures verify held USB input and PS2 reader retirement, DMA 38 -> 0
 bus-master readback, actual S5 and independently persisted disk data. Flush failure, stop failure
 and foreign active bus masters refuse S5 without reopening admission. General executive/cache/SMP
 shutdown orchestration, quarantine recovery and S3 save/resume remain open; M9 is still incomplete.
+
+
+M9 xHCI recovery checkpoint: Failed controllers can retry their original checked stop callback;
+only successful halt/reset/PCI DMA exclusion releases owned DMA/MMIO and moves to Stopped. Explicit
+restart then re-enumerates fresh input objects. PC/Q35 two-controller fixtures exercise repeated
+failed startup/stop cleanup, pinned ownership, live peer input and fresh keys after both recoveries.
+Recovery cannot reopen shutdown admission. Native recovery is deliberately admitted only for audited
+xHCI contexts; storage/network partial-start recovery and interrupt-resource reclamation remain open.
