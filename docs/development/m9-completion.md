@@ -253,13 +253,18 @@ and reservation. Unmapping is explicitly unsafe: all window/raw-pointer/IRQ user
 be retired; this is **not** a general concurrent-unmap or SMP TLB-shootdown implementation.
 
 Five new portable tests cover hole/guard reuse, stale/double release, owner/capacity isolation,
-shared-root visibility through a second address space, and failed-leaf cleanup. The six native
+shared-root visibility through a second address space, and failed-leaf cleanup. The seven native
 lifecycle fixtures now check MMIO mapping counts decrease at stop and return exactly at restart
 on every cycle. An after-boot selftest forces table-allocation OOM, checks reservation/frame
 rollback, fills then invalidates a real LAPIC alias, verifies stale read/write refusal after
 VA reuse, and checks shared-root identity. These checks passed locally on QEMU 11.0.2.
 
 Local regression: 700 tests passed per overlapping host command; host/feature kernel Clippy,
-formatting, all six lifecycle fixtures, all six native virtio-net configurations, 21 kernel-image
+formatting, all seven lifecycle fixtures, all six native virtio-net configurations, 21 kernel-image
 checks and unsafe audit (249 blocks, zero missing invariants) passed. Multi-controller binding,
 failure recovery, interrupt-route/vector reclamation and the other unchecked M9 gates remain open.
+
+The seventh fixture contains all five native driver kinds on Q35 (`sata=off` avoids the
+unused onboard AHCI controller being selected first). It asserts real ECAM reads/writes and
+then runs the same stop/restart/removal checks: the unowned platform configuration window
+survives while driver-owned windows are reclaimed. This also passed locally.

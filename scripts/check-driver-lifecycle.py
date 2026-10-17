@@ -15,10 +15,12 @@ ROOT = Path(__file__).resolve().parents[1]
 DRIVERS = {'virtio-blk': 2, 'ahci': 2, 'nvme': 6, 'e1000': 11, 'virtio-net': 4}
 
 
-def boot(qemu, kernel, names):
+def boot(qemu, kernel, names, machine="pc"):
     fixture = 'all' if len(names) > 1 else names[0]
+    if machine != 'pc':
+        fixture += '-' + machine
     log = ROOT / 'build' / f'lifecycle-{fixture}.log'
-    command = [qemu, '-kernel', str(kernel), '-m', '512M', '-nographic', '-no-reboot']
+    command = [qemu, '-machine', 'q35,sata=off' if machine == 'q35' else machine, '-kernel', str(kernel), '-m', '512M', '-nographic', '-no-reboot']
     disks = []
     for name in names:
         if name in ('virtio-blk', 'ahci', 'nvme'):
@@ -55,6 +57,9 @@ def boot(qemu, kernel, names):
                 process.wait()
     text = log.read_text(errors='replace')
     assert complete in text, f'{log}\n{text}'
+    if machine == 'q35':
+        assert 'pci: configuration transport=ECAM segment 0' in text, text
+        assert re.search(r'pci: ECAM driver accesses: [1-9][0-9]* reads, [1-9][0-9]* writes', text), text
     assert not re.search(r'PANIC|BUGCHECK|CPU exception', text), text
     assert 'in use 0 -> 0 bytes, integrity ok' in text, text
     assert 'NOLX: address space selftest:' in text, text
@@ -82,6 +87,7 @@ def main():
     for name in DRIVERS:
         boot(args.qemu, args.kernel.resolve(), [name])
     boot(args.qemu, args.kernel.resolve(), list(DRIVERS))
+    boot(args.qemu, args.kernel.resolve(), list(DRIVERS), "q35")
 
 
 if __name__ == '__main__':
