@@ -50,6 +50,8 @@ M9 to the already implemented boot probes. Check items only with executable evid
 
 - [x] PS/2 controller initialization, keyboard and mouse IRQ paths.
 - [ ] xHCI command/event/transfer rings, slots, addressing and device enumeration.
+      Direct-root USB2 boot-HID rings/slots/addressing and hotplug are now exercised on PC/Q35;
+      hubs, SuperSpeed, multiple controllers and full framework lifecycle remain open.
 - [ ] HID boot keyboard/mouse reports delivered to bounded input event objects.
 - [ ] USB disconnect/hotplug cleanup and endpoint/ring ownership; do not leak controller
       resources or leave DMA active after device removal.
@@ -656,3 +658,40 @@ tests execute the full legacy 128-row algorithm (including the slot-one SCI exce
 address/pin/link, and reject escaping/out-of-range targets and recursive package amplification.
 The corrected host suite has **770 tests**, including thirteen new INTx-related tests overall.
 The corrected revision must pass CI independently; the failed first run is not passing evidence.
+
+
+## Native direct-root USB boot-HID checkpoint (2026-10-17)
+
+This supersedes older statements that native xHCI stops at reset/port discovery. The default
+kernel now retains a bounded live polled controller and scans it in idle context. Command/event
+rings, DCBAA, 32/64-byte contexts, Enable/Address/Configure/Disable Slot, setup/data/status control
+TDs, descriptor reads, Set Configuration/Set Protocol and interrupt-IN TDs enumerate direct-root
+USB2 boot keyboards and relative mice. Actual configuration/interface/endpoint values are parsed;
+malformed, composite/alternate, unsupported speeds/classes and scratchpad-requiring hosts refuse.
+Transfer/event producer and consumer cycles wrap independently, with DMA cycle ownership checked
+before reads and published last on writes. Report completions are matched to slot, endpoint and
+pending TRB. A bounded source-tagged FIFO delivers input to the idle console consumer, as PS/2 does.
+
+On unplug, delivery/submission is retired, Disable Slot must complete before the DCBAA entry is
+cleared and all five device DMA pages are freed. Held keyboard keys and mouse buttons receive
+neutral events. Unsupported tablet enumeration also disables/releases its temporary slot. The
+three host ring/table pages intentionally remain owned while the controller stays live for hotplug.
+Allocations within a device/host page batch roll back before pointers are exposed. Failed commands
+or failed disable pin memory rather than freeing under DMA; comprehensive failure recovery is not
+claimed. This is not yet framework-bound USB controller stop/removal, interrupt-driven xHCI, a
+public input-object interface, multiple-host support, hubs, SuperSpeed or arbitrary HID reports.
+Those remaining gates are **not** closed, and M9 remains incomplete. No PR opened.
+
+`check-usb-input.py` passed on local PC and Q35 with QEMU 11.0.2. Each fixture checked **604 key
+transitions**, real mouse motion/buttons, two full transfer/event ring wraps, unsupported HID
+refusal, held-input unplug neutralization, reconnect and exact DMA ownership **13 -> 8 -> 3 -> 8 -> 3**
+(two active devices to host-only baseline, then a new keyboard and back). It requires USB-tagged
+output, not PS/2 input or enumeration logs alone. Three new host tests cover descriptor truncation,
+malformed selection and endpoint/interval bounds. CI includes a dedicated default-kernel USB job;
+its result must be verified separately from the local run.
+
+Local verification also passed **773 host tests** in each overlapping command, host/default-native
+Clippy with warnings denied, formatting, the 251-block unsafe audit (zero missing invariants), all
+21 native image checks and the 351-assertion conformance database. The final USB verifier rerun
+passed both VMs after fixing a test-only race: it now waits for the disconnect diagnostic as well
+as the preceding DMA counter before asserting the complete serial evidence.

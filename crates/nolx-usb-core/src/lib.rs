@@ -14,6 +14,7 @@
 #![deny(missing_docs)]
 
 use nolx_input_core::KeyEvent;
+pub mod device;
 
 // Capability registers, from the controller's base.
 

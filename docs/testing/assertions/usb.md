@@ -4,7 +4,7 @@ Source: NOLX M9 -- `ROADMAP.md` (Devices and drivers, Input: USB xHCI to HID) an
 The rules cover the xHCI capability and operational register offsets, the port status bits and their
 write-one-to-clear behaviour, the transfer request block layouts the controller reads and writes, and
 the HID boot protocol keyboard report, turned into the same key events the PS/2 decoder produces. The
-kernel maps the controller and moves the rings; that wiring is a later slice.
+kernel now moves bounded direct-root boot-HID rings; this is a polled subset, not a general USB stack.
 
 The xHCI register offsets and bit positions (CAPLENGTH, HCSPARAMS1, DBOFF, USBCMD, USBSTS, PORTSC and
 its change bits, port register sets at 0x400 with 0x10 stride), the TRB type numbers and cycle, toggle,
@@ -27,3 +27,7 @@ USB-007 | NOLX M9 xHCI controller bring-up: the controller is found by its class
 USB-008 | NOLX M9 xHCI root ports: each root port is reported with its connection state, and the summary counts the connected ports | tested-T2 | `.github/workflows/ci.yml` boot-smoke asserts `xhci: port N connected|empty` and `xhci: N of N ports connected`; CI attaches `qemu-xhci` with a `usb-kbd`; kernel/src/hal/xhci.rs
 
 USB-007 and USB-008 are `tested-T2`: the boot-smoke markers passed in CI (workflow 38621595620).
+
+USB-009 | NOLX M9 Boot-HID configuration selection: complete lengths, single interface/alternate-zero, boot keyboard/mouse protocol and one bounded interrupt-IN endpoint are required; malformed/ambiguous/unsupported descriptors refuse rather than guessing configuration/interface/endpoint values | tested-T1 | nolx-usb-core device::tests; three local Rust 1.88 tests passed, including every truncation and invalid endpoint/interval cases
+USB-010 | NOLX M9 Native direct-root boot HID: command/event rings, DCBAA and 32/64-byte contexts address slots, fetch descriptors, select configuration/boot protocol, configure interrupt-IN and deliver USB-tagged key/mouse events through a bounded FIFO; consumer cycle checked before DMA reads, producer cycle published last | tested-T2 | scripts/check-usb-input.py; default kernel PC/Q35 local QEMU checks passed, real QMP keyboard transitions/mouse motion/buttons; polled direct USB2 profile only, no hubs/SuperSpeed/multiple hosts/general input objects
+USB-011 | NOLX M9 USB ring and root-device ownership: more than 600 key completions wrap transfer/event cycles; unsupported non-boot HID disables its slot and returns five DMA pages; unplug neutralizes held input and disables slots before freeing buffers, reconnect returns to identical three-page live host baseline | tested-T2 | scripts/check-usb-input.py; PC/Q35 local checks passed, ownership baseline 13 -> 8 -> 3 -> 8 -> 3 pages; host rings intentionally remain allocated, failed-disable recovery and controller/framework stop remain open; revision CI pending

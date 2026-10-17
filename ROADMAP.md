@@ -1058,3 +1058,9 @@ on `7d58998` passed all sixteen jobs. PWR-016/PCI-025 are `tested-T1`, PCI-026 `
 757 host tests and eight real resource fixtures passed. Follow-up catalog-capacity/HID-type
 hardening adds the thirteenth AML fixture, rerun locally with all eight resource fixtures;
 its final CI evidence is reported separately. No general M9 completion is claimed.
+
+
+M9 USB checkpoint: direct-root USB2 boot keyboard/mouse enumeration and polled native input
+now have executable PC/Q35 ring-wrap and root-device disconnect/reconnect DMA checks
+(`scripts/check-usb-input.py`). General HID/input objects, hubs/SuperSpeed, multiple host
+controllers and framework/power/failure integration remain open; see the completion gate.

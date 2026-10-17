@@ -3,12 +3,13 @@
 //! Everything is polled, and failure is reported without stopping boot.
 //!
 //! The register offsets, the status bits, and the port arithmetic live in `nolx-usb-core`, where
-//! they are host-tested. This module supplies register access and bounded polling. Rings, slots,
-//! and device enumeration are later steps; this one stops once the ports have been reported.
+//! they are host-tested. This module supplies register access and bounded polling.
 //!
-//! CI runs QEMU with a `qemu-xhci` controller and a USB keyboard attached to it, so there is one
-//! connected port to report.
+//! The live transport retains bounded rings and direct-root USB2 boot-HID devices. It polls
+//! completions in idle context; disconnect disables the slot before its DMA pages are freed.
+//! Hubs, SuperSpeed devices, multiple host controllers and framework/power integration remain open.
 
+mod live;
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
 use nolx_pci_core::{Bdf, ConfigSpace};
@@ -41,6 +42,12 @@ const POLL_LIMIT: u32 = 1_000_000;
 pub enum Failure {
     /// No xHCI controller is on the PCI bus.
     NoController,
+    /// A DMA allocation could not be obtained.
+    Memory,
+    /// Controller/device features exceed the supported direct-root boot-HID profile.
+    Unsupported,
+    /// The controller returned an unsuccessful command or transfer completion.
+    Completion(u8),
     /// BAR 0 is not a memory BAR, so the controller registers cannot be reached.
     BarNotMemory,
     /// The MMIO window refused a mapping.
@@ -66,6 +73,10 @@ impl From<mmio::Failure> for Failure {
 /// Probe for an xHCI controller, bring it to a halted, reset state, and report its root ports.
 /// Failure is reported on the console and does not stop boot.
 pub fn probe(console: &mut dyn HalConsole) {
+    if live::active() {
+        let _ = writeln!(console, "xhci: duplicate active probe refused");
+        return;
+    }
     if let Err(failure) = bring_up(console) {
         let _ = writeln!(console, "xhci: not brought up: {failure:?}");
     }
@@ -96,7 +107,8 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
         usb::max_slots(hcsparams1),
     );
     let _ = writeln!(console, "xhci: controller reset, halted");
-    report_ports(console, &regs, caplength, ports)
+    report_ports(console, &regs, caplength, ports)?;
+    live::start(regs, op, ports, console)
 }
 
 /// Stop the controller's run bit and wait until it reports halted.
@@ -189,4 +201,9 @@ fn poll(
         core::hint::spin_loop();
     }
     Err(Failure::Timeout(step))
+}
+
+/// Poll native USB HID completions and consume source-tagged input in idle context.
+pub fn poll_events(console: &mut dyn HalConsole) {
+    live::poll_events(console);
 }

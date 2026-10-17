@@ -220,6 +220,7 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         let mut power_test_started = false;
         loop {
             hal::ps2::report_events(&mut console);
+            hal::xhci::poll_events(&mut console);
             if !round_robin_reported && exec::round_robin_complete() {
                 round_robin_reported = true;
                 if !exec::report_round_robin(&mut console) {
