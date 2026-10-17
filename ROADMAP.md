@@ -1047,6 +1047,12 @@ loader-map and consumer reservations. Native allocations avoid the cached direct
 remain in the existing bounded PC/Q35 segment-zero policy. Only truly absent ACPI permits
 board fallback; incomplete, ambiguous or unreadable advertised roots refuse allocation.
 Eight resource fixtures cover nested bridges and RAM layouts with six media/four NICs and
-288 captured exchanges; twelve AML fixtures cover both acceptance and refusal. General
+288 captured exchanges; thirteen AML fixtures cover both acceptance and refusal. General
 root/topology/64-bit allocation and PCI link routing, USB/HID, recovery and global power/S3
 are still open; see the detailed M9 completion gate for limits and CI evidence.
+
+Root-aperture CI [39026163686](https://github.com/NeXuS4Dev/NOLX/actions/runs/39026163686)
+on `7d58998` passed all sixteen jobs. PWR-016/PCI-025 are `tested-T1`, PCI-026 `tested-T2`;
+757 host tests and eight real resource fixtures passed. Follow-up catalog-capacity/HID-type
+hardening adds the thirteenth AML fixture, rerun locally with all eight resource fixtures;
+its final CI evidence is reported separately. No general M9 completion is claimed.

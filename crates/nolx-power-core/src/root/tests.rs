@@ -183,6 +183,20 @@ fn disabled_nonzero_segment_or_base_and_wrong_typed_members_refuse() {
         n.load(&bytes).unwrap();
         assert!(discover(&n).is_err());
     }
+    let other = package(
+        &[0x5b, 0x82],
+        [
+            b"BAD0".to_vec(),
+            vec![8],
+            b"_HID".to_vec(),
+            package(&[0x11], vec![1, 0]),
+        ]
+        .concat(),
+    );
+    let bytes = [root(&template(), Vec::new()), other].concat();
+    let mut n = aml::Namespace::new();
+    n.load(&bytes).unwrap();
+    assert_eq!(discover(&n), Err(Error::Aml(aml::Error::Type)));
 }
 #[test]
 fn missing_duplicate_or_incomplete_bus_roots_cannot_authorize() {

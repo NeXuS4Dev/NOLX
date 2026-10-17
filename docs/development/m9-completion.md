@@ -571,7 +571,7 @@ BARs, 0/2/4 windows, six real disks, four NIC endpoints, 288 host-captured ARP e
 zero pinned DMA. Every assigned memory range is checked against the evaluated producer
 apertures and every loader-map exclusion. The AML harness now also checks failing `_SEG`,
 multiple roots, incomplete SSDT loads, true no-ACPI fallback and an advertised ACPI root beyond
-the direct-map limit (PC with 3 GiB); it has twelve fixtures in total. Dedicated CI results must
+the direct-map limit (PC with 3 GiB); it has thirteen fixtures in total. Dedicated CI results must
 be recorded separately from these local runs.
 
 Still bounded, not general PCI resource discovery: no new bus numbering, rebalancing, arbitrary
@@ -581,3 +581,23 @@ negative path, while Q35's default relocated-memory layout remains supported. IR
 operation-region providers, xHCI/HID, failed-lifecycle recovery and global device power/S3 remain
 open. Existing physical PCI bindings are retained when allocation is refused; this is not a new
 general `_STA`-based driver-binding or power policy. **M9 remains incomplete. No PR opened.**
+
+
+CI run [39026163686](https://github.com/NeXuS4Dev/NOLX/actions/runs/39026163686) on
+`7d58998` passed **all sixteen jobs**, including the eight real root-aperture resource fixtures,
+the initial twelve AML/refusal fixtures, and the complete existing storage/network/lifecycle,
+S5, ECAM/PS2/PIC/PIT, boot and memory regressions. PWR-016 and PCI-025 are `tested-T1`;
+PCI-026 is `tested-T2`. Conformance contains 344 assertions. Local checks passed 757 host
+tests in each overlapping command, host/default/compatible-feature kernel Clippy, formatting,
+boot/layout/user-program checks, all 21 native image checks and the unchanged 249-block
+unsafe audit (zero missing invariants).
+
+A follow-up hardening case also revokes allocation when the 128-device firmware catalog
+truncates, so incomplete consumer reservations cannot authorize new BARs; it adds a thirteenth
+native AML fixture. Non-integer/non-string `_HID` results now refuse discovery explicitly, with
+an additional assertion in the existing malformed-member test. All thirteen AML fixtures and
+eight resource fixtures were rerun locally after these changes. The 3 GiB Q35 positive fixture
+explicitly caps low RAM at 2 GiB for deterministic firmware-table placement across QEMU
+versions; it does not claim support for firmware tables beyond the existing direct map.
+The subsequent revision's CI result must be checked independently. **No PR opened; M9 is
+still incomplete for the unchecked acceptance gates above.**

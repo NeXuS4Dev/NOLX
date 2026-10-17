@@ -430,6 +430,11 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
             None
         };
         if retained == MAX_FIRMWARE_DEVICES {
+            *ROOT_RESOURCES.lock() = RootResourceState::Refused;
+            let _ = writeln!(
+                console,
+                "aml: PCI root resource authorization refused: firmware catalog capacity"
+            );
             refused += 1;
             let _ = writeln!(
                 console,

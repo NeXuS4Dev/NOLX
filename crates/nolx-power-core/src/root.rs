@@ -224,11 +224,14 @@ fn root_id(value: &aml::Value) -> bool {
 pub fn discover(namespace: &aml::Namespace<'_>) -> Result<RootResources, Error> {
     let mut root = None;
     for path in namespace.devices() {
-        if namespace
-            .device_value(path, *b"_HID")?
+        let identity = namespace.device_value(path, *b"_HID")?;
+        if identity
             .as_ref()
-            .is_some_and(root_id)
+            .is_some_and(|value| !matches!(value, aml::Value::Integer(_) | aml::Value::String(_)))
         {
+            return Err(Error::Aml(aml::Error::Type));
+        }
+        if identity.as_ref().is_some_and(root_id) {
             if root.is_some() {
                 return Err(Error::Topology);
             }

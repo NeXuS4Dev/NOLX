@@ -68,7 +68,7 @@ def boot(qemu, kernel, machine, mode):
         platform += ',max-ram-below-4g=3G'
     command = [qemu, '-machine', platform, '-kernel', str(kernel), '-m', '3072M' if mode == 'unmapped-tables' else '512M',
                '-nographic', '-no-reboot', '-net', 'none']
-    if mode in ['methods', 'bad-table', 'bad-segment', 'multiple-roots']:
+    if mode in ['methods', 'bad-table', 'bad-segment', 'multiple-roots', 'catalog-full']:
         aml = ROOT / 'build' / f'{name}.aml'
         if mode == 'methods':
             payload = fixture()
@@ -78,6 +78,8 @@ def boot(qemu, kernel, machine, mode):
         elif mode == 'bad-segment':
             # A missing name INSIDE an existing method is not an absent _SEG default.
             payload = table(package([0x10], b'\\' + bytes([0x2e]) + b'_SB_PCI0' + method(b'_SEG', bytes([0xa4]) + b'MISS')))
+        elif mode == 'catalog-full':
+            payload = table(package([0x10], b'\\_SB_' + b''.join(device(f'D{i:03X}'.encode(),b'') for i in range(128))))
         else:
             payload = table(package([0x10], b'\\_SB_' + device(b'PCI1', bytes([8]) + b'_HID' + bytes([0x0c,0x41,0xd0,0x0a,3]))))
         aml.write_bytes(payload)
@@ -130,7 +132,7 @@ def boot(qemu, kernel, machine, mode):
         if mode == 'bad-table':
             assert 'aml: SSDT refused atomically: Unsupported(254)' in text, text
             assert 'TMP0 _STA=' not in text, text
-        if mode in ['bad-table','bad-segment','multiple-roots']:
+        if mode in ['bad-table','bad-segment','multiple-roots','catalog-full']:
             assert 'aml: PCI root resource authorization refused:' in text, text
             assert 'pci: native resource profile unavailable; firmware assignments retained' in text, text
             assert 'pci: resource policy=' not in text, text
@@ -157,6 +159,7 @@ def main():
         boot(args.qemu, args.kernel.resolve(), machine, 'absent')
         for mode in ['bad-table','bad-segment','multiple-roots']:
             boot(args.qemu, args.kernel.resolve(), machine, mode)
+    boot(args.qemu, args.kernel.resolve(), 'pc', 'catalog-full')
     boot(args.qemu, args.kernel.resolve(), 'pc', 'unmapped-tables')
     boot(args.qemu, args.kernel.resolve(), 'pc', 'no-acpi')
 

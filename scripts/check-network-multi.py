@@ -27,7 +27,10 @@ def boot(qemu, kernel, names, machine, bridge=False, shared=False, storage=False
     if memory != 512:
         label += f'-ram{memory}'
     log = ROOT / 'build' / f'net-multi-{label}.log'
-    command = [qemu, '-machine', 'q35,sata=off' if machine == 'q35' else machine,
+    platform = 'q35,sata=off' if machine == 'q35' else machine
+    if machine == 'q35' and memory > 2048:
+        platform += ',max-ram-below-4g=2G'
+    command = [qemu, '-machine', platform,
                '-kernel', str(kernel), '-m', f'{memory}M', '-nographic', '-no-reboot', '-net', 'none']
     if bridge:
         model = 'pcie-pci-bridge' if machine == 'q35' else 'pci-bridge'
