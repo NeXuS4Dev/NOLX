@@ -108,7 +108,13 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     );
     let _ = writeln!(console, "xhci: controller reset, halted");
     report_ports(console, &regs, caplength, ports)?;
-    live::start(regs, op, ports, console)
+    live::start(
+        u32::from(bdf.bus) << 16 | u32::from(bdf.device) << 8 | u32::from(bdf.function),
+        regs,
+        op,
+        ports,
+        console,
+    )
 }
 
 /// Stop the controller's run bit and wait until it reports halted.

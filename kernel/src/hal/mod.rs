@@ -20,6 +20,7 @@ pub mod dma;
 pub mod driver_start;
 pub mod e1000;
 pub mod hpet;
+pub mod input;
 pub mod interrupts;
 pub mod ioapic;
 pub mod msix;

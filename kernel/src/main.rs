@@ -219,8 +219,10 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         #[cfg(feature = "hal-power-test-s5")]
         let mut power_test_started = false;
         loop {
-            hal::ps2::report_events(&mut console);
             hal::xhci::poll_events(&mut console);
+            hal::input::report_events(&mut console);
+            #[cfg(feature = "hal-input-object-test")]
+            hal::input::hardware_selftest(&mut console);
             if !round_robin_reported && exec::round_robin_complete() {
                 round_robin_reported = true;
                 if !exec::report_round_robin(&mut console) {

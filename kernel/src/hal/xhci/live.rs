@@ -3,7 +3,8 @@ use super::*;
 use crate::hal::dma::Dma;
 use crate::sync::IrqMutex;
 use core::sync::atomic::{fence, Ordering};
-use nolx_input_core::events::{Event, EventQueue, Kind, PointerEvent, Source};
+use nolx_input_core::events::{Kind, PointerEvent, Source};
+use nolx_input_core::objects::{Class, DeviceId, Location};
 use nolx_usb_core::device as wire;
 const SLOTS: usize = 8;
 const PORTS: usize = 16;
@@ -65,6 +66,7 @@ struct Device {
     data: Dma,
     pending: u64,
     previous: usb::BootReport,
+    object: Option<DeviceId>,
 }
 struct Host {
     regs: Region,
@@ -80,7 +82,7 @@ struct Host {
     event_cycle: bool,
     devices: [Option<Device>; SLOTS],
     blocked: [bool; PORTS],
-    events: EventQueue<64>,
+    controller: u32,
 }
 fn write64(regs: &Region, offset: u64, value: u64) -> Result<(), Failure> {
     regs.write32(offset, value as u32)?;
@@ -133,22 +135,21 @@ impl Host {
             if device.hid.protocol == 1 {
                 if let Some(changes) = usb::report_events(&device.previous, &report) {
                     for key in changes.iter() {
-                        self.events.push(Event {
-                            source: Source::UsbHid,
-                            kind: Kind::Key(key),
-                        });
+                        if let Some(id) = device.object {
+                            let _ = super::super::input::publish(id, Kind::Key(key));
+                        }
                     }
                     device.previous = report;
                 }
-            } else {
-                self.events.push(Event {
-                    source: Source::UsbHid,
-                    kind: Kind::Pointer(PointerEvent {
+            } else if let Some(id) = device.object {
+                let _ = super::super::input::publish(
+                    id,
+                    Kind::Pointer(PointerEvent {
                         buttons: report[0] & 7,
                         dx: i16::from(report[1] as i8),
                         dy: i16::from(report[2] as i8),
                     }),
-                });
+                );
             }
         }
         if matches!(usb::completion_code(&event), 1 | 13) {
@@ -290,6 +291,7 @@ impl Host {
             data,
             pending: 0,
             previous: [0; 8],
+            object: None,
         };
         match self.command(0, 9, 0) {
             Ok(slot) if slot > 0 && usize::from(slot) <= SLOTS => device.slot = slot,
@@ -302,7 +304,24 @@ impl Host {
                 return Err(error);
             }
         }
-        let result = self.configure(&mut device, speed);
+        let result = self.configure(&mut device, speed).and_then(|()| {
+            let id = super::super::input::register(
+                Source::UsbHid,
+                if device.hid.protocol == 1 {
+                    Class::Keyboard
+                } else {
+                    Class::Pointer
+                },
+                Location::Usb {
+                    controller: self.controller,
+                    port,
+                },
+                console,
+            )
+            .map_err(|_| Failure::Unsupported)?;
+            device.object = Some(id);
+            Ok(())
+        });
         match result {
             Ok(()) => {
                 let _ = writeln!(
@@ -432,29 +451,16 @@ impl Host {
                     .position(|d| d.as_ref().is_some_and(|d| d.port == port))
                 {
                     let slot = self.devices[index].as_ref().unwrap().slot;
-                    self.devices[index].as_mut().unwrap().pending = 0;
+                    let device = self.devices[index].as_mut().unwrap();
+                    device.pending = 0;
+                    // Input records contain no DMA references. Retire the public producer even
+                    // if hardware quiescence later fails; quarantined pages must stay pinned.
+                    if let Some(id) = device.object.take() {
+                        super::super::input::disconnect(id).expect("USB input producer lifetime");
+                    }
                     self.command(0, 10, slot)?;
                     let d = self.devices[index].take().unwrap();
                     self.table.write(u64::from(slot) * 8, &0u64.to_le_bytes());
-                    if d.hid.protocol == 1 {
-                        if let Some(changes) = usb::report_events(&d.previous, &[0; 8]) {
-                            for key in changes.iter() {
-                                self.events.push(Event {
-                                    source: Source::UsbHid,
-                                    kind: Kind::Key(key),
-                                });
-                            }
-                        }
-                    } else {
-                        self.events.push(Event {
-                            source: Source::UsbHid,
-                            kind: Kind::Pointer(PointerEvent {
-                                dx: 0,
-                                dy: 0,
-                                buttons: 0,
-                            }),
-                        });
-                    }
                     release(d);
                     let _ = writeln!(
                         console,
@@ -510,6 +516,7 @@ fn release(d: Device) {
     }
 }
 pub(super) fn start(
+    controller: u32,
     regs: Region,
     op: u64,
     ports: u8,
@@ -547,7 +554,7 @@ pub(super) fn start(
         event_cycle: true,
         devices: core::array::from_fn(|_| None),
         blocked: [false; PORTS],
-        events: EventQueue::new(),
+        controller,
     };
     host.table
         .write(0x100, &host.event.address(0).to_le_bytes());
@@ -585,27 +592,6 @@ pub(super) fn poll_events(console: &mut dyn HalConsole) {
     }
     if let Err(error) = host.scan(console) {
         let _ = writeln!(console, "usb: scan refused: {error:?}");
-    }
-    for _ in 0..64 {
-        let Some(event) = host.events.pop() else {
-            break;
-        };
-        match event.kind {
-            Kind::Key(k) => {
-                let _ = writeln!(
-                    console,
-                    "input: usb keyboard usage={:#04x} pressed={}",
-                    k.usage, k.pressed
-                );
-            }
-            Kind::Pointer(p) => {
-                let _ = writeln!(
-                    console,
-                    "input: usb mouse dx={} dy={} buttons={}",
-                    p.dx, p.dy, p.buttons
-                );
-            }
-        }
     }
 }
 

@@ -52,11 +52,15 @@ M9 to the already implemented boot probes. Check items only with executable evid
 - [ ] xHCI command/event/transfer rings, slots, addressing and device enumeration.
       Direct-root USB2 boot-HID rings/slots/addressing and hotplug are now exercised on PC/Q35;
       hubs, SuperSpeed, multiple controllers and full framework lifecycle remain open.
-- [ ] HID boot keyboard/mouse reports delivered to bounded input event objects.
+- [x] HID boot keyboard/mouse reports delivered to bounded kernel input event objects,
+      with independent subscriptions, source/device identity, state resync and stale-handle refusal.
+- [ ] Executive/process-handle, security/namespace and waitable/user-facing input bindings;
+      the kernel object API below is not a new syscall or POSIX input-device interface.
 - [ ] USB disconnect/hotplug cleanup and endpoint/ring ownership; do not leak controller
       resources or leave DMA active after device removal.
 - [x] Inject PS/2 keyboard/mouse events under QEMU and assert delivered event contents.
-      USB injection remains part of the unchecked HID/xHCI gates above.
+      USB injection and bounded kernel-object consumers now also have PC/Q35 hardware checks;
+      general USB, Executive bindings and controller lifecycle remain open.
 
 ## Networking
 
@@ -695,3 +699,46 @@ Clippy with warnings denied, formatting, the 251-block unsafe audit (zero missin
 21 native image checks and the 351-assertion conformance database. The final USB verifier rerun
 passed both VMs after fixing a test-only race: it now waits for the disconnect diagnostic as well
 as the preceding DMA counter before asserting the complete serial evidence.
+
+
+## Device-owned kernel input objects checkpoint (2026-10-17)
+
+This supersedes the preceding checkpoint's console-only FIFO and kernel input-API limitation.
+`nolx-input-core::objects` now implements bounded generation-checked device objects and reader
+subscriptions. Source, class and physical location are validated. Devices at different ports keep
+separate held-key/button state even if both report `UsbHid`. Connected-location duplicates refuse;
+disconnected metadata is retained by readers, not by hardware buffers. Last-close reclaims it,
+and device/reader generation exhaustion retires slots permanently rather than wrapping.
+
+Each reader has its own FIFO and publication sequences. An atomic subscribe-plus-initial-state
+operation avoids a query/open gap. A slow reader discards its obsolete journal and receives an
+explicit latest-state Resync before any new records or EOF, without disturbing another reader.
+On removal, only that device's held keys/buttons are neutralized. Readers drain neutral state or
+resync then terminal Disconnected; new readers/writes refuse, and closed/reused handles are stale.
+No input record contains a DMA pointer. USB producer retirement therefore precedes Disable Slot;
+failed hardware quiescence still pins DMA rather than retaining an apparently connected input source.
+
+Both PS/2 IRQ decoders and native USB completions now publish through the synchronized `hal::input`
+API (16 device objects, 32 readers, 64 events per reader). Enumeration/info/subscribe/open/read/close
+are kernel-facing public operations; producers cannot call consumers. The idle console is just one
+subscription and prints outside the registry lock. It no longer drains private PS/2/USB FIFOs.
+This does **not** implement Executive object headers/namespace/security/process handles, syscalls,
+waitable reads or a POSIX input-device ABI. Nor does it complete USB controller/framework/power
+integration, failed lifecycle recovery, arbitrary HID/hubs/SuperSpeed or global power/S3. M9 remains
+incomplete and no PR is opened.
+
+Twelve new portable object tests passed (including 1024 object/reader reuse cycles), bringing the
+host suite to **785 tests** in each overlapping command. Native PC/Q35 tests with
+`hal-input-object-test` retained the existing 604 console key transitions and wire-device DMA
+reclamation, while independent consumers verified 600 ordered hardware events, explicit slow-reader
+resync with current held state, neutral EOF, reader-slot reuse and stale producer/reader/open refusal
+after device-generation reuse. The actual PS/2 IRQ test also passed through independent keyboard and
+pointer subscriptions with matching device identities. These observers inspect real producer data;
+they do not inject fabricated records. CI now runs default USB, observer USB and observer PS/2 paths.
+The revision's CI result must be recorded separately from local evidence.
+
+Final local checks passed all six native paths: default and observer USB on both PC/Q35, plus
+default and observer PS/2. Host/observer-native Clippy, formatting, the unchanged 251-block unsafe
+audit (zero missing invariants), all 21 default image checks and the 354-assertion conformance
+database passed. Default and observer verifiers use distinct socket/log names so their evidence
+cannot accidentally come from another running VM.

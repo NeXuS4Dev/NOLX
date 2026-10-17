@@ -1064,3 +1064,10 @@ M9 USB checkpoint: direct-root USB2 boot keyboard/mouse enumeration and polled n
 now have executable PC/Q35 ring-wrap and root-device disconnect/reconnect DMA checks
 (`scripts/check-usb-input.py`). General HID/input objects, hubs/SuperSpeed, multiple host
 controllers and framework/power/failure integration remain open; see the completion gate.
+
+
+M9 input-object checkpoint: PS/2 and USB now publish into generation-checked kernel device
+objects with independent reader FIFOs, atomic subscription snapshots, explicit overflow resync
+and per-device disconnect/neutral EOF. Real hardware observers verify identity/order, subscriber
+isolation and stale-handle refusal. Executive/process-handle/security/waitable/user-device bindings
+remain separate open gates; this is not a new syscall or POSIX input ABI.

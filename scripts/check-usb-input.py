@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Verify native polled xHCI boot-HID input, ring wrap and root-port DMA reclamation.
 
-Default kernel; no test feature. Direct USB2 boot keyboard/mouse only, PC and Q35.
-Every injected transition must reach the USB input queue; PS/2 output is not evidence.
+Default kernel by default; --objects additionally requires hal-input-object-test.
+Direct USB2 boot keyboard/mouse only, PC and Q35. Every transition must reach the
+USB object's console subscription; PS/2 output is not evidence.
 """
 import argparse
 import json
@@ -15,9 +16,10 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def boot(qemu, kernel, machine):
-    log = ROOT / 'build' / f'input-usb-{machine}.log'
-    qmp = ROOT / 'build' / f'input-usb-{machine}.sock'
+def boot(qemu, kernel, machine, objects=False):
+    label = f'input-usb-{machine}' + ('-objects' if objects else '')
+    log = ROOT / 'build' / f'{label}.log'
+    qmp = ROOT / 'build' / f'{label}.sock'
     qmp.unlink(missing_ok=True)
     command = [qemu, '-machine', 'q35,sata=off' if machine == 'q35' else 'pc',
                '-kernel', str(kernel), '-m', '512M', '-nographic', '-no-reboot', '-net', 'none',
@@ -40,6 +42,8 @@ def boot(qemu, kernel, machine):
                 raise AssertionError(f'missing {description}:\n{log.read_text(errors="replace")}')
 
             wait(lambda t: t.count('usb: HID ready') == 2 and 'kernel heap selftest:' in t, 'two HID devices and completed boot')
+            if objects:
+                wait(lambda t: 'input: object hardware observers armed' in t, 'independent kernel input readers')
             connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             connection.settimeout(5)
             connection.connect(str(qmp))
@@ -78,14 +82,24 @@ def boot(qemu, kernel, machine):
             key(True, 301)
             execute('device_del', {'id': 'kbd'})
             wait(lambda t: t.count('input: usb keyboard usage=0x04 pressed=false') == 301 and 'live pages=8' in t, 'keyboard disconnect release and five pages reclaimed')
+            neutral_before = log.read_text(errors='replace').count('input: usb mouse dx=0 dy=0 buttons=0')
             execute('device_del', {'id': 'mouse'})
-            wait(lambda t: 'live pages=3' in t and 'input: usb mouse dx=0 dy=0 buttons=0' in t, 'mouse disconnect and host-only DMA baseline')
+            wait(lambda t: 'live pages=3' in t and t.count('input: usb mouse dx=0 dy=0 buttons=0') > neutral_before, 'mouse disconnect and host-only DMA baseline')
             execute('device_add', {'driver': 'usb-kbd', 'bus': 'xhci.0', 'id': 'kbd2'})
             wait(lambda t: t.count('usb: HID ready') == 3, 'keyboard reconnect')
             key(True, 302)
             key(False, 302)
             execute('device_del', {'id': 'kbd2'})
             text = wait(lambda t: t.count('live pages=3') == 2 and t.count('DMA released') == 3, 'reconnected keyboard reclaimed to same baseline')
+            if objects:
+                text = wait(lambda t: t.count('input: object independent reader drained neutral state and EOF') == 3
+                            and 'input: object reconnect generation advanced; stale producer/reader/open refused' in t,
+                            'independent reader terminal states and stale object refusal')
+                assert 'input: object independent reader verified 600 ordered hardware events' in text, text
+                assert 'input: object independent reader overflow repaired; console unaffected, stale reader refused' in text, text
+                ids = re.findall(r'input: usb keyboard usage=0x04 pressed=true device=(\d+):(\d+)', text)
+                assert len(ids) == 302 and len(set(ids)) == 2 and ids[0][0] == ids[-1][0] and int(ids[-1][1]) > int(ids[0][1]), ids
+                print(f'PASS: input-objects-{machine}: independent fast/slow readers, explicit overflow resync, neutral EOF, generation reuse and stale producer/reader/open refusal', flush=True)
             assert 'in use 0 -> 0 bytes, integrity ok' in text, text
             assert text.count('DMA released') == 3, text
             print(f'PASS: usb-{machine}: 604 key transitions, mouse motion/buttons, two ring wraps, unsupported HID refusal, disconnect/reconnect; DMA baseline 13 -> 8 -> 3 -> 8 -> 3', flush=True)
@@ -106,10 +120,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--qemu', default=os.environ.get('QEMU', 'qemu-system-x86_64'))
     parser.add_argument('--kernel', type=Path, default=ROOT / 'build' / 'nolx.elf')
+    parser.add_argument('--objects', action='store_true', help='require hal-input-object-test; verify extra independent consumers and stale handles')
     args = parser.parse_args()
     (ROOT / 'build').mkdir(exist_ok=True)
     for machine in ['pc', 'q35']:
-        boot(args.qemu, args.kernel.resolve(), machine)
+        boot(args.qemu, args.kernel.resolve(), machine, args.objects)
 
 
 if __name__ == '__main__':

@@ -2,7 +2,8 @@
 
 use crate::KeyEvent;
 
-/// Origin of an input event, preserved when PS/2 and USB share one delivery queue.
+/// Producer class, not a unique device identity. Device-owned object records add the exact
+/// generation-checked device ID; several devices may all have `UsbHid` as their source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
     /// i8042 keyboard port.
