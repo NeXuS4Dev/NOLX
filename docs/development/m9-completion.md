@@ -450,3 +450,16 @@ native binding. A BAR already assigned outside a closed ancestor window is refus
 relocated. Sibling-window conflicts are rejected, not repaired. This checkpoint does not
 complete the remaining AML/PCI routing, recovery, USB/HID or global power/S3 gates. M9 remains
 in progress.
+
+All native driver/MSI-X memory mapping boundaries additionally require an **assigned nonzero**
+BAR base. An implemented-but-unassigned zero BAR on an unsupported/no-repair profile is not
+permission to map low physical RAM. The shared host-tested `assigned_memory_base` rule is
+used by storage, network, xHCI and MSI-X mapping; zero/IO BARs are refused before mapping.
+
+CI run [39016071195](https://github.com/NeXuS4Dev/NOLX/actions/runs/39016071195)
+on `24d94db` passed **all fifteen jobs**, including the six native cleared-resource fixtures,
+ten storage fixtures, nine network fixtures and seven lifecycle fixtures. Local regression
+also passed 714 host tests in each overlapping command, host/default/all-feature Clippy,
+formatting, boot/layout checks, 21 Multiboot checks, six single-NIC fixtures, all three
+storage persistence/reboot/malformed-media suites and three power fixtures. Unsafe audit:
+249 blocks / zero missing invariants. No pull request was opened.

@@ -11,7 +11,7 @@
 
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
-use nolx_pci_core::{Bar, Bdf, ConfigSpace};
+use nolx_pci_core::{Bdf, ConfigSpace};
 use nolx_usb_core as usb;
 
 use super::pci::ConfigAccess;
@@ -75,11 +75,8 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     let bdf = find_controller().ok_or(Failure::NoController)?;
     enable_device(bdf);
     let bars = nolx_pci_core::read_bars(&mut ConfigAccess, bdf);
-    let base = match bars.slots[BAR0_SLOT] {
-        Bar::Memory32 { base, .. } => u64::from(base),
-        Bar::Memory64 { base, .. } => base,
-        _ => return Err(Failure::BarNotMemory),
-    };
+    let base =
+        nolx_pci_core::assigned_memory_base(bars.slots[BAR0_SLOT]).ok_or(Failure::BarNotMemory)?;
     let regs = mmio::map(base, REGISTERS_BYTES)?;
     let caplength = regs.read8(usb::CAP_CAPLENGTH)?;
     let version = regs.read16(CAP_HCIVERSION)?;

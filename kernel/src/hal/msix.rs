@@ -7,7 +7,7 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use nolx_mm_core::mmio::MmioError;
-use nolx_pci_core::{msi, Bar, BarSet, Bdf, ConfigSpace};
+use nolx_pci_core::{msi, BarSet, Bdf, ConfigSpace};
 
 use super::apic;
 use super::cpu::interrupts_enabled;
@@ -51,11 +51,11 @@ impl From<MmioError> for Error {
 
 /// The physical base of a memory BAR, or `None` when the slot is not one.
 fn bar_base(bars: &BarSet, slot: u8) -> Result<u64, Error> {
-    match bars.slots.get(usize::from(slot)) {
-        Some(Bar::Memory32 { base, .. }) => Ok(u64::from(*base)),
-        Some(Bar::Memory64 { base, .. }) => Ok(*base),
-        _ => Err(Error::Layout),
-    }
+    bars.slots
+        .get(usize::from(slot))
+        .copied()
+        .and_then(nolx_pci_core::assigned_memory_base)
+        .ok_or(Error::Layout)
 }
 
 /// Enable MSI-X on `bdf`, and program table entry `entry` to deliver `vector` to this processor's

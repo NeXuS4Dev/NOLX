@@ -19,7 +19,7 @@ use nolx_net_core::{
     arp,
     queue::{Frame, FrameQueue},
 };
-use nolx_pci_core::{Bar, BarSet, Bdf, ConfigSpace};
+use nolx_pci_core::{BarSet, Bdf, ConfigSpace};
 use nolx_virtio_core::{self as virtio, common, net, Descriptor, VirtioCap};
 
 /// MSI-X receive vector (table entry zero).
@@ -202,11 +202,12 @@ fn stop(dev: usize) -> bool {
 }
 
 fn map(dev: usize, bars: &BarSet, cap: VirtioCap) -> Result<Region, Failure> {
-    let base = match bars.slots.get(usize::from(cap.bar)) {
-        Some(Bar::Memory32 { base, .. }) => u64::from(*base),
-        Some(Bar::Memory64 { base, .. }) => *base,
-        _ => return Err(Failure::Configuration),
-    };
+    let base = bars
+        .slots
+        .get(usize::from(cap.bar))
+        .copied()
+        .and_then(nolx_pci_core::assigned_memory_base)
+        .ok_or(Failure::Configuration)?;
     mmio::map_owned(
         dev,
         base.checked_add(u64::from(cap.offset))

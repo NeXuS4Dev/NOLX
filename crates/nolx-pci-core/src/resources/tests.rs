@@ -64,6 +64,16 @@ fn zero_address_bars_are_sized_without_losing_64_bit_upper_slot() {
     );
     assert_eq!(m.regs(bdf(0, 3, 0)).unwrap().values[5], 4);
     assert_eq!(m.regs(bdf(0, 3, 0)).unwrap().values[6], 0);
+    assert_eq!(crate::assigned_memory_base(bars.slots[0]), None);
+    assert_eq!(crate::assigned_memory_base(bars.slots[1]), None);
+    assert_eq!(crate::assigned_memory_base(bars.slots[3]), None);
+    assert_eq!(
+        crate::assigned_memory_base(Bar::Memory64 {
+            base: 0x1_0000_0000,
+            prefetchable: true
+        }),
+        Some(0x1_0000_0000)
+    );
 }
 
 #[test]

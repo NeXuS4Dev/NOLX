@@ -178,7 +178,7 @@ pub fn read_function<C: ConfigSpace>(cfg: &mut C, bdf: Bdf) -> Option<FunctionIn
 /// One decoded base address register.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Bar {
-    /// The slot is not implemented, or its value is zero.
+    /// The slot is unimplemented, or was decoded at address zero without sizing.
     #[default]
     Unused,
     /// A 32-bit memory window.
@@ -202,6 +202,22 @@ pub enum Bar {
     },
     /// A reserved memory type. Recorded so that the slot is not misread as a 64-bit pair.
     Reserved,
+}
+
+/// Assigned memory address suitable for a driver mapping. A sized zero-address BAR is
+/// implemented but unassigned, never permission to map physical RAM at address zero.
+#[must_use]
+pub const fn assigned_memory_base(bar: Bar) -> Option<u64> {
+    let base = match bar {
+        Bar::Memory32 { base, .. } => base as u64,
+        Bar::Memory64 { base, .. } => base,
+        _ => return None,
+    };
+    if base == 0 {
+        None
+    } else {
+        Some(base)
+    }
 }
 
 /// How many slots a BAR occupies after decoding: 2 for a 64-bit memory BAR, otherwise 1.

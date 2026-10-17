@@ -20,7 +20,7 @@ use nolx_df_core::{DeviceId, Dispatch, Driver, Match};
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
 use nolx_nvme_core::{self as nvme, Sqe};
-use nolx_pci_core::{Bar, Bdf, ConfigSpace};
+use nolx_pci_core::{Bdf, ConfigSpace};
 use nolx_virtio_core::crc32;
 
 use super::dma::Dma;
@@ -320,11 +320,8 @@ fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<Disk, Failure> {
     let vector = completion_vector(dev);
     enable_device(bdf);
     let bars = nolx_pci_core::read_bars(&mut ConfigAccess, bdf);
-    let base = match bars.slots[BAR0_SLOT] {
-        Bar::Memory32 { base, .. } => u64::from(base),
-        Bar::Memory64 { base, .. } => base,
-        _ => return Err(Failure::BarNotMemory),
-    };
+    let base =
+        nolx_pci_core::assigned_memory_base(bars.slots[BAR0_SLOT]).ok_or(Failure::BarNotMemory)?;
     let regs = mmio::map_owned(dev, base, REGISTERS_BYTES)?;
     let cap = read64(&regs, nvme::REG_CAP)?;
     let stride = nvme::cap_doorbell_stride(cap);

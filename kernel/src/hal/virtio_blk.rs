@@ -35,7 +35,7 @@ use core::sync::atomic::{fence, AtomicUsize, Ordering};
 use nolx_df_core::{DeviceId, Dispatch, Driver, Match};
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
-use nolx_pci_core::{Bar, BarSet, Bdf, ConfigSpace};
+use nolx_pci_core::{BarSet, Bdf, ConfigSpace};
 use nolx_virtio_core::{self as virtio, common, VirtioCap, VirtioError};
 
 /// The queue size the driver asks for, or the device's maximum if that is smaller.
@@ -495,13 +495,16 @@ pub(crate) fn fill_pattern(out: &mut [u8]) {
 
 /// Map the region a capability describes: `bar` plus the capability's offset, for its length.
 fn map_cap(dev: usize, bars: &BarSet, cap: VirtioCap) -> Result<Region, Failure> {
-    let base = match bars.slots[usize::from(cap.bar)] {
-        Bar::Memory32 { base, .. } => u64::from(base),
-        Bar::Memory64 { base, .. } => base,
-        _ => return Err(Failure::BarNotMemory(cap.bar)),
-    };
-    mmio::map_owned(dev, base + u64::from(cap.offset), u64::from(cap.length))
-        .map_err(Failure::Window)
+    let base = bars
+        .slots
+        .get(usize::from(cap.bar))
+        .copied()
+        .and_then(nolx_pci_core::assigned_memory_base)
+        .ok_or(Failure::BarNotMemory(cap.bar))?;
+    let address = base
+        .checked_add(u64::from(cap.offset))
+        .ok_or(Failure::BarNotMemory(cap.bar))?;
+    mmio::map_owned(dev, address, u64::from(cap.length)).map_err(Failure::Window)
 }
 
 /// The byte offset of a common-configuration field, widened for the register accessors.

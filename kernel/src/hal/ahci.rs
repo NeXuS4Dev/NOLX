@@ -22,7 +22,7 @@ use nolx_block_core::queue::{Direction, Request};
 use nolx_df_core::{DeviceId, Dispatch, Driver, Match};
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
-use nolx_pci_core::{Bar, Bdf, ConfigSpace};
+use nolx_pci_core::{Bdf, ConfigSpace};
 use nolx_virtio_core::crc32;
 
 use super::dma::Dma;
@@ -304,11 +304,8 @@ fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<Disk, Failure> {
     let command = ConfigAccess.read_u32(bdf, 4) & 0xffff;
     ConfigAccess.write_u32(bdf, 4, command | 6);
     let bars = nolx_pci_core::read_bars(&mut ConfigAccess, bdf);
-    let abar = match bars.slots[ABAR_SLOT] {
-        Bar::Memory32 { base, .. } => u64::from(base),
-        Bar::Memory64 { base, .. } => base,
-        _ => return Err(Failure::BarNotMemory),
-    };
+    let abar =
+        nolx_pci_core::assigned_memory_base(bars.slots[ABAR_SLOT]).ok_or(Failure::BarNotMemory)?;
     let hba = mmio::map_owned(dev, abar, ahci::HBA_REGION_BYTES)?;
     let ports = hba.read32(ahci::HBA_PI)?;
     // Put the controller in AHCI mode. The port registers are only meaningful in that mode.

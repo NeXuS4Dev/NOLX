@@ -25,7 +25,7 @@ use nolx_df_core::{DeviceId, Dispatch, Driver, Match};
 use nolx_e1000_core::{self as e1000, DEVICE_82540EM, VENDOR_INTEL};
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
-use nolx_pci_core::{Bar, Bdf, ConfigSpace};
+use nolx_pci_core::{Bdf, ConfigSpace};
 
 use super::pci::ConfigAccess;
 use super::{dma::Dma, driver_start};
@@ -372,11 +372,8 @@ fn bring_up(dev: usize) -> Result<(Rings, Report), Failure> {
     let bdf = STATE[dev].lock().bdf.ok_or(Failure::NoController)?;
     enable_device(bdf);
     let bars = nolx_pci_core::read_bars(&mut ConfigAccess, bdf);
-    let base = match bars.slots[BAR0_SLOT] {
-        Bar::Memory32 { base, .. } => u64::from(base),
-        Bar::Memory64 { base, .. } => base,
-        _ => return Err(Failure::BarNotMemory),
-    };
+    let base =
+        nolx_pci_core::assigned_memory_base(bars.slots[BAR0_SLOT]).ok_or(Failure::BarNotMemory)?;
     let regs = mmio::map_owned(dev, base, REGISTERS_BYTES)?;
 
     // Reset, then set the link up. The reset bit clears itself when the reset is done.
