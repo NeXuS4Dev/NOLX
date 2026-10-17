@@ -192,12 +192,15 @@ pub(super) fn arm(
     }
     #[cfg(feature = "hal-xhci-irq-test")]
     {
+        // The two observations must exclude a legitimate in-flight vector between them.
+        let interrupts = super::super::cpu::InterruptGuard::disable();
         assert!(work(dev).is_some(), "probe IRQ must schedule idle work");
         assert!(
             work(dev).is_none(),
             "armed sources must not fall back to timer polling"
         );
         WORK[dev].store(true, Ordering::Release); // retain the real probe's pending work
+        drop(interrupts);
         let _ = writeln!(console, "xhci: IRQ-only admission verified handle={dev}");
     }
     let _ = writeln!(

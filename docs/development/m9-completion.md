@@ -938,6 +938,9 @@ Executable verification:
   and exact DMA `13 -> 8 -> 3 -> 8 -> 3`. The native observer asserts that an armed host without
   pending work refuses idle admission. Parser negative tests reject console-only, polling, zero
   counters, stale routes and one probe followed by 600 purported polled reports.
+- Forced MSI and absent-capability profiles use `nec-usb-xhci`: older QEMU exposes its
+  MSI/MSI-X switches there, not on `qemu-xhci`. Default MSI-X still uses `qemu-xhci`; no IRQ
+  requirement is skipped because a model does not expose a property.
 - The same image with `--transport polled` or `--no-apic`: PC/Q35 repeat the complete workload,
   require the explicit fallback marker and forbid IRQ-work markers.
 - `hal-input-object-test,hal-xhci-irq-test`: PC/Q35 repeat IRQ-driven input with independent readers,

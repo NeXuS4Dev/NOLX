@@ -24,9 +24,11 @@ def boot(qemu, kernel, machine, objects=False, interrupts=False, transport="defa
     qmp = ROOT / 'build' / f'{label}.sock'
     qmp.unlink(missing_ok=True)
     print(f'RUN: {label}', flush=True)
+    # Older QEMU exposes MSI/MSI-X switches only on the NEC model, not qemu-xhci.
+    # Use an explicit model for both controlled capability profiles; never skip IRQ proof.
     command = [qemu, '-machine', 'q35,sata=off' if machine == 'q35' else 'pc',
                '-kernel', str(kernel), '-m', '512M', '-nographic', '-no-reboot', '-net', 'none',
-               '-device', 'qemu-xhci,id=xhci' + {'default': '', 'msi': ',msi=on,msix=off', 'polled': ',msi=off,msix=off'}[transport], '-device', 'usb-kbd,bus=xhci.0,id=kbd',
+               '-device', {'default': 'qemu-xhci,id=xhci', 'msi': 'nec-usb-xhci,id=xhci,msi=on,msix=off', 'polled': 'nec-usb-xhci,id=xhci,msi=off,msix=off'}[transport], '-device', 'usb-kbd,bus=xhci.0,id=kbd',
                '-device', 'usb-mouse,bus=xhci.0,id=mouse', '-qmp', f'unix:{qmp},server=on,wait=off']
     if no_apic:
         command += ['-cpu', 'qemu64,-apic']
