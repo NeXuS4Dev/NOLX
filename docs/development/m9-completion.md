@@ -332,3 +332,10 @@ AML and power gates are not closed by this checkpoint. **M9 is still not complet
 Local host regression passed 702 tests in each overlapping command. Host and multi-feature
 kernel Clippy, formatting, boot/layout/conformance checks and unsafe audit (249 blocks / zero
 missing invariants) passed. Current assertion database: 332 assertions / zero problems.
+
+CI run [39011468648](https://github.com/NeXuS4Dev/NOLX/actions/runs/39011468648)
+on `18ab7d1` passed **all thirteen jobs**, including the ten multi-controller fixtures,
+seven existing lifecycle fixtures and the default smoke/three-backend persistence matrix.
+Local default-kernel regressions also passed all three backends' host-mount/reboot and three
+malformed-media refusals, six virtio-net fixtures, three S5 fixtures and 21 Multiboot checks.
+No pull request was opened for this checkpoint.
