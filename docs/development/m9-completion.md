@@ -389,3 +389,12 @@ with zero pinned DMA. All nine fixtures passed locally on QEMU 11.0.2. Dedicated
 registry-serialized, not parallel dispatch/SMP verification. Firmware BAR/bridge allocation,
 ACPI interrupt discovery, failed-start/failed-stop recovery and IRQ-resource reclamation,
 xHCI/HID/input objects, evaluated AML resources and global power-quiesce/S3 remain required.
+
+CI run [39013817622](https://github.com/NeXuS4Dev/NOLX/actions/runs/39013817622)
+on `9566b32` passed **all fourteen jobs**, including all nine network fixtures, ten storage
+multi-controller fixtures and seven existing lifecycle fixtures. Local regressions passed
+702 host tests in each overlapping command, host/default/combined-feature Clippy, formatting,
+boot/layout/conformance checks, 21 Multiboot checks, six single-adapter network fixtures,
+three backend persistence/reboot/malformed-media suites and three power fixtures. Unsafe audit:
+249 blocks / zero missing invariants. Assertion database: 334 assertions / zero problems.
+No pull request was opened for this checkpoint.
