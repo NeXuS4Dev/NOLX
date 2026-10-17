@@ -1033,3 +1033,8 @@ seven firmware/SSDT/absent/malformed/no-ACPI boots are checked by `scripts/check
 This supersedes historical statements that the kernel executes no AML, not the remaining PCI
 routing/resource or general AML gates: host-bridge apertures, PCI link `_PRT`, operation regions,
 USB HID, failed-lifecycle recovery and global power/S3 remain open. See the M9 completion gate.
+
+AML checkpoint CI [39022540188](https://github.com/NeXuS4Dev/NOLX/actions/runs/39022540188)
+on `353f5d0` passed all sixteen jobs, including seven firmware AML boots and the complete
+existing hardware-path regression suite. Host tests passed 743 tests in each overlapping
+command; PWR-012/013/014 are `tested-T1` and PWR-015 `tested-T2`. M9 remains in progress.

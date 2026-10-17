@@ -500,11 +500,25 @@ Local Rust 1.88.0 / QEMU 11.0.2 verification: 45 power-core tests (29 new), seve
 malformed, looping and recursive methods; ordinary no-injected-SSDT boots; transactional
 late-opcode table refusal; and a no-ACPI VM. Both machine profiles load their real SeaBIOS DSDT
 and evaluate actual keyboard/serial `_STA` and `_CRS` methods. Every fixture completes timer,
-address-space and zero-leak heap checks. The `acpi-aml` CI job repeats these executable checks;
-its result is recorded separately, not inferred from this local run.
+address-space and zero-leak heap checks. The `acpi-aml` CI job repeats these executable checks and passed in the CI run recorded below.
 
 This does **not** implement PCI `_PRT`/link routing, general root `_CRS` aperture consumption,
 operation-region providers, general AML, device power methods, USB HID or S3/global quiescence.
 Real root/link methods and several descriptor types are explicitly refused. Existing PCI board
 apertures/Interrupt Line policy is unchanged. The literal sleep-package helper remains separate.
 M9 remains incomplete, and no new pull request is requested or opened.
+
+
+CI run [39022540188](https://github.com/NeXuS4Dev/NOLX/actions/runs/39022540188) on
+`353f5d0` passed **all sixteen jobs**, including the new firmware AML job and all existing
+storage-file/reboot/malformed-media, lifecycle, multi-storage/network, PCI-resource, S5,
+virtio-network, ECAM/PIC/PIT, PS/2, boot and memory regressions. PWR-012/013/014 are now
+`tested-T1` and PWR-015 is `tested-T2`; conformance contains 341 assertions. Local checks
+also passed 743 host tests in each overlapping command, host/default/all-compatible-nonfault
+kernel Clippy, formatting, boot/layout/user-program checks, all 21 native image checks and the
+249-block unsafe audit (zero missing invariants). The kernel's mutually exclusive fault-injection
+features intentionally forbid plain `--all-features`; no test claims that combination works.
+The six cleared-BAR/nested-bridge fixtures and three S5 fixtures were rerun locally after AML
+integration and passed, including 216 host-captured ARP exchanges and zero pinned DMA.
+No general firmware routing, USB/HID, failed-lifecycle recovery or global power/S3 gate is closed
+by these results. **M9 is still not complete. No PR was opened.**
