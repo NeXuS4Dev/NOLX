@@ -15,13 +15,13 @@ use nolx_hal_core::console::HalConsole;
 
 use crate::sync::IrqMutex;
 
-/// The virtio block device's queue index.
+/// Preferred block ID for the first virtio controller.
 pub const VIRTIO: usize = 0;
-/// The AHCI SATA port's queue index.
+/// Preferred block ID for the first AHCI controller.
 pub const AHCI: usize = 1;
-/// The NVMe namespace's queue index.
+/// Preferred block ID for the first NVMe controller.
 pub const NVME: usize = 2;
-const DEVICES: usize = 3;
+const DEVICES: usize = super::driver_start::DEVICES + 3;
 /// Requests a device's queue holds before it refuses one it cannot merge.
 const DEPTH: usize = 8;
 /// Requests a device may have in flight at once. The boot path needs one.
@@ -83,6 +83,36 @@ pub(crate) fn detach(dev: usize) -> Result<(), QueueError> {
     QUEUES.lock().detach(dev)
 }
 
+static BINDINGS: IrqMutex<(
+    nolx_block_core::devices::DeviceBindings<DEVICES>,
+    [Option<usize>; super::driver_start::DEVICES],
+)> = IrqMutex::new((
+    nolx_block_core::devices::DeviceBindings::new(),
+    [None; super::driver_start::DEVICES],
+));
+
+/// Reserve a stable block ID before starting a storage instance. Preferred IDs remain 0/1/2.
+pub(crate) fn bind_storage(handle: usize, backend: usize) -> Result<usize, QueueError> {
+    if handle >= super::driver_start::DEVICES || backend > NVME {
+        return Err(QueueError::UnknownDevice);
+    }
+    let mut bindings = BINDINGS.lock();
+    if bindings.1[handle].is_some_and(|old| old != backend) {
+        return Err(QueueError::UnknownDevice);
+    }
+    let id = bindings.0.bind(handle, backend, 3)?;
+    bindings.1[handle] = Some(backend);
+    Ok(id)
+}
+/// Stable queue identity for one framework handle, including while stopped/removed.
+pub(crate) fn device(handle: usize) -> Option<usize> {
+    BINDINGS.lock().0.find(handle)
+}
+/// First controller's handle, for the compatibility MSI/MSI-X vector.
+pub(crate) fn primary_handle(backend: usize) -> Option<usize> {
+    BINDINGS.lock().0.owner(backend)
+}
+
 fn with_device<T>(
     dev: usize,
     op: impl FnOnce(&mut dyn nolxfs::sector::SectorDevice) -> Result<T, nolxfs::DevError>,
@@ -90,18 +120,27 @@ fn with_device<T>(
     if super::cpu::current_ipl() != nolx_hal_core::ipl::Ipl::PASSIVE {
         return Err(nolxfs::DevError::Io(16));
     }
+    let (owner, backend) = {
+        let bindings = BINDINGS.lock();
+        let owner = bindings.0.owner(dev);
+        (owner, owner.and_then(|owner| bindings.1[owner]))
+    };
+    if let Some(handle) = owner {
+        return super::driver_start::device_io_handle(handle, || match backend {
+            Some(VIRTIO) => super::virtio_blk::with_disk(handle, op),
+            Some(AHCI) => super::ahci::with_disk(handle, op),
+            Some(NVME) => super::nvme::with_disk(handle, op),
+            _ => Err(nolxfs::DevError::Io(19)),
+        });
+    }
+    // Preserve Busy admission even for absent legacy devices during framework callbacks.
     let name = match dev {
         VIRTIO => "virtio-blk",
         AHCI => "ahci",
         NVME => "nvme",
         _ => return Err(nolxfs::DevError::Io(19)),
     };
-    super::driver_start::device_io(name, || match dev {
-        VIRTIO => super::virtio_blk::with_disk(op),
-        AHCI => super::ahci::with_disk(op),
-        NVME => super::nvme::with_disk(op),
-        _ => Err(nolxfs::DevError::Io(19)),
-    })
+    super::driver_start::device_io(name, || Err(nolxfs::DevError::Io(19)))
 }
 /// Read whole sectors through a retained controller after its probe has returned.
 pub fn read_sectors(dev: usize, first: u64, out: &mut [u8]) -> Result<(), nolxfs::DevError> {
@@ -124,7 +163,17 @@ pub fn flush(dev: usize) -> Result<(), nolxfs::DevError> {
 
 /// Exercise retained hardware after all framework probe callbacks have returned.
 pub fn retained_selftest(console: &mut dyn HalConsole) {
-    for (dev, name) in [(VIRTIO, "virtio-blk"), (AHCI, "ahci"), (NVME, "nvme")] {
+    for dev in 0..DEVICES {
+        let backend = {
+            let bindings = BINDINGS.lock();
+            bindings.0.owner(dev).and_then(|owner| bindings.1[owner])
+        };
+        let name = match backend {
+            Some(VIRTIO) => "virtio-blk",
+            Some(AHCI) => "ahci",
+            Some(NVME) => "nvme",
+            _ => continue,
+        };
         let mut sector = [0; 512];
         match read_sectors(dev, 0, &mut sector) {
             Ok(()) => {

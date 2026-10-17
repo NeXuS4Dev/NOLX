@@ -1,6 +1,6 @@
 //! Support for drivers whose bring-up runs as a framework start operation.
 //!
-//! The framework's start callback is a plain function with no console and no arguments. So a
+//! The framework's start callback receives a device handle but no console. So a
 //! driver's bring-up writes its output into a [`Log`], the start callback keeps the log and the
 //! result in the driver's static state, and the probe replays the log on the real console once the
 //! framework has returned. The queue lock is never held while the bring-up runs.
@@ -93,11 +93,21 @@ fn with_registry<T>(
 /// Register (once by name), discover, bind and start a device in the persistent registry.
 /// Recursive/concurrent framework operations are refused with Busy, never spun on in callbacks.
 pub fn attach(driver: Driver, id: nolx_df_core::DeviceId) -> Result<usize, Error> {
+    attach_prepared(driver, id, |_| Ok(()))
+}
+
+/// Initialize per-handle transport identity before binding/starting, outside the IRQ lock.
+pub(crate) fn attach_prepared(
+    driver: Driver,
+    id: nolx_df_core::DeviceId,
+    prepare: impl FnOnce(usize) -> Result<(), Error>,
+) -> Result<usize, Error> {
     with_registry(|registry| {
         if registry.find_driver(driver.name).is_none() {
             registry.add_driver(driver)?;
         }
         let dev = registry.add_device(id)?;
+        prepare(dev)?;
         registry.bind(dev)?;
         registry.start(dev)?;
         Ok(dev)
@@ -180,6 +190,20 @@ pub(crate) fn device_io<T>(
     })
 }
 
+/// Admit I/O against the selected handle, never another started instance of the same driver.
+pub(crate) fn device_io_handle<T>(
+    dev: usize,
+    op: impl FnOnce() -> Result<T, nolxfs::DevError>,
+) -> Result<T, nolxfs::DevError> {
+    with_registry(|registry| {
+        if registry.state(dev) != Ok(nolx_df_core::State::Started) {
+            return Err(Error::UnknownDevice);
+        }
+        Ok(op())
+    })
+    .map_err(|error| nolxfs::DevError::Io(if error == Error::Busy { 16 } else { 19 }))?
+}
+
 /// Hardware lifecycle test: persistent handles, callback exclusion, restart and DMA reclamation.
 #[cfg(feature = "hal-driver-lifecycle-test")]
 pub fn lifecycle_selftest(console: &mut dyn HalConsole) {
@@ -217,13 +241,24 @@ pub fn lifecycle_selftest(console: &mut dyn HalConsole) {
     );
     super::nvme::deadline_selftest(console);
     crate::mm::mmio::lifecycle_selftest(console);
+    #[cfg(feature = "hal-driver-multi-test")]
+    multi_selftest(console);
     let devices = started().unwrap();
     let mut tested = 0;
     for (handle, name) in devices.into_iter().flatten() {
         let (disk, pages) = match name {
-            "virtio-blk" => (Some(super::blockdev::VIRTIO), 2),
-            "ahci" => (Some(super::blockdev::AHCI), 2),
-            "nvme" => (Some(super::blockdev::NVME), 6),
+            "virtio-blk" => (
+                Some(super::blockdev::device(handle).expect("missing instance binding")),
+                2,
+            ),
+            "ahci" => (
+                Some(super::blockdev::device(handle).expect("missing AHCI binding")),
+                2,
+            ),
+            "nvme" => (
+                Some(super::blockdev::device(handle).expect("missing NVMe binding")),
+                6,
+            ),
             "e1000" => (None, 11),
             "virtio-net" => (None, 4),
             _ => continue,
@@ -268,6 +303,10 @@ pub fn lifecycle_selftest(console: &mut dyn HalConsole) {
                 "restart leaked MMIO mappings"
             );
             assert_eq!(super::dma::live_pages(), before, "restart leaked DMA pages");
+            #[cfg(feature = "hal-driver-multi-test")]
+            if disk.is_some() {
+                verify_multi_instance(handle);
+            }
             if let Some(disk) = disk {
                 super::blockdev::bounds_selftest(disk);
                 let mut sector = [0; 512];
@@ -301,4 +340,98 @@ pub fn lifecycle_selftest(console: &mut dyn HalConsole) {
         "driver: lifecycle selftest complete, {tested} device(s), DMA pages pinned {}",
         super::dma::live_pages()
     );
+}
+
+#[cfg(feature = "hal-driver-multi-test")]
+static MULTI_TAGS: [core::sync::atomic::AtomicU8; DEVICES] =
+    [const { core::sync::atomic::AtomicU8::new(0) }; DEVICES];
+
+#[cfg(feature = "hal-driver-multi-test")]
+fn verify_multi_instance(handle: usize) {
+    use core::sync::atomic::Ordering;
+    let tag = MULTI_TAGS[handle].load(Ordering::Acquire);
+    assert_ne!(tag, 0, "missing instance identity");
+    let disk = super::blockdev::device(handle).unwrap();
+    let mut data = [0; 512];
+    super::blockdev::read_sectors(disk, 1740, &mut data).unwrap();
+    assert_eq!(
+        data, [tag; 512],
+        "controller identity changed after peer I/O/restart"
+    );
+    super::blockdev::read_sectors(disk, 1750, &mut data).unwrap();
+    assert_eq!(data, [tag ^ 0xa0; 512], "I/O crossed controller boundaries");
+}
+
+/// Distinct host-seeded media identities prove binding/queue/IRQ isolation, not just counts.
+#[cfg(feature = "hal-driver-multi-test")]
+fn multi_selftest(console: &mut dyn HalConsole) {
+    use core::sync::atomic::Ordering;
+    let devices = started().unwrap();
+    let dma_before_probe = super::dma::live_pages();
+    let mappings_before_probe = crate::mm::mmio::live_mappings();
+    super::virtio_blk::probe(console);
+    super::ahci::probe(console);
+    super::nvme::probe(console);
+    assert_eq!(
+        started().unwrap(),
+        devices,
+        "duplicate enumeration created another handle"
+    );
+    assert_eq!(super::dma::live_pages(), dma_before_probe);
+    assert_eq!(crate::mm::mmio::live_mappings(), mappings_before_probe);
+    let _ = writeln!(
+        console,
+        "driver: duplicate storage enumeration preserved handles and resources"
+    );
+    let storage: [Option<(usize, &'static str)>; DEVICES] =
+        devices.map(|entry| entry.filter(|(handle, _)| super::blockdev::device(*handle).is_some()));
+    let count = storage.iter().flatten().count();
+    assert!(
+        count >= 2,
+        "multi-controller fixture needs at least two storage devices"
+    );
+    let mut seen = [false; 256];
+    for &(handle, name) in storage.iter().flatten() {
+        let disk = super::blockdev::device(handle).unwrap();
+        let mut data = [0; 512];
+        super::blockdev::read_sectors(disk, 1740, &mut data).unwrap();
+        let tag = data[0];
+        assert!(
+            tag != 0 && !seen[usize::from(tag)],
+            "two framework handles selected the same media"
+        );
+        assert_eq!(data, [tag; 512]);
+        seen[usize::from(tag)] = true;
+        MULTI_TAGS[handle].store(tag, Ordering::Release);
+        super::blockdev::write_sectors(disk, 1750, &[tag ^ 0xa0; 512]).unwrap();
+        super::blockdev::flush(disk).unwrap();
+        let _ = writeln!(
+            console,
+            "driver: multi instance {handle} {name}, block {disk}, media tag {tag}"
+        );
+    }
+    for &(victim, _) in storage.iter().flatten() {
+        let dma = super::dma::live_pages();
+        let mappings = crate::mm::mmio::live_mappings();
+        stop(victim).unwrap();
+        let disk = super::blockdev::device(victim).unwrap();
+        assert_eq!(
+            super::blockdev::read_sectors(disk, 1740, &mut [0; 512]),
+            Err(nolxfs::DevError::Io(19))
+        );
+        assert_eq!(
+            super::blockdev::write_sectors(disk, 1750, &[0; 512]),
+            Err(nolxfs::DevError::Io(19))
+        );
+        for &(peer, _) in storage.iter().flatten() {
+            if peer != victim {
+                verify_multi_instance(peer);
+            }
+        }
+        start(victim).unwrap();
+        verify_multi_instance(victim);
+        assert_eq!(super::dma::live_pages(), dma);
+        assert_eq!(crate::mm::mmio::live_mappings(), mappings);
+    }
+    let _ = writeln!(console, "driver: multi-controller isolation verified: {count} storage devices, unique media, stopped-target refusal, peer I/O and restart identity");
 }

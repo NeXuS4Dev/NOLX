@@ -985,3 +985,16 @@ stable across address spaces. Expanded lifecycle tests cover stale-access refusa
 VA reuse and exact restart mapping counts. This supersedes the previous healthy-path monotonic
 MMIO limitation, **not** failure-path cleanup, multi-instance binding, IRQ resource release or
 SMP TLB shootdown. M9 remains in progress; see the completion gate for verified limits.
+
+
+### M9 multi-controller storage checkpoint (2026-10-17)
+
+Segment-zero virtio-blk/AHCI/NVMe now bind every matching PCI controller with a per-handle
+BDF/transport context, stable block ID, separate completion counter and MSI/MSI-X vector.
+Independent stop/restart preserves peer I/O and media identity, and repeated enumeration refuses
+duplicate BDFs without resetting live controllers. Ten native fixtures exercise two controllers
+of each backend and six together over legacy PCI and ECAM, plus PCI-bridge traversal and a six-storage/two-NIC Q35 fixture. The host
+checks all media writes, and every fixture ends with zero pinned DMA after removal. This does
+not implement multi-adapter networking, nonzero-segment native binding, all SATA ports/NVMe
+namespaces, dynamic BAR/vector allocation, hotplug retry or failure-path recovery. See the
+[M9 completion gate](docs/development/m9-completion.md); M9 remains in progress.

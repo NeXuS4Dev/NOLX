@@ -53,14 +53,20 @@ extern "C" fn nolx_interrupt_dispatch(frame_pointer: *mut InterruptFrame) -> *mu
     if vector == super::virtio_net::TX_VECTOR {
         return device_completion(frame_pointer, super::virtio_net::on_tx_interrupt);
     }
-    if vector == super::ahci::COMPLETION_VECTOR {
-        return device_completion(frame_pointer, super::ahci::on_completion_interrupt);
+    if super::ahci::handles_vector(vector) {
+        return device_completion(frame_pointer, || {
+            super::ahci::on_completion_interrupt(vector)
+        });
     }
-    if vector == super::nvme::COMPLETION_VECTOR {
-        return device_completion(frame_pointer, super::nvme::on_completion_interrupt);
+    if super::nvme::handles_vector(vector) {
+        return device_completion(frame_pointer, || {
+            super::nvme::on_completion_interrupt(vector)
+        });
     }
-    if vector == super::virtio_blk::COMPLETION_VECTOR {
-        return device_completion(frame_pointer, super::virtio_blk::on_completion_interrupt);
+    if super::virtio_blk::handles_vector(vector) {
+        return device_completion(frame_pointer, || {
+            super::virtio_blk::on_completion_interrupt(vector)
+        });
     }
 
     if apic::is_enabled() && apic::handles_vector(vector) {
@@ -215,7 +221,10 @@ pub fn trigger_general_protection_test() -> ! {
 
 /// Take a device's completion on its own MSI-X vector: count it with `handler`, then send the local
 /// APIC its EOI. The software IPL is raised for the duration, as for the other device vectors.
-fn device_completion(frame_pointer: *mut InterruptFrame, handler: fn()) -> *mut InterruptFrame {
+fn device_completion(
+    frame_pointer: *mut InterruptFrame,
+    handler: impl FnOnce(),
+) -> *mut InterruptFrame {
     let previous = cpu::raise_ipl(Ipl::DEVICE_MIN);
     handler();
     apic::end_of_interrupt();

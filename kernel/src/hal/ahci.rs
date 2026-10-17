@@ -34,13 +34,36 @@ use core::sync::atomic::{fence, AtomicBool, AtomicUsize, Ordering};
 
 /// Dedicated AHCI MSI completion vector.
 pub const COMPLETION_VECTOR: u8 = 0x52;
-static COMPLETIONS: AtomicUsize = AtomicUsize::new(0);
-static MSI_ACTIVE: AtomicBool = AtomicBool::new(false);
-static INTERRUPT_REGISTERS: IrqMutex<Option<(Region, u8)>> = IrqMutex::new(None);
+static COMPLETIONS: [AtomicUsize; driver_start::DEVICES] =
+    [const { AtomicUsize::new(0) }; driver_start::DEVICES];
+static MSI_ACTIVE: [AtomicBool; driver_start::DEVICES] =
+    [const { AtomicBool::new(false) }; driver_start::DEVICES];
+static INTERRUPT_REGISTERS: [IrqMutex<Option<(Region, u8)>>; driver_start::DEVICES] =
+    [const { IrqMutex::new(None) }; driver_start::DEVICES];
 
-/// Clear port/controller causes before local APIC EOI. Never acquires the driver's state lock.
-pub fn on_completion_interrupt() {
-    let registers = INTERRUPT_REGISTERS.lock();
+/// Keep the compatibility vector for the first HBA; reserve one for each further controller.
+fn completion_vector(dev: usize) -> u8 {
+    if blockdev::device(dev) == Some(blockdev::AHCI) {
+        COMPLETION_VECTOR
+    } else {
+        0x90 + dev as u8
+    }
+}
+/// Whether the vector belongs to this driver's bounded per-controller reservation.
+pub fn handles_vector(vector: u8) -> bool {
+    vector == COMPLETION_VECTOR || (0x90..0xa0).contains(&vector)
+}
+/// Attribute a vector to exactly one controller before acknowledging its completion.
+pub fn on_completion_interrupt(vector: u8) {
+    let dev = if vector == COMPLETION_VECTOR {
+        blockdev::primary_handle(blockdev::AHCI)
+    } else {
+        Some(usize::from(vector - 0x90))
+    };
+    let Some(dev) = dev.filter(|&dev| dev < driver_start::DEVICES) else {
+        return;
+    };
+    let registers = INTERRUPT_REGISTERS[dev].lock();
     if let Some((hba, number)) = *registers {
         let status_offset = ahci::port_register(number, ahci::PORT_IS).unwrap_or(0);
         let status = hba.read32(status_offset).unwrap_or(0);
@@ -48,7 +71,7 @@ pub fn on_completion_interrupt() {
         let _ = hba.write32(status_offset, status);
         let _ = hba.write32(ahci::HBA_IS, global);
         if status & 1 != 0 {
-            COMPLETIONS.fetch_add(1, Ordering::Release);
+            COMPLETIONS[dev].fetch_add(1, Ordering::Release);
         }
     }
 }
@@ -131,13 +154,17 @@ struct State {
     log: Log,
     outcome: Option<Result<(), Failure>>,
     disk: Option<Disk>,
+    bdf: Option<Bdf>,
 }
 
-static STATE: IrqMutex<State> = IrqMutex::new(State {
-    log: Log::new(),
-    outcome: None,
-    disk: None,
-});
+static STATE: [IrqMutex<State>; driver_start::DEVICES] = [const {
+    IrqMutex::new(State {
+        log: Log::new(),
+        outcome: None,
+        disk: None,
+        bdf: None,
+    })
+}; driver_start::DEVICES];
 
 /// The match rule: the controller's class, subclass, and programming interface.
 static MATCHES: &[Match] = &[Match::by_class(
@@ -156,30 +183,73 @@ const DISPATCH: Dispatch = Dispatch {
 /// Probe for the controller, register the driver with the framework, and bind and start it. The
 /// bring-up's output is replayed on the console. Failure is reported and does not stop boot.
 pub fn probe(console: &mut dyn HalConsole) {
-    let Some((_, id)) = find_controller() else {
-        let _ = writeln!(console, "ahci: not brought up: {:?}", Failure::NoController);
-        return;
-    };
-    let driver = Driver {
-        name: "ahci",
-        matches: MATCHES,
-        ops: DISPATCH,
-    };
-    if let Err(error) = driver_start::attach(driver, id) {
-        let _ = writeln!(console, "ahci: framework refused the device: {error:?}");
+    let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
+    let mut found = false;
+    for info in inventory.as_slice().iter().filter(|info| {
+        info.class == AHCI_CLASS && info.subclass == AHCI_SUBCLASS && info.prog_if == AHCI_PROG_IF
+    }) {
+        found = true;
+        if STATE.iter().any(|state| state.lock().bdf == Some(info.bdf)) {
+            let _ = writeln!(
+                console,
+                "ahci: PCI {:02x}:{:02x}.{} already registered, duplicate attach refused",
+                info.bdf.bus, info.bdf.device, info.bdf.function
+            );
+            continue;
+        }
+        let id = DeviceId {
+            vendor: info.vendor_id,
+            device: info.device_id,
+            class: info.class,
+            subclass: info.subclass,
+            prog_if: info.prog_if,
+        };
+        let driver = Driver {
+            name: "ahci",
+            matches: MATCHES,
+            ops: DISPATCH,
+        };
+        let attached = driver_start::attach_prepared(driver, id, |dev| {
+            // Recheck under framework exclusion: the outer enumeration check is only a fast path.
+            if STATE.iter().any(|state| state.lock().bdf == Some(info.bdf)) {
+                return Err(nolx_df_core::Error::Busy);
+            }
+            STATE[dev].lock().bdf = Some(info.bdf);
+            blockdev::bind_storage(dev, blockdev::AHCI).map_err(|_| nolx_df_core::Error::Full)?;
+            Ok(())
+        });
+        match attached {
+            Ok(dev) => {
+                let state = STATE[dev].lock();
+                state.log.replay(console);
+                let _ = writeln!(console, "ahci: bound and started through nolx-df");
+                let _ = writeln!(
+                    console,
+                    "ahci: instance {dev}, block {}, vector {:#x}, PCI {:02x}:{:02x}.{}",
+                    blockdev::device(dev).unwrap(),
+                    completion_vector(dev),
+                    info.bdf.bus,
+                    info.bdf.device,
+                    info.bdf.function
+                );
+            }
+            Err(error) => {
+                let _ = writeln!(console, "ahci: framework refused the device: {error:?}");
+                // Rejected starts retain diagnostic state and pinned resources. Identify by BDF.
+                for state in &STATE {
+                    let state = state.lock();
+                    if state.bdf == Some(info.bdf) {
+                        state.log.replay(console);
+                        if let Some(Err(failure)) = &state.outcome {
+                            let _ = writeln!(console, "ahci: not brought up: {failure:?}");
+                        }
+                    }
+                }
+            }
+        }
     }
-    let state = STATE.lock();
-    state.log.replay(console);
-    match &state.outcome {
-        Some(Ok(())) => {
-            let _ = writeln!(console, "ahci: bound and started through nolx-df");
-        }
-        Some(Err(failure)) => {
-            let _ = writeln!(console, "ahci: not brought up: {failure:?}");
-        }
-        None => {
-            let _ = writeln!(console, "ahci: not started");
-        }
+    if !found {
+        let _ = writeln!(console, "ahci: not brought up: {:?}", Failure::NoController);
     }
 }
 
@@ -187,12 +257,12 @@ fn accept(_: &DeviceId) -> bool {
     true
 }
 
-/// The framework's start operation: the whole bring-up. Its output and result go to [`STATE`].
+/// Start the selected controller; BDF, diagnostics and transport ownership stay per handle.
 fn start_device(dev: usize) -> bool {
     let mut log = Log::new();
     let result = bring_up(dev, &mut log);
     let started = result.is_ok();
-    let mut state = STATE.lock();
+    let mut state = STATE[dev].lock();
     state.log = log;
     state.outcome = Some(result.map(|disk| {
         state.disk = Some(disk);
@@ -201,12 +271,12 @@ fn start_device(dev: usize) -> bool {
 }
 
 /// Flush and quiesce hardware before returning owned DMA pages. No IRQ lock spans the wait.
-fn stop_device(_dev: usize) -> bool {
-    let Some(mut disk) = STATE.lock().disk.take() else {
+fn stop_device(dev: usize) -> bool {
+    let Some(mut disk) = STATE[dev].lock().disk.take() else {
         return false;
     };
     if disk.quiesce().is_err() {
-        STATE.lock().disk = Some(disk);
+        STATE[dev].lock().disk = Some(disk);
         return false;
     }
     disk.release();
@@ -214,17 +284,23 @@ fn stop_device(_dev: usize) -> bool {
 }
 
 pub(crate) fn with_disk<T>(
+    dev: usize,
     op: impl FnOnce(&mut dyn nolxfs::sector::SectorDevice) -> Result<T, nolxfs::DevError>,
 ) -> Result<T, nolxfs::DevError> {
-    let mut disk = STATE.lock().disk.take().ok_or(nolxfs::DevError::Io(19))?;
+    let mut disk = STATE[dev]
+        .lock()
+        .disk
+        .take()
+        .ok_or(nolxfs::DevError::Io(19))?;
     let result = op(&mut disk);
-    STATE.lock().disk = Some(disk);
+    STATE[dev].lock().disk = Some(disk);
     result
 }
 
 fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<Disk, Failure> {
-    let (bdf, _) = find_controller().ok_or(Failure::NoController)?;
-    let initial_completions = COMPLETIONS.load(Ordering::Acquire);
+    let bdf = STATE[dev].lock().bdf.ok_or(Failure::NoController)?;
+    let vector = completion_vector(dev);
+    let initial_completions = COMPLETIONS[dev].load(Ordering::Acquire);
     let command = ConfigAccess.read_u32(bdf, 4) & 0xffff;
     ConfigAccess.write_u32(bdf, 4, command | 6);
     let bars = nolx_pci_core::read_bars(&mut ConfigAccess, bdf);
@@ -239,7 +315,7 @@ fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<Disk, Failure> {
     let ghc = hba.read32(ahci::HBA_GHC)?;
     hba.write32(ahci::HBA_GHC, ghc | ahci::GHC_AE)?;
 
-    let number = find_sata_disk(&hba, ports)?;
+    let number = find_sata_disk(dev, &hba, ports)?;
     let _ = writeln!(
         console,
         "ahci: {:02x}:{:02x}.{} abar {abar:#x}, ports {ports:#x}, port {number} is a SATA disk",
@@ -248,7 +324,11 @@ fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<Disk, Failure> {
 
     let page = Dma::new().ok_or(Failure::Memory)?;
     let data = Dma::new().ok_or(Failure::Memory)?;
-    let port = Port { hba: &hba, number };
+    let port = Port {
+        owner: dev,
+        hba: &hba,
+        number,
+    };
     port.stop()?;
     port.write64(ahci::PORT_CLB, page.address(COMMAND_LIST_AT))?;
     port.write64(ahci::PORT_FB, page.address(RECEIVED_FIS_AT))?;
@@ -256,16 +336,16 @@ fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<Disk, Failure> {
     port.write(ahci::PORT_IS, u32::MAX)?;
     port.start()?;
     if super::apic::is_enabled() {
-        *INTERRUPT_REGISTERS.lock() = Some((hba, number));
-        super::msix::enable_msi(bdf, COMPLETION_VECTOR).map_err(Failure::Msi)?;
+        *INTERRUPT_REGISTERS[dev].lock() = Some((hba, number));
+        super::msix::enable_msi(bdf, vector).map_err(Failure::Msi)?;
         // Enable only D2H register-FIS interrupts, one per completed DMA EXT command.
         port.write(0x14, 1)?;
-        MSI_ACTIVE.store(true, Ordering::Release);
+        MSI_ACTIVE[dev].store(true, Ordering::Release);
         hba.write32(ahci::HBA_GHC, hba.read32(ahci::HBA_GHC)? | 2)?;
     } else {
         // Preserve the existing polled disk path on machines without a local APIC.
         port.write(0x14, 0)?;
-        MSI_ACTIVE.store(false, Ordering::Release);
+        MSI_ACTIVE[dev].store(false, Ordering::Release);
         hba.write32(ahci::HBA_GHC, hba.read32(ahci::HBA_GHC)? & !2)?;
     }
 
@@ -325,11 +405,11 @@ fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<Disk, Failure> {
     if back != written {
         return Err(Failure::RoundTrip);
     }
-    if MSI_ACTIVE.load(Ordering::Acquire) {
+    if MSI_ACTIVE[dev].load(Ordering::Acquire) {
         let _ = writeln!(
             console,
-            "ahci: MSI completion interrupts: {} of 3 commands, vector {COMPLETION_VECTOR:#x}",
-            COMPLETIONS.load(Ordering::Acquire) - initial_completions
+            "ahci: MSI completion interrupts: {} of 3 commands, vector {vector:#x}",
+            COMPLETIONS[dev].load(Ordering::Acquire) - initial_completions
         );
     } else {
         let _ = writeln!(console, "ahci: polled completion fallback; no local APIC");
@@ -355,6 +435,7 @@ fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<Disk, Failure> {
     let identify = data.read_array::<512>(0);
     let capacity = ahci::identify_sectors(&identify).ok_or(Failure::Encoding)?;
     let mut disk = Disk {
+        owner: dev,
         capacity,
         bdf,
         hba,
@@ -369,38 +450,13 @@ fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<Disk, Failure> {
     Ok(disk)
 }
 
-/// The first AHCI controller on the bus, if there is one.
-fn find_controller() -> Option<(Bdf, DeviceId)> {
-    let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
-    inventory
-        .as_slice()
-        .iter()
-        .find(|info| {
-            info.class == AHCI_CLASS
-                && info.subclass == AHCI_SUBCLASS
-                && info.prog_if == AHCI_PROG_IF
-        })
-        .map(|info| {
-            (
-                info.bdf,
-                DeviceId {
-                    vendor: info.vendor_id,
-                    device: info.device_id,
-                    class: info.class,
-                    subclass: info.subclass,
-                    prog_if: info.prog_if,
-                },
-            )
-        })
-}
-
 /// The first implemented port whose link is up and whose device is a SATA disk.
-fn find_sata_disk(hba: &Region, ports: u32) -> Result<u8, Failure> {
+fn find_sata_disk(owner: usize, hba: &Region, ports: u32) -> Result<u8, Failure> {
     for number in 0..ahci::PORTS_MAX {
         if !ahci::port_implemented(ports, number) {
             continue;
         }
-        let port = Port { hba, number };
+        let port = Port { owner, hba, number };
         let ssts = port.read(ahci::PORT_SSTS)?;
         let signature = port.read(ahci::PORT_SIG)?;
         if ahci::is_sata_disk(ssts, signature) {
@@ -430,12 +486,16 @@ fn transfer(port: &Port, page: &Dma, data: &Dma, command: Command) -> Result<(),
         lba: command.lba,
         sectors: u32::from(command.sectors),
     };
-    blockdev::run(blockdev::AHCI, request, || issue(port, page, data, command))
+    blockdev::run(
+        blockdev::device(port.owner).ok_or(QueueError::UnknownDevice)?,
+        request,
+        || issue(port, page, data, command),
+    )
 }
 
 /// Issue the command in the port's slot 0 and wait for it. Called through [`transfer`].
 fn issue(port: &Port, page: &Dma, data: &Dma, command: Command) -> Result<(), Failure> {
-    let expected = COMPLETIONS.load(Ordering::Acquire) + 1;
+    let expected = COMPLETIONS[port.owner].load(Ordering::Acquire) + 1;
     let bytes = u32::from(command.sectors) * SECTOR_BYTES;
     let header = ahci::encode_command_header(&CommandHeader {
         fis_dwords: 5,
@@ -479,8 +539,8 @@ fn issue(port: &Port, page: &Dma, data: &Dma, command: Command) -> Result<(), Fa
         },
         "command issue",
     )?;
-    if MSI_ACTIVE.load(Ordering::Acquire)
-        && super::msix::wait_for_interrupts(&COMPLETIONS, expected) < expected
+    if MSI_ACTIVE[port.owner].load(Ordering::Acquire)
+        && super::msix::wait_for_interrupts(&COMPLETIONS[port.owner], expected) < expected
     {
         return Err(Failure::Interrupt);
     }
@@ -514,6 +574,7 @@ fn poll(
 
 /// One implemented port's registers, reached through the HBA window.
 struct Port<'a> {
+    owner: usize,
     hba: &'a Region,
     number: u8,
 }
@@ -571,6 +632,7 @@ impl From<QueueError> for Failure {
 
 /// Owned transport state for a SATA port, reused for every filesystem request.
 struct Disk {
+    owner: usize,
     capacity: u64,
     bdf: Bdf,
     hba: Region,
@@ -585,6 +647,7 @@ impl super::storage_volume::SectorDisk for Disk {
     fn flush(&mut self) -> Result<(), nolxfs::DevError> {
         issue(
             &Port {
+                owner: self.owner,
                 hba: &self.hba,
                 number: self.number,
             },
@@ -604,6 +667,7 @@ impl super::storage_volume::SectorDisk for Disk {
         for (i, chunk) in out.chunks_mut(4096).enumerate() {
             transfer(
                 &Port {
+                    owner: self.owner,
                     hba: &self.hba,
                     number: self.number,
                 },
@@ -627,6 +691,7 @@ impl super::storage_volume::SectorDisk for Disk {
             self.data.write(0, chunk);
             transfer(
                 &Port {
+                    owner: self.owner,
                     hba: &self.hba,
                     number: self.number,
                 },
@@ -649,6 +714,7 @@ impl Disk {
     fn quiesce(&mut self) -> Result<(), Failure> {
         nolxfs::sector::SectorDevice::flush(self).map_err(|_| Failure::Encoding)?;
         let port = Port {
+            owner: self.owner,
             hba: &self.hba,
             number: self.number,
         };
@@ -656,11 +722,11 @@ impl Disk {
         port.write(0x14, 0)?;
         self.hba
             .write32(ahci::HBA_GHC, self.hba.read32(ahci::HBA_GHC)? & !2)?;
-        *INTERRUPT_REGISTERS.lock() = None;
-        MSI_ACTIVE.store(false, Ordering::Release);
+        *INTERRUPT_REGISTERS[self.owner].lock() = None;
+        MSI_ACTIVE[self.owner].store(false, Ordering::Release);
         let command = ConfigAccess.read_u32(self.bdf, 4) & 0xffff;
         ConfigAccess.write_u32(self.bdf, 4, command & !4);
-        blockdev::detach(blockdev::AHCI)?;
+        blockdev::detach(blockdev::device(self.owner).ok_or(QueueError::UnknownDevice)?)?;
         Ok(())
     }
     fn release(self) {

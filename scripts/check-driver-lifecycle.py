@@ -2,7 +2,7 @@
 """Exercise persistent native driver stop/restart/removal and exact DMA ownership.
 
 Build with make kernel KERNEL_FEATURES=hal-driver-lifecycle-test.
-Healthy paths only: failed-start recovery and MMIO unmapping are separate gates.
+Healthy paths only: failed-start recovery and dynamic IRQ reclamation remain separate gates.
 """
 import argparse
 import os

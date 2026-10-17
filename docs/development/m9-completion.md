@@ -16,13 +16,15 @@ M9 to the already implemented boot probes. Check items only with executable evid
       INTx path or explicitly add an MSI-capable adapter, rather than claiming unsupported MSI).
 - [ ] Assign unconfigured BARs and bridge resource windows without overlaps, rather than
       depending exclusively on firmware-assigned addresses.
-- [ ] Bind supported devices beyond the current one-device, segment-zero boot probes.
+- [x] Bind multiple virtio-blk/AHCI/NVMe PCI controllers on segment zero, including
+      secondary buses, with per-controller queues, interrupts and independent lifecycle.
+- [ ] Multi-adapter networking and native nonzero-segment binding.
 - [x] Persistent system registry; retain native storage/network state past probe return;
       healthy stop/restart/removal with hardware quiescence and exact DMA reclamation.
 - [x] Serialized, reusable, generation-checked MMIO windows with partial-map rollback
       and shared-root-preserving unmap on healthy stop (BSP only).
 - [ ] Complete failed-start/failed-stop recovery and interrupt-resource reclamation;
-      multi-controller contexts and binding remain a separate gate above.
+      remaining network/segment binding is tracked separately above.
 
 ## Storage integration
 
@@ -287,3 +289,46 @@ selftest exercises immediate success and an always-false predicate through the a
 all seven lifecycle fixtures assert its marker. Sixteen additional local NVMe boots (four in
 parallel, each with xHCI and e1000) passed filesystem/retained-read checks after the change;
 host mount/reboot and three malformed-media refusals also passed again.
+
+
+## Multi-controller native storage (2026-10-17)
+
+All matching segment-zero PCI storage functions are now offered to the framework, not just
+its first matching BDF. Each driver retains BDF, transport/DMA state, diagnostics, completion
+counters and IRQ-visible state per framework handle. AHCI acknowledges only the selected HBA's
+port/controller causes. MSI/MSI-X vectors are distinct per controller: compatibility vectors
+0x51/0x52/0x50 remain for each backend's first binding; additional virtio/AHCI/NVMe instances use
+bounded reserved ranges 0x60..0x6f / 0x90..0x9f / 0xa0..0xaf respectively. This is a static
+reservation scheme, **not** a completed dynamic interrupt-vector allocator/release policy.
+
+A host-tested bounded binding table assigns each instance a stable block ID. IDs 0/1/2 remain
+preferred for the first virtio/AHCI/NVMe controller; further instances take disjoint extra IDs.
+IDs and framework records are not recycled after removal. Public block I/O checks the selected
+handle's Started state, never another running device of the same driver. Every data transfer
+uses that controller's own block queue. Synchronous operations remain globally serialized;
+these tests do not claim parallel request dispatch or demonstrate concurrent merging.
+Repeated enumeration refuses an already recorded BDF without allocating resources or resetting
+its controller; failed/removed records also retain their identity (no automatic hotplug retry).
+
+`make kernel KERNEL_FEATURES=hal-driver-multi-test` and
+`python3 scripts/check-storage-multi.py` run ten fixtures: two controllers of each kind
+separately and all six together, on both PC/legacy and Q35/ECAM, plus two virtio controllers
+behind a firmware-configured PCI bridge on PC, and all six storage controllers alongside both
+native NIC kinds on Q35. Each medium has a different host-seeded tag.
+Kernel tests verify distinct identities and writes, stopped-target read/write refusal, continued
+peer I/O while each controller is stopped, and identity after restart. They additionally repeat
+all storage probes and assert unchanged handles/DMA/MMIO resources. Then every controller goes
+through the existing three-cycle reclaim/restart/removal tests. The host verifies every image's
+own tag/write and final lifecycle write, unique BDFs/block IDs/vectors, and zero pinned DMA.
+All ten fixtures passed locally on QEMU 11.0.2; the seven existing lifecycle fixtures passed too.
+Dedicated CI job: `Multi-controller storage identity and lifecycle`.
+
+**Limits remain:** e1000/virtio-net still have singleton native contexts; native binding is still
+segment zero; AHCI exposes only the first linked SATA port per controller and NVMe namespace 1.
+BARs/bridge windows remain firmware-assigned, capacity is bounded, and there is no automatic
+hotplug/rebind policy. Failed initialization/stop recovery, IRQ-resource reclamation, USB/HID,
+AML and power gates are not closed by this checkpoint. **M9 is still not complete.**
+
+Local host regression passed 702 tests in each overlapping command. Host and multi-feature
+kernel Clippy, formatting, boot/layout/conformance checks and unsafe audit (249 blocks / zero
+missing invariants) passed. Current assertion database: 332 assertions / zero problems.
