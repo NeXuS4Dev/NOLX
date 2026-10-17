@@ -229,7 +229,7 @@ impl MemoryMap {
         let base = crate::mm::phys::direct_ptr::<u8>(u64::from(addr));
         let mut offset: u32 = 0;
 
-        while offset + 24 <= length {
+        while offset.checked_add(24).is_some_and(|end| end <= length) {
             // SAFETY: the caller guarantees the buffer is valid for `length` bytes, and the
             // loop condition keeps every read below that bound.
             let (size, region) = unsafe {
@@ -253,10 +253,17 @@ impl MemoryMap {
             // `size` is the payload length excluding the size field itself. Zero or a value
             // larger than what remains means the buffer is malformed; stop rather than loop
             // forever or read out of bounds.
-            if size == 0 || size > length || size + 4 > length - offset {
+            let Some(step) = size.checked_add(4) else {
+                break;
+            };
+            if size < 20 || step > length - offset {
                 break;
             }
-            offset += size + 4;
+            offset += step;
+            if region.base.checked_add(region.length).is_none() {
+                map.dropped += 1;
+                continue;
+            }
 
             if region.length == 0 {
                 continue;
@@ -269,6 +276,9 @@ impl MemoryMap {
             }
         }
 
+        if offset != length {
+            map.dropped += 1;
+        }
         map
     }
 
@@ -278,7 +288,7 @@ impl MemoryMap {
         &self.regions[..self.count]
     }
 
-    /// Regions the firmware reported beyond [`MAX_REGIONS`].
+    /// Omitted regions, including overflow, malformed/trailing input and capacity truncation.
     #[must_use]
     pub const fn truncated(&self) -> usize {
         self.dropped

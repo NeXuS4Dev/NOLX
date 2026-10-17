@@ -17,7 +17,7 @@ use nolx_pci_core::{Bar, BarSet, Bdf, ConfigSpace};
 use super::{inl, outl};
 use crate::mm::mmio::{self, Region};
 use crate::sync::IrqMutex;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use nolx_hal_core::acpi::mcfg::MAX_ALLOCATIONS;
 use nolx_pci_core::ecam::{AccessWidth, EcamError, EcamWindow, ExtendedConfigSpace, SegmentConfig};
 
@@ -251,11 +251,9 @@ pub fn init(console: &mut dyn HalConsole) {
         ECAM_WRITES.load(Ordering::Relaxed)
     );
     probe_ecam(console, &inventory);
-    for info in inventory.as_slice() {
-        if info.header_type == 0 {
-            let bars = nolx_pci_core::read_bars(&mut ConfigAccess, info.bdf);
-            report_bars(console, info.bdf, &bars);
-        }
+    // These were sized before any driver owned DMA. Do not disable live device decoding.
+    for (bdf, bars) in BAR_CACHE.lock().iter().flatten() {
+        report_bars(console, *bdf, bars);
     }
 }
 
@@ -359,4 +357,164 @@ fn probe_ecam(console: &mut dyn HalConsole, inventory: &nolx_pci_core::Inventory
         console,
         "pci: ECAM {matched} identity match(es), {refused} refused; legacy fallback available"
     );
+}
+
+static RESOURCE_HOLE_CLEAR: AtomicBool = AtomicBool::new(false);
+static BAR_CACHE: IrqMutex<[Option<(Bdf, BarSet)>; nolx_pci_core::MAX_FUNCTIONS]> =
+    IrqMutex::new([None; nolx_pci_core::MAX_FUNCTIONS]);
+
+/// Validate the bounded PC/Q35 profile's memory aperture against the complete loader map.
+/// Any described memory (including reserved firmware regions) blocks this profile.
+pub(crate) fn record_boot_memory(map: &super::multiboot::MemoryMap) {
+    let clear = !map.regions().is_empty()
+        && map.truncated() == 0
+        && map.regions().iter().all(|r| {
+            r.base
+                .checked_add(r.length)
+                .is_some_and(|end| end <= 0xc000_0000 || r.base >= 0xf000_0000)
+        });
+    RESOURCE_HOLE_CLEAR.store(clear, Ordering::Release);
+}
+
+#[cfg(feature = "hal-pci-resource-test")]
+fn resource_test_target(info: &nolx_pci_core::FunctionInfo) -> bool {
+    (info.vendor_id == 0x1af4 && [0x1000, 0x1041, 0x1001, 0x1042].contains(&info.device_id))
+        || (info.vendor_id == 0x8086 && info.device_id == 0x100e)
+        || (info.class == 1
+            && ((info.subclass == 6 && info.prog_if == 1)
+                || (info.subclass == 8 && info.prog_if == 2)))
+        || (info.class == 0x0c && info.subclass == 3 && info.prog_if == 0x30)
+        || info.header_type == 1
+}
+
+/// Repair missing boot BARs/windows on the bounded PC/Q35 segment-zero profile, before drivers.
+/// Firmware bus numbering remains required. Unknown host bridges/ambiguous memory maps retain
+/// firmware resources without guessing an aperture. This is not evaluated ACPI `_CRS` policy.
+pub fn prepare_resources(console: &mut dyn HalConsole) {
+    use nolx_pci_core::resources::{self, Pool, Range};
+    let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
+    let host = ConfigAccess.read_u32(
+        Bdf {
+            bus: 0,
+            device: 0,
+            function: 0,
+        },
+        0,
+    );
+    let supported =
+        [0x1237_8086, 0x29c0_8086].contains(&host) && RESOURCE_HOLE_CLEAR.load(Ordering::Acquire);
+    if supported {
+        let mut memory = Pool::new(Range::new(0xc000_0000, 0x3000_0000).unwrap()).unwrap();
+        let mut io = Pool::new(Range::new(0xc000, 0x3000).unwrap()).unwrap();
+        for mapping in MAPPINGS.lock().iter().flatten() {
+            let (base, bytes) = mapping.window.physical_range();
+            memory.reserve(Range::new(base, bytes).unwrap()).unwrap();
+        }
+        // Chipset PM/SMBus fixed registers are not ordinary PCI BARs.
+        for info in inventory
+            .as_slice()
+            .iter()
+            .filter(|i| i.vendor_id == 0x8086)
+        {
+            if info.device_id == 0x7113 {
+                let pm = ConfigAccess.read_u32(info.bdf, 0x40) & 0xffc0;
+                let smbus = ConfigAccess.read_u32(info.bdf, 0x90) & 0xfff0;
+                if pm != 0 {
+                    io.reserve(Range::new(u64::from(pm), 64).unwrap()).unwrap();
+                }
+                if smbus != 0 {
+                    io.reserve(Range::new(u64::from(smbus), 16).unwrap())
+                        .unwrap();
+                }
+            } else if info.device_id == 0x2918 {
+                let pm = ConfigAccess.read_u32(info.bdf, 0x40) & 0xff80;
+                if pm != 0 {
+                    io.reserve(Range::new(u64::from(pm), 128).unwrap()).unwrap();
+                }
+            }
+        }
+        #[cfg(feature = "hal-pci-resource-test")]
+        {
+            let mut cleared = 0;
+            for info in inventory
+                .as_slice()
+                .iter()
+                .filter(|i| resource_test_target(i))
+            {
+                let command = ConfigAccess.read_u32(info.bdf, 4) & 0xffff;
+                ConfigAccess.write_u32(info.bdf, 4, command & !7);
+                let bars = if info.header_type == 1 {
+                    nolx_pci_core::read_bridge_bars(&mut ConfigAccess, info.bdf)
+                } else {
+                    nolx_pci_core::read_bars(&mut ConfigAccess, info.bdf)
+                };
+                for (slot, bar) in bars.slots.iter().enumerate() {
+                    if matches!(bar, Bar::Unused | Bar::Reserved) {
+                        continue;
+                    }
+                    let offset = 0x10 + slot as u8 * 4;
+                    let flags = ConfigAccess.read_u32(info.bdf, offset)
+                        & if matches!(bar, Bar::Io { .. }) { 3 } else { 15 };
+                    ConfigAccess.write_u32(info.bdf, offset, flags);
+                    if matches!(bar, Bar::Memory64 { .. }) {
+                        ConfigAccess.write_u32(info.bdf, offset + 4, 0);
+                    }
+                    cleared += 1;
+                }
+                if info.header_type == 1 {
+                    ConfigAccess.write_u32(info.bdf, 0x20, 0x0000_fff0);
+                    ConfigAccess.write_u32(info.bdf, 0x24, 0x0000_fff0);
+                    let types = ConfigAccess.read_u32(info.bdf, 0x1c) & 0x0f0f;
+                    ConfigAccess.write_u32(info.bdf, 0x1c, types | 0xf0);
+                    ConfigAccess.write_u32(info.bdf, 0x30, 0);
+                }
+            }
+            assert!(cleared > 0, "resource fixture needs supported devices");
+            let _ = writeln!(console, "pci: resource fault injection: {cleared} BAR addresses and bridge forwarding cleared before native assignment");
+        }
+        let plan = resources::plan(&mut ConfigAccess, &inventory, memory, io)
+            .expect("PCI resource plan refused; no assignments committed");
+        plan.apply(&mut ConfigAccess)
+            .expect("PCI resource readback/rollback refused");
+        for a in plan.assignments() {
+            let _ = writeln!(
+                console,
+                "pci: assigned {:02x}:{:02x}.{} bar{} {} {:#x}..{:#x}",
+                a.bdf.bus,
+                a.bdf.device,
+                a.bdf.function,
+                a.slot,
+                if a.io { "io" } else { "mem" },
+                a.range.start,
+                a.range.end
+            );
+        }
+        let _ = writeln!(
+            console,
+            "pci: native resource assignment: {} BARs, {} bridge windows, readback verified",
+            plan.assignments().len(),
+            plan.windows()
+        );
+    } else {
+        let _ = writeln!(
+            console,
+            "pci: native resource profile unavailable; firmware assignments retained"
+        );
+        #[cfg(feature = "hal-pci-resource-test")]
+        panic!(
+            "resource fixture requires a supported host and a clear complete firmware memory map"
+        );
+    }
+    let mut cache = BAR_CACHE.lock();
+    for (slot, info) in inventory
+        .as_slice()
+        .iter()
+        .filter(|i| i.header_type == 0)
+        .enumerate()
+    {
+        cache[slot] = Some((
+            info.bdf,
+            nolx_pci_core::read_bars(&mut ConfigAccess, info.bdf),
+        ));
+    }
 }

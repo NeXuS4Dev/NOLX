@@ -1010,3 +1010,15 @@ and six-storage/four-NIC integration. Independent pcaps verify 214 tagged public
 all devices complete independent lifecycle reclamation with zero pinned DMA. This closes the
 healthy multi-adapter context gate, not firmware PCI interrupt discovery, native nonzero-segment
 binding, resource allocation, failure recovery or the USB/AML/power acceptance gates.
+
+
+### M9 bounded native PCI resource checkpoint (2026-10-17)
+
+Boot-time planning assigns missing 32/64-bit memory and I/O BARs and closed type-1 bridge
+windows on the validated PC/Q35 segment-zero profile. Fixed resources are reserved, nested
+windows are sized bottom-up, and programming verifies readback with rollback before drivers
+own DMA. Twelve new host tests cover refusal paths. Six cleared-firmware-assignment fixtures
+exercise root/one-bridge/two-nested-bridge layouts on both machines, with six real disk media,
+four captured NIC endpoints, independent lifecycle and zero pinned DMA. This is not general
+`_CRS` resource discovery, new bus numbering, hotplug/rebalancing, 64-bit prefetch windows or
+nonzero-segment native binding. The broader M9 resource gate remains partially open.

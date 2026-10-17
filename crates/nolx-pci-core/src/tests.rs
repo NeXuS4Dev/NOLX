@@ -6,9 +6,9 @@ use std::vec::Vec;
 
 /// One function's 64 dwords, plus the mask of bits software is allowed to change.
 #[derive(Clone)]
-struct Regs {
-    values: [u32; 64],
-    writable: [u32; 64],
+pub(super) struct Regs {
+    pub(super) values: [u32; 64],
+    pub(super) writable: [u32; 64],
 }
 
 impl Regs {
@@ -20,7 +20,13 @@ impl Regs {
     }
 
     /// A type-0 endpoint with the given identity. Command register 0 means no capability list.
-    fn endpoint(vendor: u16, device: u16, class: u8, subclass: u8, multifunction: bool) -> Self {
+    pub(super) fn endpoint(
+        vendor: u16,
+        device: u16,
+        class: u8,
+        subclass: u8,
+        multifunction: bool,
+    ) -> Self {
         let mut regs = Self::blank();
         regs.values[0] = (vendor as u32) | ((device as u32) << 16);
         regs.values[2] = ((class as u32) << 24) | ((subclass as u32) << 16);
@@ -29,7 +35,7 @@ impl Regs {
     }
 
     /// A PCI-to-PCI bridge whose secondary bus is `secondary`.
-    fn bridge(vendor: u16, device: u16, secondary: u8) -> Self {
+    pub(super) fn bridge(vendor: u16, device: u16, secondary: u8) -> Self {
         let mut regs = Self::endpoint(vendor, device, CLASS_BRIDGE, SUBCLASS_PCI_BRIDGE, false);
         regs.values[3] |= 0x0001_0000; // header type 1
         regs.values[6] = ((secondary as u32) << 8) | ((secondary as u32 + 1) << 16);
@@ -38,25 +44,25 @@ impl Regs {
 }
 
 /// A machine: a set of functions at fixed addresses. Anything else reads as "no device".
-struct Machine {
+pub(super) struct Machine {
     functions: Vec<(Bdf, Regs)>,
     /// Every write that reached configuration space, so restore-after-probe can be checked.
-    writes: Vec<(Bdf, u8, u32)>,
+    pub(super) writes: Vec<(Bdf, u8, u32)>,
 }
 
 impl Machine {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             functions: Vec::new(),
             writes: Vec::new(),
         }
     }
 
-    fn add(&mut self, bdf: Bdf, regs: Regs) {
+    pub(super) fn add(&mut self, bdf: Bdf, regs: Regs) {
         self.functions.push((bdf, regs));
     }
 
-    fn regs(&self, bdf: Bdf) -> Option<&Regs> {
+    pub(super) fn regs(&self, bdf: Bdf) -> Option<&Regs> {
         self.functions
             .iter()
             .find(|(addr, _)| *addr == bdf)
@@ -82,7 +88,7 @@ impl ConfigSpace for Machine {
     }
 }
 
-fn bdf(bus: u8, device: u8, function: u8) -> Bdf {
+pub(super) fn bdf(bus: u8, device: u8, function: u8) -> Bdf {
     Bdf::new(bus, device, function).expect("valid test address")
 }
 

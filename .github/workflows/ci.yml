@@ -707,6 +707,33 @@ jobs:
       - uses: ./.github/actions/report-failure
         if: failure()
 
+  pci-resources:
+    name: Native PCI BAR and nested bridge resource recovery
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.88.0
+          targets: x86_64-unknown-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install QEMU
+        run: |
+          sudo apt-get update 2>&1 | tail -1
+          sudo apt-get install -y qemu-system-x86 2>&1 | tail -3
+      - name: Build explicit cleared-resource hardware test
+        run: make kernel KERNEL_FEATURES=hal-pci-resource-test,hal-driver-multi-test,hal-driver-net-multi-test 2>&1 | tee /tmp/job.log
+      - name: Clear firmware assignments, rebuild resources, verify ten devices
+        run: python3 scripts/check-pci-resources.py 2>&1 | tee -a /tmp/job.log
+      - name: Annotate serial logs on failure
+        if: failure()
+        run: |
+          for log in build/net-multi-*.log; do
+            tr -cd '\11\12\40-\176' < "$log" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
+          done
+      - uses: ./.github/actions/report-failure
+        if: failure()
+
   storage-multi:
     name: Multi-controller storage identity and lifecycle
     runs-on: ubuntu-latest

@@ -19,21 +19,25 @@ packets = WIRE['packets']
 GATEWAY = WIRE['GATEWAY']
 
 
-def boot(qemu, kernel, names, machine, bridge=False, shared=False, storage=False):
+def boot(qemu, kernel, names, machine, bridge=False, shared=False, storage=False, nested=False):
     label = ('mixed' if len(set(names)) > 1 else names[0]) + '-' + machine
     label += '-bridge' if bridge else '-shared' if shared else ''
+    label += '-nested' if nested else ''
     label += '-storage' if storage else ''
     log = ROOT / 'build' / f'net-multi-{label}.log'
     command = [qemu, '-machine', 'q35,sata=off' if machine == 'q35' else machine,
                '-kernel', str(kernel), '-m', '512M', '-nographic', '-no-reboot', '-net', 'none']
     if bridge:
-        command += ['-device', 'pci-bridge,id=nics,chassis_nr=1']
+        model = 'pcie-pci-bridge' if machine == 'q35' else 'pci-bridge'
+        command += ['-device', model + ',id=nics' + (',chassis_nr=1' if machine == 'pc' else '')]
+        if nested:
+            command += ['-device', 'pci-bridge,id=inner,bus=nics,chassis_nr=2']
     captures = {}
     for i, name in enumerate(names):
         mac = bytes([2, 0, 0, 0, 0, 0x20 + i])
         capture = ROOT / 'build' / f'net-multi-{label}-{i}.pcap'
         captures[mac] = capture
-        bus = ',bus=nics' if bridge else ''
+        bus = (',bus=inner' if nested else ',bus=nics') if bridge else ''
         address = f',addr={4 + i * 4:x}' if shared else ''
         modern = ',disable-legacy=on' if name == 'virtio-net' and i % 2 else ''
         model = 'virtio-net-pci' if name == 'virtio-net' else name
@@ -52,11 +56,11 @@ def boot(qemu, kernel, names, machine, bridge=False, shared=False, storage=False
             disks.append((disk, tag))
             command += ['-drive', f'file={disk},if=none,id=disk{i},format=raw']
             if kind == 'virtio-blk':
-                command += ['-device', f'virtio-blk-pci,drive=disk{i}']
+                command += ['-device', f'virtio-blk-pci,drive=disk{i}' + (bus if bridge else '')]
             elif kind == 'ahci':
-                command += ['-device', f'ahci,id=ahci{i}', '-device', f'ide-hd,drive=disk{i},bus=ahci{i}.0']
+                command += ['-device', f'ahci,id=ahci{i}' + (bus if bridge else ''), '-device', f'ide-hd,drive=disk{i},bus=ahci{i}.0']
             else:
-                command += ['-device', f'nvme,drive=disk{i},serial=nolx{i}']
+                command += ['-device', f'nvme,drive=disk{i},serial=nolx{i}' + (bus if bridge else '')]
     complete = f'driver: lifecycle selftest complete, {len(names) + len(disks)} device(s), DMA pages pinned 0'
     with log.open('w') as out:
         process = subprocess.Popen(command, cwd=ROOT, stdout=out, stderr=subprocess.STDOUT)
@@ -127,6 +131,7 @@ def boot(qemu, kernel, names, machine, bridge=False, shared=False, storage=False
                     image.seek(sector * 512)
                     assert image.read(512) == bytes([value]) * 512, disk
     print(f'PASS: {label}: {len(names)} independent adapters, {len(exchanges)} captured public ARP exchanges, own IRQ progress, zero pinned DMA', flush=True)
+    return text
 
 
 def main():

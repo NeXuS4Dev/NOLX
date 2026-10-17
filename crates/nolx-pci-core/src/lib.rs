@@ -22,6 +22,7 @@
 
 pub mod ecam;
 pub mod msi;
+pub mod resources;
 
 /// I/O port holding the configuration address register.
 pub const CONFIG_ADDRESS_PORT: u16 = 0xCF8;
@@ -286,7 +287,7 @@ const fn size_from_mask(mask: u64, width: u32) -> Option<u64> {
     } else {
         size
     };
-    if size == 0 {
+    if size == 0 || !size.is_power_of_two() {
         None
     } else {
         Some(size)
@@ -314,18 +315,27 @@ pub struct BarSet {
 /// back exactly as it was. Only its low half is written, so the status bits (some of which are
 /// write-one-to-clear) are never touched.
 pub fn read_bars<C: ConfigSpace>(cfg: &mut C, bdf: Bdf) -> BarSet {
+    read_header_bars(cfg, bdf, BAR_SLOTS)
+}
+
+/// Size only the two BAR slots of a type-1 bridge, never its routing registers.
+pub fn read_bridge_bars<C: ConfigSpace>(cfg: &mut C, bdf: Bdf) -> BarSet {
+    read_header_bars(cfg, bdf, 2)
+}
+
+fn read_header_bars<C: ConfigSpace>(cfg: &mut C, bdf: Bdf, slots: usize) -> BarSet {
     let mut set = BarSet::default();
     let command = cfg.read_u32(bdf, OFF_COMMAND) & 0xFFFF;
     cfg.write_u32(bdf, OFF_COMMAND, command & !COMMAND_DECODE_MASK);
     let mut slot = 0usize;
-    while slot < BAR_SLOTS {
+    while slot < slots {
         let offset = OFF_BAR0 + (slot as u8) * 4;
         let original_low = cfg.read_u32(bdf, offset);
         // A 64-bit window in the last slot has no room for its upper half: it is reserved,
         // and it is never probed, because writing the slot would touch a register that is not
         // ours to size.
         let is_64 = original_low & 0x1 == 0 && (original_low >> 1) & 0x3 == 0x2;
-        if is_64 && slot + 1 >= BAR_SLOTS {
+        if is_64 && slot + 1 >= slots {
             set.slots[slot] = Bar::Reserved;
             slot += 1;
             continue;
@@ -335,8 +345,8 @@ pub fn read_bars<C: ConfigSpace>(cfg: &mut C, bdf: Bdf) -> BarSet {
         } else {
             0
         };
-        let bar = decode_bar(original_low, original_high);
-        let width = bar_slots(&bar);
+        let mut bar = decode_bar(original_low, original_high);
+        let width = if is_64 { 2 } else { 1 };
 
         // Probe. Writing all ones and reading back reveals the implemented address bits.
         cfg.write_u32(bdf, offset, 0xFFFF_FFFF);
@@ -349,6 +359,24 @@ pub fn read_bars<C: ConfigSpace>(cfg: &mut C, bdf: Bdf) -> BarSet {
         }
         cfg.write_u32(bdf, offset, original_low);
 
+        // Zero address is not absence: the sizing mask identifies an implemented BAR.
+        if bar == Bar::Unused {
+            bar = if original_low & 1 != 0 && probed_low & !3 != 0 {
+                Bar::Io { port: 0 }
+            } else if is_64 && (probed_low & !15 != 0 || probed_high != 0) {
+                Bar::Memory64 {
+                    base: 0,
+                    prefetchable: original_low & 8 != 0,
+                }
+            } else if !is_64 && probed_low & !15 != 0 {
+                Bar::Memory32 {
+                    base: 0,
+                    prefetchable: original_low & 8 != 0,
+                }
+            } else {
+                Bar::Unused
+            };
+        }
         set.slots[slot] = bar;
         set.sizes[slot] = bar_size(&bar, probed_low, probed_high);
         if width == 2 {

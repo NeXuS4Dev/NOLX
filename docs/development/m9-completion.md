@@ -16,8 +16,11 @@ M9 to the already implemented boot probes. Check items only with executable evid
       independent virtio-net MSI-X completions; 82540EM does not support MSI.
 - [ ] Discover/reroute PCI interrupts using evaluated ACPI `_PRT`/link devices rather
       than relying on the legacy PCI Interrupt Line value.
-- [ ] Assign unconfigured BARs and bridge resource windows without overlaps, rather than
-      depending exclusively on firmware-assigned addresses.
+- [x] Assign missing memory32/memory64/I/O BARs and closed type-1 memory/I/O bridge
+      windows on the bounded PC/Q35 segment-zero profile, with readback and rollback.
+- [ ] Generalize resource assignment using evaluated host-bridge `_CRS`: root apertures,
+      bus-number allocation, existing-resource rebalancing, nonzero segments and 64-bit
+      prefetchable windows rather than the bounded board profile.
 - [x] Bind multiple virtio-blk/AHCI/NVMe PCI controllers on segment zero, including
       secondary buses, with per-controller queues, interrupts and independent lifecycle.
 - [x] Multi-adapter native e1000/virtio-net contexts with exact-handle public RX/TX.
@@ -398,3 +401,52 @@ boot/layout/conformance checks, 21 Multiboot checks, six single-adapter network 
 three backend persistence/reboot/malformed-media suites and three power fixtures. Unsafe audit:
 249 blocks / zero missing invariants. Assertion database: 334 assertions / zero problems.
 No pull request was opened for this checkpoint.
+
+
+## Native BAR and bridge-window allocation (2026-10-17)
+
+`nolx-pci-core::resources` now plans missing BAR addresses and closed type-1 memory/I/O
+windows across an already numbered segment-zero tree. Existing BARs/windows are reservations;
+new allocations are power-of-two aligned and checked for overlap and ancestor forwarding.
+Memory64/prefetchable BARs can be assigned below 4 GiB through non-prefetchable bridge windows.
+Bridge demand is computed bottom-up and allocated top-down, largest first; nested windows
+use 1 MiB memory and 4 KiB I/O granularity. Incomplete/ambiguous topology, unrouted fixed
+resources, malformed sizes, aliases and insufficient aperture space refuse the plan.
+
+BAR sizing now distinguishes an implemented zero-address BAR from an unused slot, retains a
+64-bit BAR's upper slot even at address zero, rejects non-power-of-two masks, and sizes only
+two slots in type-1 headers. Programming disables decoding/bus mastering on touched functions,
+checks every proposed address/window and command through readback, and rolls back on refusal.
+Command and Secondary Status W1C bits are never copied into writes. An unverified rollback is
+fatal to native bring-up; it is not advertised as safe recovery with an unreliable transport.
+Twelve new host tests cover allocation, missing 32/64/I/O BARs, reservations, nested routing,
+window/endpoint overlap, bad topology/sizes, exhaustion, refused writes and failed rollback.
+
+The native boot hook runs **before driver startup**. The current board policy recognizes the
+PC/i440FX and Q35 host IDs, requires an untruncated/nonmalformed loader memory map with no
+reported memory in 0xc0000000..0xf0000000, reserves mapped ECAM, and uses 0xc000..0xf000 I/O
+ports with chipset PM/SMBus reservations. It never chooses this aperture on unknown host
+bridges or ambiguous maps. This is an explicit bounded board profile, **not** evaluated ACPI
+`_CRS` or a general platform resource policy. Unrecoverable planning/programming errors halt
+before any driver binds. Unknown profiles retain firmware configuration without repair.
+Late PCI inventory reporting now uses a fixed boot-time BAR cache rather than temporarily
+disabling decoding and re-sizing BARs of running controllers. The cache retains no heap memory.
+
+`hal-pci-resource-test,hal-driver-multi-test,hal-driver-net-multi-test` builds an explicit
+fault-injection kernel. Before planning, it clears supported devices' BAR addresses and bridge
+memory/prefetch/I/O forwarding while retaining only firmware bus numbers and BAR type flags.
+`scripts/check-pci-resources.py` runs six fixtures: PC and Q35, each with all ten devices at the
+root, behind one bridge and behind two nested bridges. Every fixture rebuilds 21--23 BARs and
+0/2/4 bridge windows, checks non-overlapping aligned addresses and readback, and completes the
+existing six-media/four-NIC identity, peer-I/O, restart/removal and zero-pinned-DMA checks.
+Independent pcaps verify 216 tagged public ARP exchanges; all six disk tags/writes are checked
+on every boot. I/O BAR/window **configuration** is checked; data-path evidence is memory
+mapped I/O, not a new legacy port-I/O driver. All six passed locally with QEMU 11.0.2.
+Dedicated CI job: `Native PCI BAR and nested bridge resource recovery`.
+
+**Still open:** general root-resource discovery, bus numbering, hotplug/rebalancing, expansion
+ROM/CardBus resources, separate 64-bit prefetchable forwarding windows and nonzero-segment
+native binding. A BAR already assigned outside a closed ancestor window is refused, not
+relocated. Sibling-window conflicts are rejected, not repaired. This checkpoint does not
+complete the remaining AML/PCI routing, recovery, USB/HID or global power/S3 gates. M9 remains
+in progress.
