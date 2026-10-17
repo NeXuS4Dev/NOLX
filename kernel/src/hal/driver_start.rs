@@ -180,6 +180,24 @@ pub(crate) fn device_operation<T, E>(
     .map_err(refused)?
 }
 
+/// Admit an operation only for this handle and its originally bound driver.
+pub(crate) fn device_operation_handle<T, E>(
+    dev: usize,
+    name: &str,
+    op: impl FnOnce() -> Result<T, E>,
+    refused: impl FnOnce(Error) -> E,
+) -> Result<T, E> {
+    with_registry(|registry| {
+        if registry.state(dev) != Ok(nolx_df_core::State::Started)
+            || registry.driver_name(dev) != Ok(name)
+        {
+            return Err(Error::UnknownDevice);
+        }
+        Ok(op())
+    })
+    .map_err(refused)?
+}
+
 /// Sector-transport specialization of lifecycle exclusion.
 pub(crate) fn device_io<T>(
     name: &str,
@@ -212,6 +230,14 @@ pub fn lifecycle_selftest(console: &mut dyn HalConsole) {
         let mut sector = [0; 512];
         state(dev) == Err(Error::Busy)
             && super::blockdev::read_sectors(0, 0, &mut sector) == Err(nolxfs::DevError::Io(16))
+            && matches!(
+                super::virtio_net::send_frame_on(0, &[0; 60]),
+                Err(super::virtio_net::Failure::Busy)
+            )
+            && matches!(
+                super::e1000::send_frame_on(0, &[0; 60]),
+                Err(super::e1000::Failure::Busy)
+            )
     }
     static RULES: &[Match] = &[Match::by_ids(0xffff, 0xfffe)];
     let synthetic = attach(
@@ -243,6 +269,8 @@ pub fn lifecycle_selftest(console: &mut dyn HalConsole) {
     crate::mm::mmio::lifecycle_selftest(console);
     #[cfg(feature = "hal-driver-multi-test")]
     multi_selftest(console);
+    #[cfg(feature = "hal-driver-net-multi-test")]
+    net_multi_selftest(console);
     let devices = started().unwrap();
     let mut tested = 0;
     for (handle, name) in devices.into_iter().flatten() {
@@ -286,14 +314,14 @@ pub fn lifecycle_selftest(console: &mut dyn HalConsole) {
                 );
             } else if name == "virtio-net" {
                 assert!(matches!(
-                    super::virtio_net::send_frame(&[0; 60]),
+                    super::virtio_net::send_frame_on(handle, &[0; 60]),
                     Err(super::virtio_net::Failure::NoDevice)
                 ));
             }
             assert_eq!(stop(handle), Err(Error::BadState));
             let restarted = start(handle);
             if restarted.is_err() && name == "e1000" {
-                super::e1000::lifecycle_diagnostic(console);
+                super::e1000::lifecycle_diagnostic(handle, console);
             }
             restarted.expect("driver restart failed");
             assert_eq!(state(handle), Ok(State::Started));
@@ -306,6 +334,10 @@ pub fn lifecycle_selftest(console: &mut dyn HalConsole) {
             #[cfg(feature = "hal-driver-multi-test")]
             if disk.is_some() {
                 verify_multi_instance(handle);
+            }
+            #[cfg(feature = "hal-driver-net-multi-test")]
+            if name == "virtio-net" || name == "e1000" {
+                verify_net_instance(handle, name, console);
             }
             if let Some(disk) = disk {
                 super::blockdev::bounds_selftest(disk);
@@ -327,6 +359,10 @@ pub fn lifecycle_selftest(console: &mut dyn HalConsole) {
         remove(handle).unwrap();
         assert_eq!(state(handle), Ok(State::Removed));
         assert_eq!(start(handle), Err(Error::BadState));
+        #[cfg(feature = "hal-driver-net-multi-test")]
+        if name == "virtio-net" || name == "e1000" {
+            net_refused(handle, name);
+        }
         tested += 1;
         let _ = writeln!(
             console,
@@ -434,4 +470,259 @@ fn multi_selftest(console: &mut dyn HalConsole) {
         assert_eq!(crate::mm::mmio::live_mappings(), mappings);
     }
     let _ = writeln!(console, "driver: multi-controller isolation verified: {count} storage devices, unique media, stopped-target refusal, peer I/O and restart identity");
+}
+
+#[cfg(feature = "hal-driver-net-multi-test")]
+static NET_MACS: crate::sync::IrqMutex<[[u8; 6]; DEVICES]> =
+    crate::sync::IrqMutex::new([[0; 6]; DEVICES]);
+#[cfg(feature = "hal-driver-net-multi-test")]
+static NET_EXCHANGE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(feature = "hal-driver-net-multi-test")]
+fn net_refused(handle: usize, name: &str) {
+    if name == "virtio-net" {
+        assert!(matches!(
+            super::virtio_net::send_frame_on(handle, &[0; 60]),
+            Err(super::virtio_net::Failure::NoDevice)
+        ));
+        assert!(matches!(
+            super::virtio_net::receive_frame_on(handle),
+            Err(super::virtio_net::Failure::NoDevice)
+        ));
+        assert!(matches!(
+            super::virtio_net::mac(handle),
+            Err(super::virtio_net::Failure::NoDevice)
+        ));
+    } else {
+        assert!(matches!(
+            super::e1000::send_frame_on(handle, &[0; 60]),
+            Err(super::e1000::Failure::NoController)
+        ));
+        assert!(matches!(
+            super::e1000::receive_frame_on(handle),
+            Err(super::e1000::Failure::NoController)
+        ));
+        assert!(matches!(
+            super::e1000::mac(handle),
+            Err(super::e1000::Failure::NoController)
+        ));
+    }
+}
+
+#[cfg(feature = "hal-driver-net-multi-test")]
+struct NetExchange {
+    handle: usize,
+    name: &'static str,
+    mac: [u8; 6],
+    local: [u8; 4],
+    sequence: usize,
+    rx_before: usize,
+}
+
+#[cfg(feature = "hal-driver-net-multi-test")]
+fn begin_net_exchange(handle: usize, name: &'static str) -> NetExchange {
+    use core::sync::atomic::Ordering;
+    let mac = if name == "virtio-net" {
+        super::virtio_net::mac(handle).unwrap()
+    } else {
+        super::e1000::mac(handle).unwrap()
+    };
+    assert_eq!(
+        mac,
+        NET_MACS.lock()[handle],
+        "restart selected a different NIC"
+    );
+    let sequence = NET_EXCHANGE.fetch_add(1, Ordering::Relaxed);
+    let local = [10, 0, 2, 32 + (sequence % 200) as u8];
+    let peer = [10, 0, 2, 2];
+    let rx_before = if name == "virtio-net" {
+        super::virtio_net::interrupt_counts(handle).0
+    } else {
+        super::e1000::interrupt_count(handle)
+    };
+    let request = nolx_net_core::arp::request(mac, local, peer);
+    if name == "virtio-net" {
+        super::virtio_net::send_frame_on(handle, &request).unwrap();
+    } else {
+        super::e1000::send_frame_on(handle, &request).unwrap();
+    }
+    NetExchange {
+        handle,
+        name,
+        mac,
+        local,
+        sequence,
+        rx_before,
+    }
+}
+
+#[cfg(feature = "hal-driver-net-multi-test")]
+fn verify_net_instance(handle: usize, name: &'static str, console: &mut dyn HalConsole) {
+    complete_net_exchange(begin_net_exchange(handle, name), console);
+}
+
+#[cfg(feature = "hal-driver-net-multi-test")]
+fn complete_net_exchange(exchange: NetExchange, console: &mut dyn HalConsole) {
+    let NetExchange {
+        handle,
+        name,
+        mac,
+        local,
+        sequence,
+        rx_before,
+    } = exchange;
+    let peer = [10, 0, 2, 2];
+    let start = super::hpet::counter().unwrap();
+    let hz = super::hpet::frequency_hz().unwrap();
+    let mut received = false;
+    for _ in 0..100_000_000 {
+        let frame = if name == "virtio-net" {
+            super::virtio_net::receive_frame_on(handle).unwrap()
+        } else {
+            super::e1000::receive_frame_on(handle).unwrap()
+        };
+        if let Some(frame) = frame {
+            assert_eq!(&frame.bytes()[..6], &mac, "frame crossed adapter FIFOs");
+            if nolx_net_core::arp::reply(frame.bytes(), mac, local, peer).is_some() {
+                received = true;
+                break;
+            }
+        }
+        if super::hpet::elapsed_ticks(start, super::hpet::counter().unwrap())
+            >= hz.saturating_mul(2)
+        {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    assert!(
+        received,
+        "selected adapter did not receive its fresh ARP reply"
+    );
+    // A used ring can become visible before its MSI-X is delivered; require the matching IRQ too.
+    let mut progressed = false;
+    for _ in 0..1_000_000 {
+        let after = if name == "virtio-net" {
+            super::virtio_net::interrupt_counts(handle).0
+        } else {
+            super::e1000::interrupt_count(handle)
+        };
+        if after > rx_before {
+            progressed = true;
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    assert!(
+        progressed,
+        "peer interrupt did not prove the selected adapter's progress"
+    );
+    let _ = writeln!(console, "driver: net exchange {sequence}, handle {handle}, {name}, mac {mac:02x?}, local {}, selected IRQ progressed", local[3]);
+}
+
+#[cfg(feature = "hal-driver-net-multi-test")]
+fn net_multi_selftest(console: &mut dyn HalConsole) {
+    let devices = started().unwrap();
+    let nics =
+        devices.map(|entry| entry.filter(|(_, name)| *name == "virtio-net" || *name == "e1000"));
+    let count = nics.iter().flatten().count();
+    assert!(count >= 2, "network fixture requires multiple NICs");
+    let dma = super::dma::live_pages();
+    let mappings = crate::mm::mmio::live_mappings();
+    super::e1000::probe(console);
+    super::virtio_net::probe(console);
+    assert_eq!(started().unwrap(), devices);
+    assert_eq!(super::dma::live_pages(), dma);
+    assert_eq!(crate::mm::mmio::live_mappings(), mappings);
+    for &(handle, name) in nics.iter().flatten() {
+        let mac = if name == "virtio-net" {
+            super::virtio_net::mac(handle).unwrap()
+        } else {
+            super::e1000::mac(handle).unwrap()
+        };
+        assert_ne!(mac, [0; 6]);
+        assert!(
+            !NET_MACS.lock().contains(&mac),
+            "two handles selected the same adapter"
+        );
+        NET_MACS.lock()[handle] = mac;
+        if name == "virtio-net" {
+            assert!(matches!(
+                super::virtio_net::send_frame_on(handle, &[0; 13]),
+                Err(super::virtio_net::Failure::Packet)
+            ));
+            assert!(matches!(
+                super::virtio_net::send_frame_on(handle, &[0; 2049]),
+                Err(super::virtio_net::Failure::Packet)
+            ));
+        } else {
+            assert!(matches!(
+                super::e1000::send_frame_on(handle, &[0; 13]),
+                Err(super::e1000::Failure::Frame)
+            ));
+            assert!(matches!(
+                super::e1000::send_frame_on(handle, &[0; 2049]),
+                Err(super::e1000::Failure::Frame)
+            ));
+        }
+        let _ = writeln!(
+            console,
+            "driver: net instance {handle} {name}, mac {mac:02x?}"
+        );
+        verify_net_instance(handle, name, console);
+        // A Started peer of a different driver must not authorize a wrong-type endpoint.
+        net_refused(
+            handle,
+            if name == "virtio-net" {
+                "e1000"
+            } else {
+                "virtio-net"
+            },
+        );
+    }
+    // Send on all adapters before consuming any public FIFO. Shared INTx must service
+    // every asserting controller before EOI, and MSI-X must not consume another NIC's ring.
+    let mut burst = [const { None }; DEVICES];
+    for (slot, &(handle, name)) in burst.iter_mut().zip(nics.iter().flatten()) {
+        *slot = Some(begin_net_exchange(handle, name));
+    }
+    for exchange in burst.into_iter().flatten() {
+        complete_net_exchange(exchange, console);
+    }
+    let _ = writeln!(
+        console,
+        "driver: network burst: every adapter queued before public RX drain"
+    );
+    net_refused(usize::MAX, "virtio-net");
+    net_refused(usize::MAX, "e1000");
+    net_refused(DEVICES, "virtio-net");
+    net_refused(DEVICES, "e1000");
+    for &(victim, name) in nics.iter().flatten() {
+        stop(victim).unwrap();
+        net_refused(victim, name);
+        if name == "virtio-net"
+            && nics
+                .iter()
+                .flatten()
+                .find(|(_, kind)| *kind == "virtio-net")
+                .map(|(handle, _)| *handle)
+                == Some(victim)
+        {
+            assert!(matches!(
+                super::virtio_net::send_frame(&[0; 60]),
+                Err(super::virtio_net::Failure::NoDevice)
+            ));
+            assert!(super::virtio_net::receive_frame().is_none());
+        }
+        for &(peer, peer_name) in nics.iter().flatten() {
+            if peer != victim {
+                verify_net_instance(peer, peer_name, console);
+            }
+        }
+        start(victim).unwrap();
+        verify_net_instance(victim, name, console);
+        assert_eq!(super::dma::live_pages(), dma);
+        assert_eq!(crate::mm::mmio::live_mappings(), mappings);
+    }
+    let _ = writeln!(console, "driver: multi-adapter isolation verified: {count} NICs, unique MACs, duplicate probe refusal, stopped-target refusal, peer wire I/O and restart identity");
 }

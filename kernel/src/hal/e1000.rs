@@ -10,8 +10,8 @@
 //! they are host-tested. The framework's rules live in `nolx-df-core`. This module supplies register
 //! access, memory for the rings, and the driver's dispatch table.
 //!
-//! The framework dispatch table takes plain function pointers and no context, so the state the
-//! driver keeps between calls is in a static [`IrqMutex`]. Receive buffers remain owned until
+//! Framework callbacks select a retained controller by handle; each handle owns separate
+//! IRQ-visible receive state, TX state, identity and diagnostics. Receive buffers remain owned until
 //! engine disable/reset succeeds; stop detaches IRQ-visible state before reclaiming them.
 //! RX buffers are retained in a fixed array,
 //! with no heap allocation in initialization or interrupt delivery.
@@ -27,14 +27,17 @@ use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
 use nolx_pci_core::{Bar, Bdf, ConfigSpace};
 
-use super::dma::Dma;
 use super::pci::ConfigAccess;
+use super::{dma::Dma, driver_start};
 use crate::mm::mmio::{self, Region};
 use crate::sync::IrqMutex;
 
-static RX_VECTOR: AtomicU8 = AtomicU8::new(0);
-static RX_INTERRUPTS: AtomicUsize = AtomicUsize::new(0);
-static RECEIVE: IrqMutex<Option<Receive>> = IrqMutex::new(None);
+static RX_VECTOR: [AtomicU8; driver_start::DEVICES] =
+    [const { AtomicU8::new(0) }; driver_start::DEVICES];
+static RX_INTERRUPTS: [AtomicUsize; driver_start::DEVICES] =
+    [const { AtomicUsize::new(0) }; driver_start::DEVICES];
+static RECEIVE: [IrqMutex<Option<Receive>>; driver_start::DEVICES] =
+    [const { IrqMutex::new(None) }; driver_start::DEVICES];
 
 struct Receive {
     regs: Region,
@@ -46,13 +49,24 @@ struct Receive {
 
 /// Whether this vector names the firmware-assigned, level-triggered INTx route.
 pub fn handles_vector(vector: u8) -> bool {
-    vector >= 32 && RX_VECTOR.load(Ordering::Acquire) == vector
+    vector >= 32
+        && RX_VECTOR
+            .iter()
+            .any(|route| route.load(Ordering::Acquire) == vector)
 }
 
 /// Acknowledge interrupt causes and recycle completed receive descriptors into a bounded FIFO.
 /// This path never allocates, prints, or acquires the framework state lock.
-pub fn on_interrupt() {
-    let mut receive = RECEIVE.lock();
+pub fn on_interrupt(vector: u8) {
+    // Shared INTx: service every matching controller before the one local APIC EOI.
+    for (dev, route) in RX_VECTOR.iter().enumerate() {
+        if route.load(Ordering::Acquire) == vector {
+            service_interrupt(dev);
+        }
+    }
+}
+fn service_interrupt(dev: usize) {
+    let mut receive = RECEIVE[dev].lock();
     let Some(receive) = receive.as_mut() else {
         return;
     };
@@ -60,7 +74,7 @@ pub fn on_interrupt() {
     if causes & e1000::ICR_RXT0 == 0 {
         return;
     }
-    RX_INTERRUPTS.fetch_add(1, Ordering::Release);
+    RX_INTERRUPTS[dev].fetch_add(1, Ordering::Release);
     for _ in 0..RING {
         let offset = u64::from(receive.next) * 16;
         let status = receive.descriptors.read_array::<2>(offset + 12);
@@ -126,6 +140,8 @@ pub enum Failure {
     Timeout(&'static str),
     /// The EEPROM gave no usable MAC address.
     Eeprom,
+    /// Another caller owns the transport or framework callback.
+    Busy,
     /// No frame was available for the rings or the transmit buffer.
     Memory,
     /// The ring or the test frame was refused by the e1000 rules.
@@ -148,6 +164,7 @@ impl From<crate::mm::mmio::Failure> for Failure {
 struct Rings {
     tx: Dma,
     frame: Dma,
+    next: u32,
 }
 
 /// What the bring-up established, for the boot report.
@@ -163,20 +180,23 @@ struct Report {
 
 /// State shared between the driver's dispatch calls and the probe that reports them.
 struct State {
-    #[allow(dead_code)]
+    bdf: Option<Bdf>,
     rings: Option<Rings>,
     report: Option<Report>,
     error: Option<Failure>,
 }
 
-static STATE: IrqMutex<State> = IrqMutex::new(State {
-    rings: None,
-    report: None,
-    error: None,
-});
+static STATE: [IrqMutex<State>; driver_start::DEVICES] = [const {
+    IrqMutex::new(State {
+        bdf: None,
+        rings: None,
+        report: None,
+        error: None,
+    })
+}; driver_start::DEVICES];
 
 /// The driver's dispatch table. Probe accepts any device the match rule selects; start and stop
-/// act on the one controller the probe found.
+/// act on the controller selected by the framework handle.
 const DISPATCH: Dispatch = Dispatch {
     probe: accept,
     start: start_device,
@@ -186,24 +206,49 @@ const DISPATCH: Dispatch = Dispatch {
 /// Probe for an e1000, register the driver with the framework, bind and start the device, and
 /// report the result. Failure is reported on the console and does not stop boot.
 pub fn probe(console: &mut dyn HalConsole) {
-    let Some((_, id)) = find_controller() else {
-        let _ = writeln!(console, "e1000: no controller on the PCI bus");
-        return;
-    };
-    let driver = Driver {
-        name: "e1000",
-        matches: MATCHES,
-        ops: DISPATCH,
-    };
-    let attached = super::driver_start::attach(driver, id);
-    if let Err(error) = attached {
-        let _ = writeln!(console, "e1000: framework refused the device: {error:?}");
-    }
+    let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
+    let mut found = false;
+    for info in inventory
+        .as_slice()
+        .iter()
+        .filter(|info| info.vendor_id == VENDOR_INTEL && info.device_id == DEVICE_82540EM)
+    {
+        found = true;
+        if STATE.iter().any(|state| state.lock().bdf == Some(info.bdf)) {
+            let _ = writeln!(console, "e1000: duplicate PCI binding refused");
+            continue;
+        }
+        let id = DeviceId {
+            vendor: info.vendor_id,
+            device: info.device_id,
+            class: info.class,
+            subclass: info.subclass,
+            prog_if: info.prog_if,
+        };
+        let driver = Driver {
+            name: "e1000",
+            matches: MATCHES,
+            ops: DISPATCH,
+        };
+        let attached = driver_start::attach_prepared(driver, id, |dev| {
+            if STATE.iter().any(|state| state.lock().bdf == Some(info.bdf)) {
+                return Err(nolx_df_core::Error::Busy);
+            }
+            STATE[dev].lock().bdf = Some(info.bdf);
+            Ok(())
+        });
+        if let Err(error) = attached {
+            let _ = writeln!(console, "e1000: framework refused the device: {error:?}");
+        }
 
-    let state = STATE.lock();
-    match (&state.report, &state.error) {
-        (Some(report), _) => {
-            let _ = writeln!(
+        for (dev, slot) in STATE.iter().enumerate() {
+            let state = slot.lock();
+            if state.bdf != Some(info.bdf) {
+                continue;
+            }
+            match (&state.report, &state.error) {
+                (Some(report), _) => {
+                    let _ = writeln!(
                 console,
                 "e1000: {:02x}:{:02x}.{} bar0 {:#x}, mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, link {}",
                 report.bdf.bus,
@@ -218,19 +263,33 @@ pub fn probe(console: &mut dyn HalConsole) {
                 report.mac[5],
                 if report.link_up { "up" } else { "down" },
             );
-            let _ = writeln!(
-                console,
-                "e1000: transmitted a {FRAME_BYTES}-byte frame, descriptor done"
-            );
-            let _ = writeln!(console, "e1000: received ARP reply from 10.0.2.2, peer {:02x?}, descriptor recycled, INTx vector {:#x}, interrupts {}", report.peer_mac, RX_VECTOR.load(Ordering::Acquire), report.interrupts);
-            let _ = writeln!(console, "e1000: bound and started through nolx-df");
+                    let _ = writeln!(
+                        console,
+                        "e1000: transmitted a {FRAME_BYTES}-byte frame, descriptor done"
+                    );
+                    let _ = writeln!(console, "e1000: received ARP reply from 10.0.2.2, peer {:02x?}, descriptor recycled, INTx vector {:#x}, interrupts {}", report.peer_mac, RX_VECTOR[dev].load(Ordering::Acquire), report.interrupts);
+                    let _ = writeln!(console, "e1000: bound and started through nolx-df");
+                    let _ = writeln!(
+                        console,
+                        "e1000: instance {dev}, PCI {:02x}:{:02x}.{}, mac {:02x?}, vector {:#x}",
+                        report.bdf.bus,
+                        report.bdf.device,
+                        report.bdf.function,
+                        report.mac,
+                        RX_VECTOR[dev].load(Ordering::Acquire)
+                    );
+                }
+                (None, Some(error)) => {
+                    let _ = writeln!(console, "e1000: not brought up: {error:?}");
+                }
+                (None, None) => {
+                    let _ = writeln!(console, "e1000: not started");
+                }
+            }
         }
-        (None, Some(error)) => {
-            let _ = writeln!(console, "e1000: not brought up: {error:?}");
-        }
-        (None, None) => {
-            let _ = writeln!(console, "e1000: not started");
-        }
+    }
+    if !found {
+        let _ = writeln!(console, "e1000: no controller on the PCI bus");
     }
 }
 
@@ -241,7 +300,7 @@ fn accept(_: &DeviceId) -> bool {
 /// The framework's start operation: the whole bring-up. The result goes to [`STATE`].
 fn start_device(dev: usize) -> bool {
     let result = bring_up(dev);
-    let mut state = STATE.lock();
+    let mut state = STATE[dev].lock();
     match result {
         Ok((rings, report)) => {
             state.rings = Some(rings);
@@ -257,8 +316,8 @@ fn start_device(dev: usize) -> bool {
 }
 
 /// Reset both engines and retire IRQ-visible state before reclaiming RX/TX DMA pages.
-fn stop_device(_dev: usize) -> bool {
-    let Some((regs, bdf)) = STATE.lock().report.as_ref().map(|r| (r.region, r.bdf)) else {
+fn stop_device(dev: usize) -> bool {
+    let Some((regs, bdf)) = STATE[dev].lock().report.as_ref().map(|r| (r.region, r.bdf)) else {
         return false;
     };
     let reset = (|| -> Result<(), Failure> {
@@ -282,12 +341,12 @@ fn stop_device(_dev: usize) -> bool {
     if reset.is_err() {
         return false;
     }
-    RX_VECTOR.store(0, Ordering::Release);
+    RX_VECTOR[dev].store(0, Ordering::Release);
     let command = ConfigAccess.read_u32(bdf, 4) & 0xffff;
     ConfigAccess.write_u32(bdf, 4, command & !4);
-    let receive = RECEIVE.lock().take();
+    let receive = RECEIVE[dev].lock().take();
     let rings = {
-        let mut state = STATE.lock();
+        let mut state = STATE[dev].lock();
         state.report = None;
         state.rings.take()
     };
@@ -309,8 +368,8 @@ fn stop_device(_dev: usize) -> bool {
 }
 
 fn bring_up(dev: usize) -> Result<(Rings, Report), Failure> {
-    let initial_interrupts = RX_INTERRUPTS.load(Ordering::Acquire);
-    let (bdf, _) = find_controller().ok_or(Failure::NoController)?;
+    let initial_interrupts = RX_INTERRUPTS[dev].load(Ordering::Acquire);
+    let bdf = STATE[dev].lock().bdf.ok_or(Failure::NoController)?;
     enable_device(bdf);
     let bars = nolx_pci_core::read_bars(&mut ConfigAccess, bdf);
     let base = match bars.slots[BAR0_SLOT] {
@@ -369,14 +428,14 @@ fn bring_up(dev: usize) -> Result<(Rings, Report), Failure> {
     if !super::apic::is_enabled() || !(3..16).contains(&irq) {
         return Err(Failure::Interrupt);
     }
-    *RECEIVE.lock() = Some(Receive {
+    *RECEIVE[dev].lock() = Some(Receive {
         regs,
         descriptors: rx,
         buffers,
         next: 0,
         frames: FrameQueue::new(),
     });
-    RX_VECTOR.store(32 + irq, Ordering::Release);
+    RX_VECTOR[dev].store(32 + irq, Ordering::Release);
     // Clear stale causes, enable receive timer interrupts, then unmask the level route.
     let _ = regs.read32(e1000::REG_ICR)?;
     regs.write32(e1000::REG_IMS, e1000::ICR_RXT0)?;
@@ -429,20 +488,22 @@ fn bring_up(dev: usize) -> Result<(Rings, Report), Failure> {
     // too. Never wait solely for a DD bit that the IRQ handler has already cleared.
     poll(
         || {
-            let receive = RECEIVE.lock();
+            let receive = RECEIVE[dev].lock();
             let receive = receive.as_ref().ok_or(Failure::Receive)?;
-            Ok(RX_INTERRUPTS.load(Ordering::Acquire) > initial_interrupts
-                || receive.descriptors.read_array::<1>(12)[0] & e1000::DESC_DD != 0)
+            Ok(
+                RX_INTERRUPTS[dev].load(Ordering::Acquire) > initial_interrupts
+                    || receive.descriptors.read_array::<1>(12)[0] & e1000::DESC_DD != 0,
+            )
         },
         "ARP receive descriptor",
     )?;
-    if super::msix::wait_for_interrupts(&RX_INTERRUPTS, initial_interrupts + 1)
+    if super::msix::wait_for_interrupts(&RX_INTERRUPTS[dev], initial_interrupts + 1)
         < initial_interrupts + 1
     {
         return Err(Failure::Interrupt);
     }
     let peer_mac = {
-        let mut receive = RECEIVE.lock();
+        let mut receive = RECEIVE[dev].lock();
         let receive = receive.as_mut().ok_or(Failure::Receive)?;
         let mut peer = None;
         while let Some(frame) = receive.frames.pop() {
@@ -455,7 +516,7 @@ fn bring_up(dev: usize) -> Result<(Rings, Report), Failure> {
     };
     let link_up = regs.read32(e1000::REG_STATUS)? & e1000::STATUS_LINK_UP != 0;
     Ok((
-        Rings { tx, frame },
+        Rings { tx, frame, next: 2 },
         Report {
             bdf,
             base,
@@ -463,7 +524,7 @@ fn bring_up(dev: usize) -> Result<(Rings, Report), Failure> {
             link_up,
             peer_mac,
             region: regs,
-            interrupts: RX_INTERRUPTS.load(Ordering::Acquire) - initial_interrupts,
+            interrupts: RX_INTERRUPTS[dev].load(Ordering::Acquire) - initial_interrupts,
         },
     ))
 }
@@ -497,27 +558,6 @@ fn enable_device(bdf: Bdf) {
     );
 }
 
-/// The first e1000 on the bus, with the identity the framework matches on.
-fn find_controller() -> Option<(Bdf, DeviceId)> {
-    let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
-    inventory
-        .as_slice()
-        .iter()
-        .find(|info| info.vendor_id == VENDOR_INTEL && info.device_id == DEVICE_82540EM)
-        .map(|info| {
-            (
-                info.bdf,
-                DeviceId {
-                    vendor: info.vendor_id,
-                    device: info.device_id,
-                    class: info.class,
-                    subclass: info.subclass,
-                    prog_if: info.prog_if,
-                },
-            )
-        })
-}
-
 /// Poll with a two-second HPET budget and hard iteration bound, or a bounded clockless fallback.
 fn poll(
     mut ready: impl FnMut() -> Result<bool, Failure>,
@@ -543,6 +583,93 @@ fn poll(
 }
 
 #[cfg(feature = "hal-driver-lifecycle-test")]
-pub(crate) fn lifecycle_diagnostic(console: &mut dyn HalConsole) {
-    let _ = writeln!(console, "e1000: lifecycle error: {:?}", STATE.lock().error);
+pub(crate) fn lifecycle_diagnostic(dev: usize, console: &mut dyn HalConsole) {
+    let _ = writeln!(
+        console,
+        "e1000: lifecycle error: {:?}",
+        STATE[dev].lock().error
+    );
+}
+
+fn refused(error: nolx_df_core::Error) -> Failure {
+    if error == nolx_df_core::Error::Busy {
+        Failure::Busy
+    } else {
+        Failure::NoController
+    }
+}
+/// Identity of this exact Started controller.
+pub fn mac(dev: usize) -> Result<[u8; 6], Failure> {
+    driver_start::device_operation_handle(
+        dev,
+        "e1000",
+        || {
+            STATE[dev]
+                .lock()
+                .report
+                .as_ref()
+                .map(|r| r.mac)
+                .ok_or(Failure::NoController)
+        },
+        refused,
+    )
+}
+/// Synchronous bounded TX on this controller; no state/IRQ lock is held while waiting.
+pub fn send_frame_on(dev: usize, bytes: &[u8]) -> Result<(), Failure> {
+    driver_start::device_operation_handle(
+        dev,
+        "e1000",
+        || {
+            if !(14..=nolx_net_core::FRAME_MAX_DEFAULT).contains(&bytes.len()) {
+                return Err(Failure::Frame);
+            }
+            let (mut rings, regs) = {
+                let mut state = STATE[dev].lock();
+                let regs = state.report.as_ref().ok_or(Failure::NoController)?.region;
+                (state.rings.take().ok_or(Failure::Busy)?, regs)
+            };
+            let result = (|| {
+                rings.frame.write(0, bytes);
+                let descriptor =
+                    e1000::tx_descriptor(rings.frame.address(0), bytes.len() as u16, true)
+                        .ok_or(Failure::Frame)?;
+                let offset = u64::from(rings.next) * e1000::DESCRIPTOR_BYTES as u64;
+                rings.tx.write(offset, &descriptor);
+                fence(Ordering::SeqCst);
+                let next = (rings.next + 1) % RING;
+                regs.write32(e1000::REG_TDT, next)?;
+                poll(
+                    || Ok(e1000::tx_done(rings.tx.read_array::<1>(offset + 12)[0])),
+                    "public transmit",
+                )?;
+                rings.next = next;
+                Ok(())
+            })();
+            STATE[dev].lock().rings = Some(rings);
+            result
+        },
+        refused,
+    )
+}
+/// Consume only this controller's receive FIFO; a peer cannot authorize a stopped target.
+pub fn receive_frame_on(dev: usize) -> Result<Option<nolx_net_core::queue::Frame>, Failure> {
+    driver_start::device_operation_handle(
+        dev,
+        "e1000",
+        || {
+            Ok(RECEIVE[dev]
+                .lock()
+                .as_mut()
+                .ok_or(Failure::NoController)?
+                .frames
+                .pop())
+        },
+        refused,
+    )
+}
+
+/// Count only this controller's acknowledged receive interrupt causes.
+#[cfg(feature = "hal-driver-net-multi-test")]
+pub(crate) fn interrupt_count(dev: usize) -> usize {
+    RX_INTERRUPTS[dev].load(Ordering::Acquire)
 }

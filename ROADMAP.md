@@ -998,3 +998,15 @@ checks all media writes, and every fixture ends with zero pinned DMA after remov
 not implement multi-adapter networking, nonzero-segment native binding, all SATA ports/NVMe
 namespaces, dynamic BAR/vector allocation, hotplug retry or failure-path recovery. See the
 [M9 completion gate](docs/development/m9-completion.md); M9 remains in progress.
+
+
+### M9 multi-adapter network checkpoint (2026-10-17)
+
+Native e1000/virtio-net now retain BDF/MAC, rings, receive FIFOs and completion counters per
+framework handle. Exact-handle public RX/TX refuses stopped/removed/invalid/wrong-type targets,
+and shared e1000 INTx services every controller on the route before EOI. Nine native fixtures
+cover duplicate adapters, mixed four-NIC PC/Q35 setups, explicit shared INTx, bridge traversal
+and six-storage/four-NIC integration. Independent pcaps verify 214 tagged public ARP exchanges;
+all devices complete independent lifecycle reclamation with zero pinned DMA. This closes the
+healthy multi-adapter context gate, not firmware PCI interrupt discovery, native nonzero-segment
+binding, resource allocation, failure recovery or the USB/AML/power acceptance gates.

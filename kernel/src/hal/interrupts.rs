@@ -45,13 +45,10 @@ extern "C" fn nolx_interrupt_dispatch(frame_pointer: *mut InterruptFrame) -> *mu
         return frame_pointer;
     }
     if apic::is_enabled() && super::e1000::handles_vector(vector) {
-        return device_completion(frame_pointer, super::e1000::on_interrupt);
+        return device_completion(frame_pointer, || super::e1000::on_interrupt(vector));
     }
-    if vector == super::virtio_net::RX_VECTOR {
-        return device_completion(frame_pointer, super::virtio_net::on_rx_interrupt);
-    }
-    if vector == super::virtio_net::TX_VECTOR {
-        return device_completion(frame_pointer, super::virtio_net::on_tx_interrupt);
+    if super::virtio_net::handles_vector(vector) {
+        return device_completion(frame_pointer, || super::virtio_net::on_interrupt(vector));
     }
     if super::ahci::handles_vector(vector) {
         return device_completion(frame_pointer, || {

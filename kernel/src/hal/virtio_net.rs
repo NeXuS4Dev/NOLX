@@ -26,10 +26,30 @@ use nolx_virtio_core::{self as virtio, common, net, Descriptor, VirtioCap};
 pub const RX_VECTOR: u8 = 0x53;
 /// MSI-X transmit vector (table entry one).
 pub const TX_VECTOR: u8 = 0x54;
-static RX_INTERRUPTS: AtomicUsize = AtomicUsize::new(0);
-static TX_INTERRUPTS: AtomicUsize = AtomicUsize::new(0);
-static DEVICE: IrqMutex<Option<Nic>> = IrqMutex::new(None);
-static START: IrqMutex<Option<(Log, Result<(), Failure>)>> = IrqMutex::new(None);
+static RX_INTERRUPTS: [AtomicUsize; driver_start::DEVICES] =
+    [const { AtomicUsize::new(0) }; driver_start::DEVICES];
+static TX_INTERRUPTS: [AtomicUsize; driver_start::DEVICES] =
+    [const { AtomicUsize::new(0) }; driver_start::DEVICES];
+static DEVICE: [IrqMutex<Option<Nic>>; driver_start::DEVICES] =
+    [const { IrqMutex::new(None) }; driver_start::DEVICES];
+type StartRecord = Option<(Log, Result<(), Failure>)>;
+static START: [IrqMutex<StartRecord>; driver_start::DEVICES] =
+    [const { IrqMutex::new(None) }; driver_start::DEVICES];
+static BDFS: [IrqMutex<Option<Bdf>>; driver_start::DEVICES] =
+    [const { IrqMutex::new(None) }; driver_start::DEVICES];
+static PRIMARY: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+fn vectors(dev: usize) -> (u8, u8) {
+    if PRIMARY.load(Ordering::Acquire) == dev {
+        (RX_VECTOR, TX_VECTOR)
+    } else {
+        (0xb0 + 2 * dev as u8, 0xb1 + 2 * dev as u8)
+    }
+}
+/// Static MSI-X reservations, disjoint from storage and architecture vectors.
+pub fn handles_vector(vector: u8) -> bool {
+    vector == RX_VECTOR || vector == TX_VECTOR || (0xb0..0xd0).contains(&vector)
+}
 
 /// A refused device, transfer, packet or capability.
 #[derive(Debug)]
@@ -80,48 +100,83 @@ impl From<msix::Error> for Failure {
 
 static MATCHES: &[Match] = &[Match::by_ids(0x1af4, 0x1000), Match::by_ids(0x1af4, 0x1041)];
 
-/// Find and start one supported interface through the driver framework.
+/// Enumerate and bind each supported segment-zero interface exactly once.
 pub fn probe(console: &mut dyn HalConsole) {
-    let Some((_, id)) = find() else {
-        let _ = writeln!(console, "virtio-net: not brought up: NoDevice");
-        return;
-    };
-    let driver = Driver {
-        name: "virtio-net",
-        matches: MATCHES,
-        ops: Dispatch {
-            probe: |_| true,
-            start,
-            stop,
-        },
-    };
-    if let Err(error) = driver_start::attach(driver, id) {
-        let _ = writeln!(console, "virtio-net: framework refused device: {error:?}");
-    }
-    if let Some((log, outcome)) = START.lock().as_ref() {
-        log.replay(console);
-        match outcome {
-            Ok(()) => {
-                let _ = writeln!(console, "virtio-net: bound and started through nolx-df");
+    let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
+    let mut found = false;
+    for info in inventory
+        .as_slice()
+        .iter()
+        .filter(|d| d.vendor_id == 0x1af4 && [0x1000, 0x1041].contains(&d.device_id))
+    {
+        found = true;
+        if BDFS.iter().any(|bdf| *bdf.lock() == Some(info.bdf)) {
+            let _ = writeln!(console, "virtio-net: duplicate PCI binding refused");
+            continue;
+        }
+        let id = DeviceId {
+            vendor: info.vendor_id,
+            device: info.device_id,
+            class: info.class,
+            subclass: info.subclass,
+            prog_if: info.prog_if,
+        };
+        let driver = Driver {
+            name: "virtio-net",
+            matches: MATCHES,
+            ops: Dispatch {
+                probe: |_| true,
+                start,
+                stop,
+            },
+        };
+        let attached = driver_start::attach_prepared(driver, id, |dev| {
+            if BDFS.iter().any(|bdf| *bdf.lock() == Some(info.bdf)) {
+                return Err(nolx_df_core::Error::Busy);
             }
-            Err(error) => {
-                let _ = writeln!(console, "virtio-net: not brought up: {error:?}");
+            *BDFS[dev].lock() = Some(info.bdf);
+            let _ = PRIMARY.compare_exchange(usize::MAX, dev, Ordering::AcqRel, Ordering::Acquire);
+            Ok(())
+        });
+        if let Err(error) = attached {
+            let _ = writeln!(console, "virtio-net: framework refused device: {error:?}");
+        }
+        for (dev, bdf) in BDFS.iter().enumerate() {
+            if *bdf.lock() != Some(info.bdf) {
+                continue;
+            }
+            if let Some((log, outcome)) = START[dev].lock().as_ref() {
+                log.replay(console);
+                match outcome {
+                    Ok(()) => {
+                        let _ = writeln!(console, "virtio-net: bound and started through nolx-df");
+                        let (rx, tx) = vectors(dev);
+                        let mac = DEVICE[dev].lock().as_ref().unwrap().mac;
+                        let _ = writeln!(console, "virtio-net: instance {dev}, PCI {:02x}:{:02x}.{}, mac {mac:02x?}, vectors {rx:#x}/{tx:#x}", info.bdf.bus, info.bdf.device, info.bdf.function);
+                    }
+                    Err(error) => {
+                        let _ = writeln!(console, "virtio-net: not brought up: {error:?}");
+                    }
+                }
             }
         }
+    }
+    if !found {
+        let _ = writeln!(console, "virtio-net: not brought up: NoDevice");
     }
 }
 fn start(dev: usize) -> bool {
     let mut log = Log::new();
     let outcome = bring_up(dev, &mut log).map(|nic| {
-        *DEVICE.lock() = Some(nic);
+        *DEVICE[dev].lock() = Some(nic);
     });
     let good = outcome.is_ok();
-    *START.lock() = Some((log, outcome));
+    *START[dev].lock() = Some((log, outcome));
     good
 }
-fn stop(_: usize) -> bool {
+fn stop(dev: usize) -> bool {
     // Reset can wait for the device. Never hold the IRQ state lock across that wait.
-    let Some(nic) = DEVICE.lock().take() else {
+    let Some(nic) = DEVICE[dev].lock().take() else {
         return true;
     };
     let result = nic
@@ -130,7 +185,7 @@ fn stop(_: usize) -> bool {
         .map_err(Failure::Access)
         .and_then(|()| poll(|| Ok(nic.common.read8(u64::from(common::DEVICE_STATUS))? == 0)));
     if result.is_err() {
-        *DEVICE.lock() = Some(nic);
+        *DEVICE[dev].lock() = Some(nic);
         return false;
     }
     let command = ConfigAccess.read_u32(nic.bdf, 4) & 0xffff;
@@ -146,25 +201,6 @@ fn stop(_: usize) -> bool {
     true
 }
 
-fn find() -> Option<(Bdf, DeviceId)> {
-    let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
-    inventory
-        .as_slice()
-        .iter()
-        .find(|d| d.vendor_id == 0x1af4 && [0x1000, 0x1041].contains(&d.device_id))
-        .map(|d| {
-            (
-                d.bdf,
-                DeviceId {
-                    vendor: d.vendor_id,
-                    device: d.device_id,
-                    class: d.class,
-                    subclass: d.subclass,
-                    prog_if: d.prog_if,
-                },
-            )
-        })
-}
 fn map(dev: usize, bars: &BarSet, cap: VirtioCap) -> Result<Region, Failure> {
     let base = match bars.slots.get(usize::from(cap.bar)) {
         Some(Bar::Memory32 { base, .. }) => u64::from(*base),
@@ -297,6 +333,8 @@ impl Queue {
     }
 }
 struct Nic {
+    owner: usize,
+    mac: [u8; 6],
     bdf: Bdf,
     common: Region,
     rx: Queue,
@@ -308,14 +346,14 @@ impl Nic {
         if !(14..=net::MAX_FRAME_BYTES).contains(&bytes.len()) {
             return Err(Failure::Packet);
         }
-        let expected = TX_INTERRUPTS.load(Ordering::Acquire) + 1;
+        let expected = TX_INTERRUPTS[self.owner].load(Ordering::Acquire) + 1;
         self.tx.data.write(0, &net::transmit_header());
         self.tx.data.write(net::HEADER_BYTES as u64, bytes);
         self.tx
             .publish((net::HEADER_BYTES + bytes.len()) as u32, false)?;
         poll(|| Ok(self.tx.completed()))?;
         self.tx.take()?;
-        if msix::wait_for_interrupts(&TX_INTERRUPTS, expected) < expected {
+        if msix::wait_for_interrupts(&TX_INTERRUPTS[self.owner], expected) < expected {
             return Err(Failure::Interrupt);
         }
         Ok(())
@@ -334,7 +372,8 @@ impl Nic {
 }
 
 fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<Nic, Failure> {
-    let (bdf, _) = find().ok_or(Failure::NoDevice)?;
+    let bdf = BDFS[dev].lock().ok_or(Failure::NoDevice)?;
+    let (rx_vector, tx_vector) = vectors(dev);
     if !super::apic::is_enabled() {
         return Err(Failure::Interrupt);
     }
@@ -375,11 +414,13 @@ fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<Nic, Failure> {
     if mac == [0; 6] || mac[0] & 1 != 0 {
         return Err(Failure::Configuration);
     }
-    msix::enable(dev, bdf, &bars, 0, RX_VECTOR)?;
-    msix::enable(dev, bdf, &bars, 1, TX_VECTOR)?;
+    msix::enable(dev, bdf, &bars, 0, rx_vector)?;
+    msix::enable(dev, bdf, &bars, 1, tx_vector)?;
     let rx = Queue::new(&common, notify, cap, 0)?;
     let tx = Queue::new(&common, notify, cap, 1)?;
     let mut nic = Nic {
+        owner: dev,
+        mac,
         bdf,
         common,
         rx,
@@ -392,10 +433,10 @@ fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<Nic, Failure> {
     )?;
     nic.rx.publish(2048, true)?;
     for exchange in 1..=2 {
-        let expected = RX_INTERRUPTS.load(Ordering::Acquire) + 1;
+        let expected = RX_INTERRUPTS[dev].load(Ordering::Acquire) + 1;
         nic.transmit(&arp::request(mac, [10, 0, 2, 15], [10, 0, 2, 2]))?;
         poll(|| Ok(nic.rx.completed()))?;
-        if msix::wait_for_interrupts(&RX_INTERRUPTS, expected) < expected {
+        if msix::wait_for_interrupts(&RX_INTERRUPTS[dev], expected) < expected {
             return Err(Failure::Interrupt);
         }
         nic.receive()?;
@@ -406,68 +447,100 @@ fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<Nic, Failure> {
     }
     let _ = writeln!(
         console,
-        "virtio-net: MSI-X RX {} TX {} completions, vectors {RX_VECTOR:#x}/{TX_VECTOR:#x}",
-        RX_INTERRUPTS.load(Ordering::Acquire),
-        TX_INTERRUPTS.load(Ordering::Acquire)
+        "virtio-net: MSI-X RX {} TX {} completions, vectors {rx_vector:#x}/{tx_vector:#x}",
+        RX_INTERRUPTS[dev].load(Ordering::Acquire),
+        TX_INTERRUPTS[dev].load(Ordering::Acquire)
     );
     Ok(nic)
 }
 
-/// Acknowledge MSI-X by consuming/reposting received descriptors; bounded and allocation-free.
+/// Attribute each MSI-X completion and receive FIFO to its exact adapter before APIC EOI.
 pub fn on_interrupt(vector: u8) {
-    if vector == RX_VECTOR {
-        RX_INTERRUPTS.fetch_add(1, Ordering::Release);
-        if let Some(nic) = DEVICE.lock().as_mut() {
+    let (dev, rx) = if vector == RX_VECTOR || vector == TX_VECTOR {
+        (PRIMARY.load(Ordering::Acquire), vector == RX_VECTOR)
+    } else if (0xb0..0xd0).contains(&vector) {
+        (usize::from((vector - 0xb0) / 2), vector & 1 == 0)
+    } else {
+        return;
+    };
+    if dev >= driver_start::DEVICES {
+        return;
+    }
+    if rx {
+        RX_INTERRUPTS[dev].fetch_add(1, Ordering::Release);
+        if let Some(nic) = DEVICE[dev].lock().as_mut() {
             let _ = nic.receive();
         }
-    } else if vector == TX_VECTOR {
-        TX_INTERRUPTS.fetch_add(1, Ordering::Release);
+    } else {
+        TX_INTERRUPTS[dev].fetch_add(1, Ordering::Release);
     }
 }
-
-/// Submit a frame without holding the IRQ state lock while waiting for completion.
-pub fn send_frame(bytes: &[u8]) -> Result<(), Failure> {
-    if super::cpu::current_ipl() != nolx_hal_core::ipl::Ipl::PASSIVE {
-        return Err(Failure::Busy);
+fn refused(error: nolx_df_core::Error) -> Failure {
+    if error == nolx_df_core::Error::Busy {
+        Failure::Busy
+    } else {
+        Failure::NoDevice
     }
-    driver_start::device_operation(
+}
+/// Compatibility endpoint: always the original first binding, never a replacement peer.
+pub fn send_frame(bytes: &[u8]) -> Result<(), Failure> {
+    send_frame_on(PRIMARY.load(Ordering::Acquire), bytes)
+}
+/// Submit through this exact Started adapter without holding an IRQ lock during waits.
+pub fn send_frame_on(dev: usize, bytes: &[u8]) -> Result<(), Failure> {
+    driver_start::device_operation_handle(
+        dev,
         "virtio-net",
         || {
-            let mut nic = DEVICE.lock().take().ok_or(Failure::Busy)?;
+            let mut nic = DEVICE[dev].lock().take().ok_or(Failure::Busy)?;
             let result = nic.transmit(bytes);
-            *DEVICE.lock() = Some(nic);
+            *DEVICE[dev].lock() = Some(nic);
             result
         },
-        |error| {
-            if error == nolx_df_core::Error::Busy {
-                Failure::Busy
-            } else {
-                Failure::NoDevice
-            }
-        },
+        refused,
     )
 }
-/// Consume one externally received frame from the bounded device queue.
+/// Compatibility receive endpoint for the original first binding.
 pub fn receive_frame() -> Option<Frame> {
-    driver_start::device_operation(
+    receive_frame_on(PRIMARY.load(Ordering::Acquire))
+        .ok()
+        .flatten()
+}
+/// Consume a frame only from this Started adapter's bounded FIFO.
+pub fn receive_frame_on(dev: usize) -> Result<Option<Frame>, Failure> {
+    driver_start::device_operation_handle(
+        dev,
         "virtio-net",
         || {
-            let mut slot = DEVICE.lock();
+            let mut slot = DEVICE[dev].lock();
             let nic = slot.as_mut().ok_or(Failure::NoDevice)?;
             nic.receive()?;
             Ok(nic.frames.pop())
         },
-        |_| Failure::Busy,
+        refused,
     )
-    .ok()
-    .flatten()
+}
+/// Return the immutable adapter MAC only while this binding is Started.
+pub fn mac(dev: usize) -> Result<[u8; 6], Failure> {
+    driver_start::device_operation_handle(
+        dev,
+        "virtio-net",
+        || {
+            DEVICE[dev]
+                .lock()
+                .as_ref()
+                .map(|nic| nic.mac)
+                .ok_or(Failure::NoDevice)
+        },
+        refused,
+    )
 }
 
-/// Receive-vector entry point, before APIC EOI.
-pub fn on_rx_interrupt() {
-    on_interrupt(RX_VECTOR);
-}
-/// Transmit-vector entry point, before APIC EOI.
-pub fn on_tx_interrupt() {
-    on_interrupt(TX_VECTOR);
+/// Per-adapter counters used by the hardware isolation fixture.
+#[cfg(feature = "hal-driver-net-multi-test")]
+pub(crate) fn interrupt_counts(dev: usize) -> (usize, usize) {
+    (
+        RX_INTERRUPTS[dev].load(Ordering::Acquire),
+        TX_INTERRUPTS[dev].load(Ordering::Acquire),
+    )
 }

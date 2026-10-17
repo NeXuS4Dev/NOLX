@@ -12,19 +12,22 @@ M9 to the already implemented boot probes. Check items only with executable evid
 - [x] Exercise ECAM writes with real driver bring-up and storage round trips on Q35.
 - [x] Program MSI for AHCI and acknowledge its port/controller causes before APIC EOI;
       prove per-request interrupt delivery and on-disk checksums.
-- [ ] Complete network-device interrupt routing (82540EM lacks MSI; use its supported
-      INTx path or explicitly add an MSI-capable adapter, rather than claiming unsupported MSI).
+- [x] Route 82540EM firmware-assigned legacy INTx (including shared routes) and
+      independent virtio-net MSI-X completions; 82540EM does not support MSI.
+- [ ] Discover/reroute PCI interrupts using evaluated ACPI `_PRT`/link devices rather
+      than relying on the legacy PCI Interrupt Line value.
 - [ ] Assign unconfigured BARs and bridge resource windows without overlaps, rather than
       depending exclusively on firmware-assigned addresses.
 - [x] Bind multiple virtio-blk/AHCI/NVMe PCI controllers on segment zero, including
       secondary buses, with per-controller queues, interrupts and independent lifecycle.
-- [ ] Multi-adapter networking and native nonzero-segment binding.
+- [x] Multi-adapter native e1000/virtio-net contexts with exact-handle public RX/TX.
+- [ ] Native nonzero-segment binding.
 - [x] Persistent system registry; retain native storage/network state past probe return;
       healthy stop/restart/removal with hardware quiescence and exact DMA reclamation.
 - [x] Serialized, reusable, generation-checked MMIO windows with partial-map rollback
       and shared-root-preserving unmap on healthy stop (BSP only).
 - [ ] Complete failed-start/failed-stop recovery and interrupt-resource reclamation;
-      remaining network/segment binding is tracked separately above.
+      remaining segment binding and firmware routing are tracked separately above.
 
 ## Storage integration
 
@@ -216,7 +219,7 @@ Restart testing exposed e1000's boot-only assumption that IF remains masked: its
 recycle a descriptor before the poll observes DD. Readiness now accepts a fresh IRQ counter as
 well as DD, and waits against the current start's counter baseline instead of the first boot's.
 
-**Still open:** singleton native contexts/fixed storage queue IDs and segment-zero binding;
+**Still open at that checkpoint (later binding updates below):** singleton native contexts/fixed storage queue IDs and segment-zero binding;
 MMIO mappings remain monotonic (no unmap/reuse), and interrupt-vector/routing resource release
 is not complete. Failed initialization deliberately pins DMA rather than freeing possibly active
 hardware buffers; failure ownership/recovery is not yet complete. These healthy-path tests do
@@ -323,7 +326,7 @@ own tag/write and final lifecycle write, unique BDFs/block IDs/vectors, and zero
 All ten fixtures passed locally on QEMU 11.0.2; the seven existing lifecycle fixtures passed too.
 Dedicated CI job: `Multi-controller storage identity and lifecycle`.
 
-**Limits remain:** e1000/virtio-net still have singleton native contexts; native binding is still
+**Limits at the storage checkpoint:** networking was still singleton (superseded below); native binding is still
 segment zero; AHCI exposes only the first linked SATA port per controller and NVMe namespace 1.
 BARs/bridge windows remain firmware-assigned, capacity is bounded, and there is no automatic
 hotplug/rebind policy. Failed initialization/stop recovery, IRQ-resource reclamation, USB/HID,
@@ -339,3 +342,50 @@ seven existing lifecycle fixtures and the default smoke/three-backend persistenc
 Local default-kernel regressions also passed all three backends' host-mount/reboot and three
 malformed-media refusals, six virtio-net fixtures, three S5 fixtures and 21 Multiboot checks.
 No pull request was opened for this checkpoint.
+
+
+## Multi-adapter native networking (2026-10-17)
+
+Native e1000 and virtio-net now enumerate every matching segment-zero PCI function. Each
+framework handle retains its original BDF, MAC, transport state, receive FIFO, completion
+counters and diagnostics. Restart uses that BDF, not the next first-match search result.
+Repeated probing rejects previously registered BDFs without resetting live adapters or changing
+handles/DMA/MMIO counts. Removed/failed identities remain reserved; automatic hotplug retry and
+resource recycling are still not implemented.
+
+Both backends expose exact-handle `mac`, `send_frame_on` and `receive_frame_on` endpoints.
+Admission checks both Started state and the bound driver name under framework exclusion;
+a peer cannot authorize a stopped, removed, invalid or wrong-type handle. Recursive public
+network I/O returns Busy. e1000 now has a reusable, wrapping synchronous TX path as well as
+its retained receive FIFO. Virtio-net compatibility endpoints retain the original first
+binding rather than silently failing over to another adapter.
+
+For shared e1000 INTx, the handler scans **every** controller assigned that vector, acknowledges
+each controller's ICR and services its own RX ring before the common APIC EOI. Stop disables
+only that controller and removes only its IRQ-visible state; it does not mask a peer's shared
+route. Virtio-net keeps 0x53/0x54 for the first binding and reserves 0xb0..0xcf for subsequent
+per-handle RX/TX pairs, disjoint from the storage reservations. This remains bounded static
+reservation, not dynamic vector allocation/reclamation. Firmware's legacy Interrupt Line
+continues to select e1000 routes; evaluated ACPI PCI routing is a separate open gate.
+
+Build `hal-driver-net-multi-test` and run `scripts/check-network-multi.py` for eight fixtures:
+two of each kind and all four together on PC and Q35, an explicitly shared-INTx e1000 pair,
+and a mixed four-adapter secondary-bus fixture. The kernel checks unique MACs, duplicate-probe
+refusal, exact-target refusal, continued peer wire I/O while each target is stopped, unchanged
+identity and resources after restart, and three further stop/restart/removal cycles. A burst
+submits on every NIC before draining any public FIFO. Every exchange must receive its own
+fresh matched ARP reply and advance the selected adapter's receive-interrupt counter.
+Independent host pcaps verify **178** uniquely tagged public ARP requests and gateway replies
+across those eight fixtures, without requests appearing on another adapter's capture.
+
+Build both `hal-driver-multi-test,hal-driver-net-multi-test` and run
+`scripts/check-network-multi.py --storage-fixture-only` for the ninth fixture: two of each
+storage backend plus two of each NIC kind on Q35. Its 36 additional public ARP exchanges and
+all six media tags/writes are independently checked; ten devices complete lifecycle removal
+with zero pinned DMA. All nine fixtures passed locally on QEMU 11.0.2. Dedicated CI job:
+`Multi-adapter network wire identity and lifecycle`.
+
+**M9 remains open.** Native binding is still segment zero; operations are synchronous and
+registry-serialized, not parallel dispatch/SMP verification. Firmware BAR/bridge allocation,
+ACPI interrupt discovery, failed-start/failed-stop recovery and IRQ-resource reclamation,
+xHCI/HID/input objects, evaluated AML resources and global power-quiesce/S3 remain required.
