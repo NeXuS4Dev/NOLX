@@ -17,6 +17,7 @@ hal-fault-test-gp = []
 hal-power-test-s5 = []
 hal-driver-lifecycle-test = []
 hal-pci-resource-test = []
+hal-aml-test = []
 hal-driver-multi-test = ["hal-driver-lifecycle-test"]
 hal-driver-net-multi-test = ["hal-driver-lifecycle-test"]
 

@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""Execute real firmware AML plus injected SSDT methods on PC/Q35; refuse failures.
+
+Build a default kernel and a hal-aml-test kernel. Test resources describe a catalog-only
+synthetic device: they are never permission to access/map those physical addresses.
+"""
+import argparse
+import os
+from pathlib import Path
+import re
+import struct
+import subprocess
+import time
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def package(op, body):
+    size = len(body) + 1
+    if size < 64:
+        length = bytes([size])
+    else:
+        size = len(body) + 2
+        assert size < 4096
+        length = bytes([0x40 | (size & 15), size >> 4])
+    return bytes(op) + length + body
+
+
+def method(name, body, args=0):
+    return package([0x14], name + bytes([args]) + body)
+
+
+def device(name, body):
+    return package([0x5b, 0x82], name + body)
+
+
+def table(aml):
+    header = bytearray(struct.pack('<4sIBB6s8sI4sI', b'SSDT', 36 + len(aml), 2, 0,
+                                   b'NOLX  ', b'AMLTEST ', 1, b'NLXC', 1))
+    header[9] = (-sum(header + aml)) & 255
+    return header + aml
+
+
+def fixture():
+    resources = (bytes([0x4b, 0xf8, 3, 8, 0x86, 9, 0, 1]) + struct.pack('<II', 0xfedc0000, 4096)
+                 + bytes([0x22, 16, 0, 0x79, 0]))
+    buffer = package([0x11], bytes([0x0a, len(resources)]) + resources)
+    body = method(b'NLXM', bytes([0xa4, 0x7d, 0x68, 1, 0]), 1)
+    body += device(b'NLX0', bytes([8]) + b'RBUF' + buffer
+                   + method(b'_STA', bytes([0xa4]) + b'NLXM' + bytes([0x0a, 14]))
+                   + method(b'_CRS', bytes([0xa4]) + b'RBUF'))
+    body += device(b'NLX1', method(b'_STA', bytes([0xa4, 0])) + method(b'_CRS', bytes([0xff])))
+    body += device(b'NLX2', method(b'_STA', bytes([0xa4, 0x5b, 0x23])))
+    body += device(b'NLX3', method(b'_STA', bytes([0xa4, 0x0a, 15]))
+                   + method(b'_CRS', bytes([0xa4]) + package([0x11], bytes([1, 0x79]))))
+    body += device(b'NLX4', method(b'_STA', package([0xa2], bytes([1, 0xa3]))))
+    body += device(b'NLX5', method(b'_STA', bytes([0xa4]) + b'_STA'))
+    return table(package([0x10], b'\\_SB_' + body))
+
+
+def boot(qemu, kernel, machine, mode):
+    name = f'aml-{machine}-{mode}'
+    log = ROOT / 'build' / f'{name}.log'
+    platform = 'q35,sata=off' if machine == 'q35' else 'pc'
+    if mode == 'no-acpi':
+        platform += ',acpi=off'
+    command = [qemu, '-machine', platform, '-kernel', str(kernel), '-m', '512M',
+               '-nographic', '-no-reboot', '-net', 'none']
+    if mode in ['methods', 'bad-table']:
+        aml = ROOT / 'build' / f'{name}.aml'
+        # A late unknown opcode must roll back an earlier Device, not publish a prefix.
+        aml.write_bytes(fixture() if mode == 'methods' else table(
+            package([0x10], b'\\_SB_' + device(b'TMP0', method(b'_STA', bytes([0xa4, 1])))) + bytes([0xfe])))
+        command += ['-acpitable', f'file={aml}']
+    with log.open('w') as output:
+        process = subprocess.Popen(command, cwd=ROOT, stdout=output, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 90
+            while time.monotonic() < deadline:
+                text = log.read_text(errors='replace')
+                if 'NOLX: address space selftest:' in text or re.search(r'PANIC|BUGCHECK|CPU exception', text) or process.poll() is not None:
+                    break
+                time.sleep(.1)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+    text = log.read_text(errors='replace')
+    assert not re.search(r'PANIC|BUGCHECK|CPU exception', text), text
+    assert 'NOLX: address space selftest:' in text, f'{log}\n{text}'
+    assert 'NOLX: timer reached 100 ticks' in text, text
+    assert 'in use 0 -> 0 bytes, integrity ok' in text, text
+    if mode == 'no-acpi':
+        assert 'aml: no ACPI platform; namespace unavailable' in text, text
+    else:
+        assert 'aml: DSDT loaded atomically' in text, text
+        # These are the machine's real SeaBIOS methods, not the injected SSDT.
+        assert re.search(r'aml: \\_SB_\.PCI0\..*KBD_ _STA=0xf, defaulted=false', text), text
+        assert re.search(r'aml: \\_SB_\.PCI0\..*KBD_ _CRS evaluated and decoded: 3 resources', text), text
+        assert re.search(r'aml: \\_SB_\.PCI0\..*COM1 _STA=0xf, defaulted=false', text), text
+        assert re.search(r'aml: \\_SB_\.PCI0\..*COM1 _CRS evaluated and decoded: 2 resources', text), text
+        if mode == 'methods':
+            assert 'aml: firmware method selftest: computed status, decoded resources, disabled-device gating, unsupported/loop/recursion refusal verified' in text, text
+            assert 'NLX2 _STA refused: Unsupported' in text, text
+            assert 'NLX3 _CRS resource refusal: Truncated' in text, text
+            assert 'NLX4 _STA refused: Steps' in text, text
+            assert 'NLX5 _STA refused: Limit' in text, text
+            assert 'NLX1 _CRS skipped: device status is not usable' in text, text
+        else:
+            assert 'NLX0' not in text, text
+        if mode == 'bad-table':
+            assert 'aml: SSDT refused atomically: Unsupported(254)' in text, text
+            assert 'TMP0 _STA=' not in text, text
+    print(f'PASS: {name}: firmware AML evaluated, status/resource refusals preserved, no heap leak', flush=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--qemu', default=os.environ.get('QEMU', 'qemu-system-x86_64'))
+    parser.add_argument('--kernel', type=Path, default=ROOT / 'build' / 'nolx.elf')
+    parser.add_argument('--test-kernel', type=Path, default=ROOT / 'build' / 'nolx-aml.elf')
+    args = parser.parse_args()
+    (ROOT / 'build').mkdir(exist_ok=True)
+    for machine in ['pc', 'q35']:
+        boot(args.qemu, args.test_kernel.resolve(), machine, 'methods')
+        boot(args.qemu, args.kernel.resolve(), machine, 'absent')
+        boot(args.qemu, args.kernel.resolve(), machine, 'bad-table')
+    boot(args.qemu, args.kernel.resolve(), 'pc', 'no-acpi')
+
+
+if __name__ == '__main__':
+    main()

@@ -7,8 +7,9 @@
 //! for each sleep state (`_S3_`, `_S5_`) are named in the DSDT's AML as small packages, and the
 //! PM1 control register takes the chosen type and a go bit to enter that state.
 //!
-//! The kernel finds the methods' bytes and runs nothing: these rules read the results. Scope: the
-//! resource descriptors a PC's devices use, not every descriptor the specification defines; and
+//! The bounded, pure [`aml`] namespace/evaluator executes supported `_STA` and `_CRS` methods.
+//! Hardware fields, global mutation and synchronization are explicitly refused. Scope: a subset
+//! of the resource descriptors a PC's devices use, not every descriptor the specification defines; and
 //! the sleep lookup finds a `_Sx_` name that is a literal package, not one computed at runtime.
 //! The FADT names the DSDT that holds the `_Sx_` packages and the PM1a control port the sleep type
 //! is written to; [`Fadt::parse`] decodes those fields.
@@ -16,6 +17,8 @@
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+
+pub mod aml;
 
 /// `_STA` bit 0: the device is present.
 pub const STA_PRESENT: u32 = 1 << 0;
@@ -74,6 +77,12 @@ pub enum ResourceError {
     Unsupported(u8),
     /// The template holds more descriptors than [`MAX_RESOURCES`].
     TooMany,
+    /// A known descriptor has the wrong payload length or trailing nonzero bytes.
+    InvalidLength,
+    /// A range is empty, wraps, or exceeds its address space.
+    InvalidRange,
+    /// A supplied nonzero EndTag checksum does not validate the template.
+    Checksum,
 }
 
 /// The decoded resources of one template, in the order the firmware listed them.
@@ -134,52 +143,82 @@ pub fn parse_resources(bytes: &[u8]) -> Result<Resources, ResourceError> {
     let mut at = 0usize;
     loop {
         let tag = *bytes.get(at).ok_or(ResourceError::NoEnd)?;
-        if tag & 0x80 == 0 {
-            let name = (tag >> 3) & 0x0F;
-            let len = usize::from(tag & 0x07);
-            match name {
-                // End tag: its one byte is a checksum this crate does not verify.
-                0x0F => return Ok(out),
-                // IRQ: two bytes of mask, a third flags byte may follow.
-                0x04 => out.push(Resource::Irq {
-                    mask: le(bytes, at + 1, 2)? as u16,
-                })?,
-                // I/O port: information, minimum, maximum, alignment, length.
-                0x08 => out.push(Resource::Io {
-                    base: le(bytes, at + 2, 2)? as u16,
-                    length: le(bytes, at + 7, 1)? as u8,
-                })?,
-                // Fixed location I/O port: base, then length.
-                0x09 => out.push(Resource::Io {
-                    base: le(bytes, at + 1, 2)? as u16,
-                    length: le(bytes, at + 3, 1)? as u8,
-                })?,
-                _ => return Err(ResourceError::Unsupported(tag)),
-            }
-            at += 1 + len;
+        let (body, len) = if tag & 0x80 == 0 {
+            (at + 1, usize::from(tag & 7))
         } else {
-            let len = le(bytes, at + 1, 2)? as usize;
-            let body = at + 3;
-            match tag & 0x7F {
-                // Memory32Fixed: information, base, length.
-                0x06 => out.push(Resource::Memory {
-                    base: le(bytes, body + 1, 4)?,
-                    length: le(bytes, body + 5, 4)?,
-                })?,
-                // QWord address space: type 0 is memory; minimum is at 11, length at 35.
-                0x0A => {
-                    if le(bytes, body, 1)? != 0 {
+            (at + 3, le(bytes, at + 1, 2)? as usize)
+        };
+        let end = body.checked_add(len).ok_or(ResourceError::Truncated)?;
+        let data = bytes.get(body..end).ok_or(ResourceError::Truncated)?;
+        let valid_length = match tag {
+            0x22 | 0x23 => len == 2 || len == 3,
+            0x47 => len == 7,
+            0x4b => len == 3,
+            0x79 => len == 1,
+            0x86 => len == 9,
+            0x8a => len == 43,
+            _ => return Err(ResourceError::Unsupported(tag)),
+        };
+        if !valid_length {
+            return Err(ResourceError::InvalidLength);
+        }
+        match tag {
+            0x79 => {
+                if data[0] != 0 && bytes[..end].iter().fold(0u8, |s, b| s.wrapping_add(*b)) != 0 {
+                    return Err(ResourceError::Checksum);
+                }
+                if bytes[end..].iter().any(|b| *b != 0) {
+                    return Err(ResourceError::InvalidLength);
+                }
+                return Ok(out);
+            }
+            0x22 | 0x23 => out.push(Resource::Irq {
+                mask: le(data, 0, 2)? as u16,
+            })?,
+            0x47 | 0x4b => {
+                let offset = if tag == 0x47 { 1 } else { 0 };
+                let base = le(data, offset, 2)?;
+                let length = *data.last().ok_or(ResourceError::Truncated)?;
+                if length == 0 || base + u64::from(length) > 65536 {
+                    return Err(ResourceError::InvalidRange);
+                }
+                if tag == 0x47 && base > le(data, 3, 2)? {
+                    return Err(ResourceError::InvalidRange);
+                }
+                out.push(Resource::Io {
+                    base: base as u16,
+                    length,
+                })?;
+            }
+            0x86 | 0x8a => {
+                let (base, length) = if tag == 0x86 {
+                    (le(data, 1, 4)?, le(data, 5, 4)?)
+                } else {
+                    if data[0] != 0 || le(data, 27, 8)? != 0 {
                         return Err(ResourceError::Unsupported(tag));
                     }
-                    out.push(Resource::Memory {
-                        base: le(bytes, body + 11, 8)?,
-                        length: le(bytes, body + 35, 8)?,
-                    })?;
+                    let base = le(data, 11, 8)?;
+                    let length = le(data, 35, 8)?;
+                    if length == 0
+                        || base
+                            .checked_add(length - 1)
+                            .is_none_or(|end| end > le(data, 19, 8).unwrap_or(0))
+                    {
+                        return Err(ResourceError::InvalidRange);
+                    }
+                    (base, length)
+                };
+                if length == 0
+                    || base.checked_add(length).is_none()
+                    || (tag == 0x86 && base + length > 0x1_0000_0000)
+                {
+                    return Err(ResourceError::InvalidRange);
                 }
-                _ => return Err(ResourceError::Unsupported(tag)),
+                out.push(Resource::Memory { base, length })?;
             }
-            at = body + len;
+            _ => return Err(ResourceError::Unsupported(tag)),
         }
+        at = end;
     }
 }
 

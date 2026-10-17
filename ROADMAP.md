@@ -1022,3 +1022,14 @@ exercise root/one-bridge/two-nested-bridge layouts on both machines, with six re
 four captured NIC endpoints, independent lifecycle and zero pinned DMA. This is not general
 `_CRS` resource discovery, new bus numbering, hotplug/rebalancing, 64-bit prefetch windows or
 nonzero-segment native binding. The broader M9 resource gate remains partially open.
+
+
+**Bounded AML checkpoint (2026-10-17):** a safe portable DSDT/SSDT namespace and pure
+method evaluator now runs actual SeaBIOS PC/Q35 keyboard/serial `_STA` and `_CRS` methods.
+Native boot publishes a bounded status-gated catalog, refuses unsupported hardware-field and
+mutation operations, and releases interpreter heap. Forward references, aliases, atomic table
+rollback, strict descriptor bounds, and loop/recursion/allocation budgets have executable tests;
+seven firmware/SSDT/absent/malformed/no-ACPI boots are checked by `scripts/check-aml.py`.
+This supersedes historical statements that the kernel executes no AML, not the remaining PCI
+routing/resource or general AML gates: host-bridge apertures, PCI link `_PRT`, operation regions,
+USB HID, failed-lifecycle recovery and global power/S3 remain open. See the M9 completion gate.

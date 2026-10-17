@@ -260,3 +260,38 @@ fn fadt_records_acpi_enable_and_control_width_without_truncating_ports() {
     bytes[9] = 0u8.wrapping_sub(bytes[..116].iter().fold(0u8, |a, &b| a.wrapping_add(b)));
     assert_eq!(Fadt::parse(&bytes[..116]).unwrap().smi_command, None);
 }
+
+#[test]
+fn resource_descriptor_bounds_cannot_borrow_bytes_from_the_next_descriptor() {
+    for bytes in [
+        &[0x4a, 0xf8, 3, 0x79, 0][..],
+        &[0x86, 1, 0, 0, 0x79, 0],
+        &[0x79],
+        &[0x8a, 43, 0, 0],
+    ] {
+        assert!(parse_resources(bytes).is_err());
+    }
+    assert!(parse_resources(&[0x79, 0, 0x22, 1, 0]).is_err());
+}
+#[test]
+fn resource_ranges_and_nonzero_checksums_are_validated() {
+    assert_eq!(
+        parse_resources(&[0x4b, 0xff, 0xff, 2, 0x79, 0]),
+        Err(ResourceError::InvalidRange)
+    );
+    assert_eq!(
+        parse_resources(&[0x4b, 0, 0, 0, 0x79, 0]),
+        Err(ResourceError::InvalidRange)
+    );
+    assert_eq!(parse_resources(&[0x79, 1]), Err(ResourceError::Checksum));
+    assert!(parse_resources(&[0x79, 0x87]).unwrap().is_empty());
+    assert!(parse_resources(&[0x79, 0, 0, 0]).unwrap().is_empty());
+}
+#[test]
+fn every_truncation_of_a_resource_template_is_refused() {
+    let bytes = [0x4b, 0xf8, 3, 8, 0x22, 16, 0, 0x79, 0];
+    for end in 0..bytes.len() {
+        assert!(parse_resources(&bytes[..end]).is_err());
+    }
+    assert_eq!(parse_resources(&bytes).unwrap().len(), 2);
+}

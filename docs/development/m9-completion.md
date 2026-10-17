@@ -63,9 +63,13 @@ M9 to the already implemented boot probes. Check items only with executable evid
 
 ## ACPI and power
 
-- [ ] AML namespace loading/evaluation sufficient for actual firmware `_STA` and `_CRS`
-      methods, with explicit unsupported-operation and resource limits.
-- [ ] Consume evaluated resources/status for device discovery and routing.
+- [x] Bounded AML namespace loading and pure `_STA`/`_CRS` method evaluation, including
+      real PC/Q35 SeaBIOS keyboard/serial methods, with explicit refusals and resource limits.
+- [x] Publish a status-gated firmware-device/resource catalog without retaining interpreter heap.
+- [ ] Complete hardware-field/operation-region providers and the remaining AML operations
+      needed by PCI host-bridge/link-device methods; do not mistake a partial catalog for discovery.
+- [ ] Consume evaluated host-bridge/link resources for native device binding and PCI routing,
+      replacing the bounded board apertures and firmware Interrupt Line fallback.
 - [ ] Device power-state/quiesce policy and S3 save/resume path.
 - [x] ACPI S5 entry with QMP observing actual guest shutdown and QEMU exit zero, not a
       printed hypothetical word. The unsafe primitive requires prior system quiescence;
@@ -463,3 +467,44 @@ also passed 714 host tests in each overlapping command, host/default/all-feature
 formatting, boot/layout checks, 21 Multiboot checks, six single-NIC fixtures, all three
 storage persistence/reboot/malformed-media suites and three power fixtures. Unsafe audit:
 249 blocks / zero missing invariants. No pull request was opened.
+
+
+## Bounded firmware AML evaluation (2026-10-17)
+
+`nolx-power-core::aml` now loads DSDT/SSDT namespace declarations transactionally and executes
+supported pure methods rather than scanning for `_STA`/`_CRS` byte patterns. It handles scoped
+names, parent search, aliases (including method arity), deferred forward data/package references,
+integer expressions, arguments/locals, method calls, integer local stores, Return/If/Else/While,
+and literal buffers/packages. Scope opens existing containers; a missing descendant never falls
+through into another same-named subtree. External completion rolls back on failed table loads.
+
+Bounds are 2048 objects, combined parser/evaluator nesting 32, 10000 steps per table load or
+evaluation, 16 KiB buffers/strings, 256 package elements, 64 KiB aggregate value size, 256 KiB
+namespace-owned data, 16 KiB total method-argument data including representation overhead,
+and 1 MiB per AML payload. Compound local/argument stores, global mutation, operation-region/
+field reads, synchronization and buffer-field mutation are refused rather than emulated. Unknown
+module instructions reject the table atomically; failed methods never default to successful status.
+Resource decoding checks descriptor-local extents, exact known lengths, ranges/overflow, optional
+nonzero end-tag checksum and trailing zero padding. IRQ trigger/polarity/sharing and root-window
+semantics are not represented by this limited resource catalog: it must not authorize PCI routing.
+
+The kernel evaluates firmware before PCI driver startup, defaults only an absent `_STA` to 15,
+skips disabled-device `_CRS`, and retains at most 128 fixed-size records. Unknown or malformed
+resources remain unknown, not empty/available. `firmware_catalog_complete()` is false on any
+reported refusal; `firmware_device(index)` copies one record, not the whole array onto the 128 KiB
+boot stack. Native testing caught and fixed an earlier whole-array stack-overflow regression.
+Interpreter allocations are released before existing memory/heap tests; the catalog owns no heap.
+
+Local Rust 1.88.0 / QEMU 11.0.2 verification: 45 power-core tests (29 new), seven AML boots via
+`scripts/check-aml.py`: PC/Q35 computed status and three resources; disabled, unsupported,
+malformed, looping and recursive methods; ordinary no-injected-SSDT boots; transactional
+late-opcode table refusal; and a no-ACPI VM. Both machine profiles load their real SeaBIOS DSDT
+and evaluate actual keyboard/serial `_STA` and `_CRS` methods. Every fixture completes timer,
+address-space and zero-leak heap checks. The `acpi-aml` CI job repeats these executable checks;
+its result is recorded separately, not inferred from this local run.
+
+This does **not** implement PCI `_PRT`/link routing, general root `_CRS` aperture consumption,
+operation-region providers, general AML, device power methods, USB HID or S3/global quiescence.
+Real root/link methods and several descriptor types are explicitly refused. Existing PCI board
+apertures/Interrupt Line policy is unchanged. The literal sleep-package helper remains separate.
+M9 remains incomplete, and no new pull request is requested or opened.
