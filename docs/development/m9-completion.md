@@ -642,3 +642,17 @@ six storage controllers plus four NICs, 288 captured exchanges, media checks and
 The existing eight network fixtures passed too. CI evidence for this revision is recorded separately.
 **No PR opened. General PCI/link allocation, USB/HID, failed-lifecycle recovery and global power/S3
 remain open; M9 is incomplete.**
+
+
+### Firmware-version compatibility correction
+
+The first INTx CI run (`39030745438`, revision `9f30f54`) failed the older PC firmware path:
+its `_PRT` constructs 128 rows at runtime with local package copies, Index stores and Increment,
+instead of returning QEMU 11's static package. This was a real regression, not a reason to restore
+Interrupt Line fallback. Bounded owned local-package construction now supports that method with
+a frame-wide 64 KiB/depth budget; Index targets are local packages only, with null reference outputs.
+Namespace/argument/index-reference writes and general buffer stores remain refused. Two added host
+tests execute the full legacy 128-row algorithm (including the slot-one SCI exception), check every
+address/pin/link, and reject escaping/out-of-range targets and recursive package amplification.
+The corrected host suite has **770 tests**, including thirteen new INTx-related tests overall.
+The corrected revision must pass CI independently; the failed first run is not passing evidence.

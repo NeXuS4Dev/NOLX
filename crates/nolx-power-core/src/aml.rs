@@ -1028,8 +1028,20 @@ impl<'a> Namespace<'a> {
             0x70 => {
                 r.byte()?;
                 let v = self.expr(r, f, depth + 1, steps)?;
-                target(r, f, v.clone())?;
+                self.target(r, f, v.clone(), depth + 1, steps)?;
                 Ok(v)
+            }
+            0x75 => {
+                r.byte()?;
+                let local = r.byte()?;
+                if !(0x60..=0x67).contains(&local) {
+                    return Err(Error::Target);
+                }
+                let index = usize::from(local - 0x60);
+                let value =
+                    Value::Integer(f.locals[index].integer()?.wrapping_add(1) & self.integer_mask);
+                f.locals[index] = value.clone();
+                Ok(value)
             }
             0x72 | 0x74 | 0x77 | 0x79..=0x80 | 0x90..=0x95 => {
                 r.byte()?;
@@ -1074,7 +1086,7 @@ impl<'a> Namespace<'a> {
                 };
                 let v = Value::Integer(value & self.integer_mask);
                 if op < 0x90 {
-                    target(r, f, v.clone())?;
+                    self.target(r, f, v.clone(), depth + 1, steps)?;
                 }
                 Ok(v)
             }
@@ -1111,6 +1123,44 @@ impl<'a> Namespace<'a> {
             }
         }
     }
+    fn target(
+        &self,
+        r: &mut Reader<'a>,
+        f: &mut Frame,
+        value: Value,
+        depth: usize,
+        steps: &mut usize,
+    ) -> Result<(), Error> {
+        if r.peek()? == 0x88 {
+            step(steps)?;
+            r.byte()?;
+            let source = r.byte()?;
+            if !(0x60..=0x67).contains(&source) {
+                return Err(Error::Target);
+            }
+            let index = usize::try_from(self.expr(r, f, depth + 1, steps)?.integer()?)
+                .map_err(|_| Error::Limit)?;
+            if r.byte()? != 0 || !matches!(value, Value::Integer(_) | Value::Package(_)) {
+                return Err(Error::Target);
+            }
+            let local = usize::from(source - 0x60);
+            let mut replacement = f.locals[local].clone();
+            let Value::Package(values) = &mut replacement else {
+                return Err(Error::Target);
+            };
+            *values.get_mut(index).ok_or(Error::Limit)? = value;
+            frame_local(f, local, replacement)?;
+            return Ok(());
+        }
+        if matches!(value, Value::Package(_)) {
+            let local = r.byte()?;
+            if !(0x60..=0x67).contains(&local) {
+                return Err(Error::Target);
+            }
+            return frame_local(f, usize::from(local - 0x60), value);
+        }
+        target(r, f, value)
+    }
     fn execute(
         &self,
         r: &mut Reader<'a>,
@@ -1143,6 +1193,20 @@ impl<'a> Namespace<'a> {
                         })?
                         > MAX_VALUE_BYTES
                     {
+                        return Err(Error::Limit);
+                    }
+                    let mut total = value_cost(&value, 0)?;
+                    for owned in f
+                        .locals
+                        .iter()
+                        .chain(f.args.iter())
+                        .chain(f.names.iter().map(|(_, v)| v))
+                    {
+                        total = total
+                            .checked_add(value_cost(owned, 0)?)
+                            .ok_or(Error::Limit)?;
+                    }
+                    if total > MAX_DATA_BYTES {
                         return Err(Error::Limit);
                     }
                     f.names.push((name.path, value));
@@ -1241,9 +1305,32 @@ struct BufferField {
     offset: usize,
 }
 
+// Owned package copies are permitted only in locals, with a frame-wide/depth budget.
+// No AML reference to a local/index escapes and no namespace package is ever mutated.
+fn frame_local(f: &mut Frame, index: usize, value: Value) -> Result<(), Error> {
+    let mut cost = value_cost(&value, 0)?;
+    for (i, local) in f.locals.iter().enumerate() {
+        if i != index {
+            cost = cost
+                .checked_add(value_cost(local, 0)?)
+                .ok_or(Error::Limit)?;
+        }
+    }
+    for arg in &f.args {
+        cost = cost.checked_add(value_cost(arg, 0)?).ok_or(Error::Limit)?;
+    }
+    for (_, name) in &f.names {
+        cost = cost.checked_add(value_cost(name, 0)?).ok_or(Error::Limit)?;
+    }
+    if cost > MAX_DATA_BYTES {
+        return Err(Error::Limit);
+    }
+    f.locals[index] = value;
+    Ok(())
+}
 fn target(r: &mut Reader<'_>, f: &mut Frame, value: Value) -> Result<(), Error> {
-    // Compound local/argument stores are outside the pure subset; refusing them also
-    // prevents repeated stores/calls from amplifying large buffers into unbounded frames.
+    // General compound stores remain refused. Only the separately budgeted owned local
+    // package paths above and private buffer-field integer writes are supported.
     if !matches!(value, Value::Integer(_)) {
         return Err(Error::Target);
     }

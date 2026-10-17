@@ -648,3 +648,106 @@ fn pci_fields_require_readonly_provider_static_root_metadata_and_byte_access() {
     ns.load(&bytes).unwrap();
     assert!(ns.evaluate(&path("\\PCI0.ISA0.PRQ0"), &[]).is_err());
 }
+
+#[test]
+fn legacy_qemu_prt_builds_128_owned_rows_with_local_index_stores_and_increment() {
+    let mut names = Vec::new();
+    for link in [b"LNKA", b"LNKB", b"LNKC", b"LNKD", b"LNKS"] {
+        names.extend(pkg(&[0x5b, 0x82], link.to_vec()));
+    }
+    fn route(link: &[u8; 4]) -> Vec<u8> {
+        pkg(&[0x12], [vec![4, 0, 0], link.to_vec(), vec![0]].concat())
+    }
+    fn choose(link: &[u8; 4], index: u8) -> Vec<u8> {
+        pkg(
+            &[0xa0],
+            [vec![0x93, 0x63, 0x0a, index, 0x70], route(link), vec![0x64]].concat(),
+        )
+    }
+    let mut loop_body = vec![
+        0x95, 0x61, 0x0a, 128, 0x70, 0x7a, 0x61, 0x0a, 2, 0, 0x62, 0x70, 0x7b, 0x72, 0x61, 0x62, 0,
+        0x0a, 3, 0, 0x63,
+    ];
+    loop_body.extend(choose(b"LNKD", 0));
+    let special = [
+        pkg(
+            &[0xa0],
+            [vec![0x93, 0x61, 0x0a, 4, 0x70], route(b"LNKS"), vec![0x64]].concat(),
+        ),
+        pkg(&[0xa1], [vec![0x70], route(b"LNKA"), vec![0x64]].concat()),
+    ]
+    .concat();
+    loop_body.extend(pkg(&[0xa0], [vec![0x93, 0x63, 1], special].concat()));
+    loop_body.extend(choose(b"LNKB", 2));
+    loop_body.extend(choose(b"LNKC", 3));
+    loop_body.extend([
+        0x70, 0x7d, 0x79, 0x62, 0x0a, 16, 0, 0x0b, 0xff, 0xff, 0, 0x88, 0x64, 0, 0,
+    ]);
+    loop_body.extend([0x70, 0x7b, 0x61, 0x0a, 3, 0, 0x88, 0x64, 1, 0]);
+    loop_body.extend([0x70, 0x64, 0x88, 0x60, 0x61, 0, 0x75, 0x61]);
+    let body = [
+        vec![0x70],
+        pkg(&[0x12], vec![128]),
+        vec![0x60, 0x70, 0, 0x61],
+        pkg(&[0xa2], loop_body),
+        vec![0xa4, 0x60],
+    ]
+    .concat();
+    let bytes = [names, method(b"_PRT", 0, &body)].concat();
+    let mut ns = Namespace::new();
+    ns.load(&bytes).unwrap();
+    let Value::Package(rows) = ns.evaluate(&path("\\_PRT"), &[]).unwrap() else {
+        panic!()
+    };
+    assert_eq!(rows.len(), 128);
+    for (i, row) in rows.iter().enumerate() {
+        let Value::Package(row) = row else { panic!() };
+        assert_eq!(row[0], Value::Integer(((i / 4) as u64) << 16 | 0xffff));
+        assert_eq!(row[1], Value::Integer((i % 4) as u64));
+        let link = if i == 4 {
+            "\\LNKS"
+        } else {
+            ["\\LNKD", "\\LNKA", "\\LNKB", "\\LNKC"][(i + i / 4) % 4]
+        };
+        assert_eq!(row[2], Value::Reference(path(link)));
+    }
+}
+#[test]
+fn package_index_writes_are_local_bounded_copies_never_namespace_or_buffer_targets() {
+    let package = pkg(&[0x12], vec![1, 0]);
+    for target in [
+        vec![0x88, 0x60, 1, 0],
+        vec![0x88, 0x60, 0, 0x61],
+        vec![0x88, 0x68, 0, 0],
+        vec![0x88, b'P', b'K', b'G', b'0', 0, 0],
+    ] {
+        let bytes = method(
+            b"TEST",
+            0,
+            &[
+                vec![0x70],
+                package.clone(),
+                vec![0x60, 0x70, 1],
+                target,
+                vec![0xa4, 0x60],
+            ]
+            .concat(),
+        );
+        let mut ns = Namespace::new();
+        ns.load(&bytes).unwrap();
+        assert!(ns.evaluate(&path("\\TEST"), &[]).is_err());
+    }
+    // Deep self-copy cannot evade aggregate/depth budgets through Index targets.
+    let body = [
+        vec![0x70],
+        package,
+        vec![0x60],
+        pkg(&[0xa2], vec![1, 0x70, 0x60, 0x88, 0x60, 0, 0]),
+        vec![0xa4, 0x60],
+    ]
+    .concat();
+    let bytes = method(b"GROW", 0, &body);
+    let mut ns = Namespace::new();
+    ns.load(&bytes).unwrap();
+    assert_eq!(ns.evaluate(&path("\\GROW"), &[]), Err(Error::Limit));
+}
