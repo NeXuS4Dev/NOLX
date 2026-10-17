@@ -752,7 +752,9 @@ unfinished work rather than treating green existing tests as proof of completion
   route, acknowledges ICR and recycles descriptors into a bounded FIFO without allocating
   or printing in the ISR. A real ARP request/reply with QEMU's user-network gateway checks
   frame contents and interrupt delivery. The 82540EM does not advertise MSI; none is claimed.
-  Full AML-derived PCI link routing and a configurable network stack are not implemented.
+  Bounded PC/Q35 evaluated `_PRT`/current-link INTx is verified, including poisoned-line
+  direct/shared/nested fixtures. General link allocation/reprogramming and a configurable
+  network stack are not implemented.
 - PS/2 keyboard and standard three-byte mouse ports are initialized and IRQ1/IRQ12 are
   serviced on APIC and PIC paths. A bounded source-tagged event FIFO carries HID key usages,
   signed relative pointer motion and buttons to an idle-context consumer. CI injects real

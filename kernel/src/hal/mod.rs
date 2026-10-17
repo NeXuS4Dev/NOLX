@@ -26,6 +26,7 @@ pub mod msix;
 pub mod multiboot;
 pub mod nvme;
 pub mod pci;
+pub mod pci_intx;
 pub mod pic;
 pub mod power;
 pub mod ps2;

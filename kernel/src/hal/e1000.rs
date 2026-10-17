@@ -248,6 +248,14 @@ pub fn probe(console: &mut dyn HalConsole) {
             }
             match (&state.report, &state.error) {
                 (Some(report), _) => {
+                    #[cfg(feature = "hal-pci-intx-poison-test")]
+                    let _ = writeln!(
+                        console,
+                        "pci: INTx line poisoned to ff at {:?}, pin {} preserved",
+                        report.bdf,
+                        (ConfigAccess.read_u32(report.bdf, 0x3c) >> 8) & 255
+                    );
+
                     let _ = writeln!(
                 console,
                 "e1000: {:02x}:{:02x}.{} bar0 {:#x}, mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, link {}",
@@ -421,8 +429,17 @@ fn bring_up(dev: usize) -> Result<(Rings, Report), Failure> {
     regs.write32(e1000::REG_RDLEN, ring_bytes)?;
     regs.write32(e1000::REG_RDH, 0)?;
     regs.write32(e1000::REG_RDT, RING - 1)?;
-    let irq = (ConfigAccess.read_u32(bdf, 0x3c) & 0xff) as u8;
-    if !super::apic::is_enabled() || !(3..16).contains(&irq) {
+    #[cfg(feature = "hal-pci-intx-poison-test")]
+    {
+        let old = ConfigAccess.read_u32(bdf, 0x3c);
+        ConfigAccess.write_u32(bdf, 0x3c, (old & !255) | 255);
+        let readback = ConfigAccess.read_u32(bdf, 0x3c);
+        if readback & 0xffff != (old & 0xff00) | 255 {
+            return Err(Failure::Interrupt);
+        }
+    }
+    let irq = super::pci_intx::lookup(bdf).ok_or(Failure::Interrupt)?;
+    if !super::apic::is_enabled() || irq.gsi >= 24 {
         return Err(Failure::Interrupt);
     }
     *RECEIVE[dev].lock() = Some(Receive {
@@ -432,11 +449,11 @@ fn bring_up(dev: usize) -> Result<(Rings, Report), Failure> {
         next: 0,
         frames: FrameQueue::new(),
     });
-    RX_VECTOR[dev].store(32 + irq, Ordering::Release);
+    RX_VECTOR[dev].store(32 + irq.gsi as u8, Ordering::Release);
     // Clear stale causes, enable receive timer interrupts, then unmask the level route.
     let _ = regs.read32(e1000::REG_ICR)?;
     regs.write32(e1000::REG_IMS, e1000::ICR_RXT0)?;
-    if !super::ioapic::unmask_pci_irq(irq) {
+    if super::ioapic::unmask_pci_route(irq) != Some(32 + irq.gsi as u8) {
         return Err(Failure::Interrupt);
     }
     regs.write32(e1000::REG_RCTL, e1000::rctl_enable(true))?;

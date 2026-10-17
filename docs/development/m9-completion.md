@@ -15,7 +15,9 @@ M9 to the already implemented boot probes. Check items only with executable evid
 - [x] Route 82540EM firmware-assigned legacy INTx (including shared routes) and
       independent virtio-net MSI-X completions; 82540EM does not support MSI.
 - [ ] Discover/reroute PCI interrupts using evaluated ACPI `_PRT`/link devices rather
-      than relying on the legacy PCI Interrupt Line value.
+      than relying on the legacy PCI Interrupt Line value. Bounded PC/Q35 current-route
+      discovery/programming is now verified (checkpoint below); arbitrary link reprogramming,
+      unsupported root/topology/source models and dynamic vector ownership remain open.
 - [x] Assign missing memory32/memory64/I/O BARs and closed type-1 memory/I/O bridge
       windows on the bounded PC/Q35 segment-zero profile, with readback and rollback.
 - [x] Consume evaluated host-bridge `_CRS` producer apertures for bounded PC/Q35 missing
@@ -98,8 +100,9 @@ bounded packet/input queues and PS/2 mouse decoding. Native configuration access
 serialized, never aliases nonzero segments to legacy ports, and reports refused mappings.
 
 Explicit limitations: nonzero segments are enumerated and reported, but the existing
-one-device boot drivers still bind segment zero. e1000 INTx routing currently consumes
-firmware-assigned legacy GSIs (IRQ3…15 except IRQ12), not AML PCI link-device routing.
+native drivers still bind segment zero. e1000 now consumes evaluated ACPI current-link/direct
+GSI routes on the bounded PC/Q35 profile (GSI3…23 excluding reserved ISA/NMI inputs), not the
+Interrupt Line byte when ACPI is advertised. General link reprogramming remains open.
 Network reachability verification currently uses QEMU's user-network gateway as a boot
 self-test peer; this is not a configurable IP/socket stack. Input FIFO delivery exists,
 but HID enumeration and public input-device objects remain open. At that checkpoint driver registries still
@@ -601,3 +604,41 @@ explicitly caps low RAM at 2 GiB for deterministic firmware-table placement acro
 versions; it does not claim support for firmware tables beyond the existing direct map.
 The subsequent revision's CI result must be checked independently. **No PR opened; M9 is
 still incomplete for the unchecked acceptance gates above.**
+
+
+## Evaluated PCI INTx checkpoint (2026-10-17)
+
+This supersedes the earlier checkpoint statements that native routing still uses Interrupt
+Line or that all operation-region/link evaluation is unwired. It does not complete M9.
+
+- Evaluate the actual root/bridge `_PRT` packages and link `_STA`/`_CRS`, preserving polarity,
+  trigger and sharing flags from single current Small IRQ/Extended IRQ descriptors. Direct
+  GSIs retain PCI defaults. No `_PRS` guesses, `_SRS`, general firmware writes or link allocation.
+- Select the validated `_PIC(Arg0)` Store-to-integer subset **before** root resources and routes;
+  Q35 takes the actual APIC table. Unknown/unsupported `_PIC` is a routing refusal, not PIC fallback.
+- Snapshot only verified PIIX/ICH9 root-bus PIRQ bytes; support read-only ByteAccess PCI fields
+  with static segment-zero/root-bus metadata. Method-private bounded buffers/DWord fields support
+  PC IQCR without writing namespace buffers, hardware, or normal global data. Recursive metadata
+  methods are refused, and retained region operands count toward the namespace allocation budget.
+- Resolve scoped buses from existing numbered bridges and apply standard slot/pin swizzling only
+  on undescribed child buses. Missing/ambiguous rows, malformed tables and incomplete catalogs
+  revoke routing authority; cache publication is transactional and interpreter heap is released.
+- Program/read back covered GSI3…23 with fixed vectors 0x23…0x37, excluding PIT/keyboard/mouse
+  and MADT NMI reservations. Shared owners must agree on electrical flags. Failed programming
+  stays masked. These are fixed reservations, not dynamic vector allocation/reclamation.
+- No advertised-but-refused ACPI namespace may fall back to Interrupt Line. The no-ACPI legacy
+  policy remains separate. Unsupported strings in Source, nonzero SourceIndex for links, general
+  fields, multiple-current-IRQ choices, edge/unshared PCI links and broader topologies are refused.
+
+Local Rust 1.88 checks: **768 host tests** in each overlapping command, host and compatible-feature
+native Clippy, formatting and the unchanged 249-block unsafe audit passed. Eleven new host tests
+cover descriptor/package ambiguity, bridge scopes/swizzling/refusal and bounded AML effects.
+`check-network-multi.py --intx-routing-only` passed **14 fixtures**: eight PC/Q35 direct/shared/
+bridged/nested pairs with Interrupt Line poisoned/read back as 0xff and preserved pins, plus six
+malformed-table/unmapped-scope/unsupported-PIC refusal boots. The eight positive fixtures verified
+112 captured public ARP exchanges, per-adapter ISR progress and zero pinned DMA after lifecycle.
+All eight ten-device native BAR/resource fixtures also passed **with line poisoning enabled**:
+six storage controllers plus four NICs, 288 captured exchanges, media checks and zero pinned DMA.
+The existing eight network fixtures passed too. CI evidence for this revision is recorded separately.
+**No PR opened. General PCI/link allocation, USB/HID, failed-lifecycle recovery and global power/S3
+remain open; M9 is incomplete.**

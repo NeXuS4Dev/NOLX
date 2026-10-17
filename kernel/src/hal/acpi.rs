@@ -252,6 +252,7 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
     use core::fmt::Write;
     use power::aml::Namespace;
     FIRMWARE_DEVICES.lock().fill(None);
+    super::pci_intx::revoke();
     *ROOT_RESOURCES.lock() = RootResourceState::Absent;
     FIRMWARE_CATALOG_COMPLETE.store(false, core::sync::atomic::Ordering::Release);
     let mut table_refusals = 0;
@@ -280,7 +281,9 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
         );
         return;
     };
+    let snapshot = super::pci_intx::Snapshot::capture();
     let mut namespace = Namespace::with_dsdt_revision(dsdt.bytes()[8]);
+    namespace.set_field_reader(&snapshot);
     match namespace.load(&dsdt.bytes()[36..]) {
         Ok(()) => {
             loaded += 1;
@@ -339,6 +342,30 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
     } else {
         table_refusals += 1;
     }
+    // Select before any resource evaluation: even a narrowly supported _PIC may change
+    // an integer referenced by _SEG/_BBN/_CRS, not only by _PRT.
+    let interrupt_model_ready = if table_refusals == 0 {
+        match namespace.select_interrupt_model(super::apic::is_enabled()) {
+            Ok(notified) => {
+                let _ = writeln!(
+                    console,
+                    "aml: interrupt model={}, _PIC notified={notified}",
+                    if super::apic::is_enabled() {
+                        "APIC"
+                    } else {
+                        "PIC"
+                    }
+                );
+                true
+            }
+            Err(error) => {
+                let _ = writeln!(console, "pci: ACPI INTx evaluation refused: _PIC {error:?}");
+                false
+            }
+        }
+    } else {
+        false
+    };
     if table_refusals == 0 {
         match power::root::discover(&namespace) {
             Ok(resources) => {
@@ -372,6 +399,9 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
             console,
             "aml: PCI root resource authorization refused: incomplete table load"
         );
+    }
+    if interrupt_model_ready && matches!(root_resources(), RootResourceState::Ready(_)) {
+        super::pci_intx::evaluate(&namespace, console);
     }
     let mut retained = 0;
     let mut ready = 0;
@@ -430,6 +460,7 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
             None
         };
         if retained == MAX_FIRMWARE_DEVICES {
+            super::pci_intx::revoke();
             *ROOT_RESOURCES.lock() = RootResourceState::Refused;
             let _ = writeln!(
                 console,

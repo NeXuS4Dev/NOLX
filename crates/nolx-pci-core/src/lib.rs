@@ -23,6 +23,7 @@
 pub mod ecam;
 pub mod msi;
 pub mod resources;
+pub mod routing;
 
 /// I/O port holding the configuration address register.
 pub const CONFIG_ADDRESS_PORT: u16 = 0xCF8;

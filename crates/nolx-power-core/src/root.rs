@@ -217,11 +217,8 @@ fn root_id(value: &aml::Value) -> bool {
         _ => false,
     }
 }
-/// Evaluate one PNP0A03/PNP0A08 root's status, segment, base bus and resource method.
-/// Missing `_SEG`/`_BBN` alone default to zero; failing methods never default. The supported
-/// topology is one segment-zero root with a produced 0..255 bus window. Unknown `_HID`
-/// evaluation is refused, not silently assumed to describe a non-root device.
-pub fn discover(namespace: &aml::Namespace<'_>) -> Result<RootResources, Error> {
+/// Find the unique, typed PCI root identity without assuming its namespace name.
+pub fn root_path(namespace: &aml::Namespace<'_>) -> Result<aml::Path, Error> {
     let mut root = None;
     for path in namespace.devices() {
         let identity = namespace.device_value(path, *b"_HID")?;
@@ -239,17 +236,26 @@ pub fn discover(namespace: &aml::Namespace<'_>) -> Result<RootResources, Error> 
         }
     }
     let path = root.ok_or(Error::Topology)?;
-    if !crate::is_usable(namespace.device_status(path)?.0) {
+    Ok(path.clone())
+}
+
+/// Evaluate one PNP0A03/PNP0A08 root's status, segment, base bus and resource method.
+/// Missing `_SEG`/`_BBN` alone default to zero; failing methods never default. The supported
+/// topology is one segment-zero root with a produced 0..255 bus window. Unknown `_HID`
+/// evaluation is refused, not silently assumed to describe a non-root device.
+pub fn discover(namespace: &aml::Namespace<'_>) -> Result<RootResources, Error> {
+    let path = root_path(namespace)?;
+    if !crate::is_usable(namespace.device_status(&path)?.0) {
         return Err(Error::Topology);
     }
     for member in [*b"_SEG", *b"_BBN"] {
-        if let Some(value) = namespace.device_value(path, member)? {
+        if let Some(value) = namespace.device_value(&path, member)? {
             if value.integer()? != 0 {
                 return Err(Error::Topology);
             }
         }
     }
-    let bytes = namespace.device_resources(path)?.ok_or(Error::Topology)?;
+    let bytes = namespace.device_resources(&path)?.ok_or(Error::Topology)?;
     let resources = parse(&bytes).map_err(Error::Resources)?;
     let buses: alloc::vec::Vec<_> = resources.iter().filter(|w| w.space == Space::Bus).collect();
     if buses.len() != 1 || !buses[0].producer || buses[0].start != 0 || buses[0].end != 256 {

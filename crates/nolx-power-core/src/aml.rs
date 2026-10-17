@@ -74,7 +74,8 @@ impl Path {
         }
         Ok(out)
     }
-    fn parent(&self) -> Self {
+    /// Enclosing namespace path; the root is its own parent.
+    pub fn parent(&self) -> Self {
         let mut p = self.clone();
         p.0.pop();
         p
@@ -141,14 +142,43 @@ impl Value {
         }
     }
 }
+/// A bounded read-only PCI configuration field request. No hardware writes are exposed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PciField {
+    /// PCI device address encoded as device << 16 | function, on root bus zero.
+    pub address: u32,
+    /// Byte offset within legacy configuration space.
+    pub offset: u16,
+    /// Number of bytes requested (the supported snapshot subset is byte access).
+    pub bytes: u8,
+}
+/// Read-only, explicitly authorized PCI field snapshots. Other operation regions stay opaque.
+pub trait FieldReader {
+    /// Return a snapshot value, or refuse a location not covered by the provider.
+    fn read(&self, field: PciField) -> Result<u64, Error>;
+}
 #[derive(Clone)]
 enum Kind<'a> {
     Scope,
     Device,
     Data(Value),
     Alias(Path),
-    Method { args: usize, body: &'a [u8] },
+    Method {
+        args: usize,
+        body: &'a [u8],
+    },
     Opaque(u16),
+    Region {
+        space: u8,
+        base: Value,
+        length: Value,
+    },
+    Field {
+        region: Name,
+        bit: u64,
+        bits: usize,
+        flags: u8,
+    },
     External,
 }
 #[derive(Clone)]
@@ -264,6 +294,7 @@ pub struct Namespace<'a> {
     objects: Vec<Object<'a>>,
     value_bytes: usize,
     integer_mask: u64,
+    reader: Option<&'a dyn FieldReader>,
 }
 impl Default for Namespace<'_> {
     fn default() -> Self {
@@ -284,7 +315,38 @@ impl<'a> Namespace<'a> {
             objects,
             value_bytes: 0,
             integer_mask: u64::MAX,
+            reader: None,
         }
+    }
+    /// Install a read-only provider; ordinary evaluation without one still refuses fields.
+    pub fn set_field_reader(&mut self, reader: &'a dyn FieldReader) {
+        self.reader = Some(reader);
+    }
+    /// Notify a supported firmware interrupt-model method. Only the complete side-effect-free
+    /// shape Store(Arg0, named integer) is accepted; validation precedes the single mutation.
+    /// Absence is distinct from failure. No operation-region/global hardware writes occur.
+    pub fn select_interrupt_model(&mut self, apic: bool) -> Result<bool, Error> {
+        let path = Path::parse("\\_PIC")?;
+        let Some(index) = self.objects.iter().position(|o| o.path == path) else {
+            return Ok(false);
+        };
+        let Kind::Method { args: 1, body } = self.objects[index].kind else {
+            return Err(Error::Type);
+        };
+        let mut r = Reader::new(body);
+        if r.byte()? != 0x70 || r.byte()? != 0x68 {
+            return Err(Error::Target);
+        }
+        let name = r.name(&Path::root())?;
+        if r.at != r.bytes.len() {
+            return Err(Error::Target);
+        }
+        let target = self.resolve(&name)?;
+        if !matches!(self.objects[target].kind, Kind::Data(Value::Integer(_))) {
+            return Err(Error::Target);
+        }
+        self.objects[target].kind = Kind::Data(Value::Integer(u64::from(apic)));
+        Ok(true)
     }
     /// Select the integer model inherited by every table: DSDT revision 0/1 uses 32 bits,
     /// revision 2 and later uses 64 bits. `new()` defaults to the latter model.
@@ -322,10 +384,12 @@ impl<'a> Namespace<'a> {
         {
             return Err(Error::Missing);
         }
-        let cost = if let Kind::Data(value) = &kind {
-            value_cost(value, 0)?
-        } else {
-            0
+        let cost = match &kind {
+            Kind::Data(value) => value_cost(value, 0)?,
+            Kind::Region { base, length, .. } => value_cost(base, 0)?
+                .checked_add(value_cost(length, 0)?)
+                .ok_or(Error::Limit)?,
+            _ => 0,
         };
         let total = self.value_bytes.checked_add(cost).ok_or(Error::Limit)?;
         if total > MAX_NAMESPACE_BYTES {
@@ -476,22 +540,49 @@ impl<'a> Namespace<'a> {
                         }
                         0x80 => {
                             let name = r.name(scope)?.path;
-                            r.byte()?;
-                            self.data(r, scope, depth + 1, steps)?;
-                            self.data(r, scope, depth + 1, steps)?;
-                            self.insert(name, Kind::Opaque(0x5b80))?;
+                            let space = r.byte()?;
+                            let base = self.data(r, scope, depth + 1, steps)?;
+                            let length = self.data(r, scope, depth + 1, steps)?;
+                            // Region operands are retained only as bounded integers/references.
+                            if !matches!(
+                                base,
+                                Value::Integer(_)
+                                    | Value::Reference(_)
+                                    | Value::DeferredReference(_)
+                            ) || !matches!(
+                                length,
+                                Value::Integer(_)
+                                    | Value::Reference(_)
+                                    | Value::DeferredReference(_)
+                            ) {
+                                return Err(Error::Type);
+                            }
+                            self.insert(
+                                name,
+                                Kind::Region {
+                                    space,
+                                    base,
+                                    length,
+                                },
+                            )?;
                         }
                         0x81 | 0x86 | 0x87 => {
                             let mut p = r.package()?;
-                            p.name(scope)?;
+                            let region = p.name(scope)?;
                             if ext != 0x81 {
                                 p.name(scope)?;
                             }
                             if ext == 0x87 {
                                 self.data(&mut p, scope, depth + 1, steps)?;
                             }
-                            p.byte()?;
-                            self.fields(&mut p, scope, steps)?;
+                            let flags = p.byte()?;
+                            self.fields(
+                                &mut p,
+                                scope,
+                                steps,
+                                if ext == 0x81 { Some(region) } else { None },
+                                flags,
+                            )?;
                         }
                         _ => return Err(Error::Unsupported(0x5b00 | u16::from(ext))),
                     }
@@ -502,26 +593,48 @@ impl<'a> Namespace<'a> {
         }
         Ok(())
     }
-    fn fields(&mut self, r: &mut Reader<'a>, scope: &Path, steps: &mut usize) -> Result<(), Error> {
+    fn fields(
+        &mut self,
+        r: &mut Reader<'a>,
+        scope: &Path,
+        steps: &mut usize,
+        region: Option<Name>,
+        mut flags: u8,
+    ) -> Result<(), Error> {
+        let mut bit = 0u64;
         while r.at < r.bytes.len() {
             step(steps)?;
             match r.peek()? {
                 0 => {
                     r.byte()?;
-                    r.length()?;
+                    bit = bit.checked_add(r.length()? as u64).ok_or(Error::Limit)?;
                 }
                 1 => {
-                    r.take(3)?;
+                    let access = r.take(3)?;
+                    flags = (flags & !15) | (access[1] & 15);
                 }
                 3 => {
                     r.take(4)?;
+                    flags = 0xff;
                 }
                 2 => return Err(Error::Unsupported(0x5b81)),
                 _ => {
                     let s: [u8; 4] = r.take(4)?.try_into().map_err(|_| Error::Name)?;
                     check_segment(&s)?;
-                    r.length()?;
-                    self.insert(scope.child(s)?, Kind::Opaque(0x5b81))?;
+                    let bits = r.length()?;
+                    self.insert(
+                        scope.child(s)?,
+                        match &region {
+                            Some(region) => Kind::Field {
+                                region: region.clone(),
+                                bit,
+                                bits,
+                                flags,
+                            },
+                            None => Kind::Opaque(0x5b81),
+                        },
+                    )?;
+                    bit = bit.checked_add(bits as u64).ok_or(Error::Limit)?;
                 }
             }
         }
@@ -748,6 +861,88 @@ impl<'a> Namespace<'a> {
             _ => Err(Error::Type),
         }
     }
+    fn field_metadata(
+        &self,
+        owner: &Path,
+        member: [u8; 4],
+        depth: usize,
+    ) -> Result<Option<Value>, Error> {
+        let path = owner.child(member)?;
+        let Some(object) = self.objects.iter().find(|o| o.path == path) else {
+            return Ok(None);
+        };
+        let Kind::Data(value) = &object.kind else {
+            return Err(Error::Unsupported(0x5b81));
+        };
+        self.constant(value.clone(), depth + 1).map(Some)
+    }
+    fn field(
+        &self,
+        region: &Name,
+        bit: u64,
+        bits: usize,
+        flags: u8,
+        depth: usize,
+    ) -> Result<Value, Error> {
+        let reader = self.reader.ok_or(Error::Unsupported(0x5b81))?;
+        if bits != 8 || bit % 8 != 0 || flags != 1 {
+            return Err(Error::Unsupported(0x5b81));
+        }
+        let index = self.resolve(region)?;
+        let object = &self.objects[index];
+        let Kind::Region {
+            space: 2,
+            base,
+            length,
+        } = &object.kind
+        else {
+            return Err(Error::Unsupported(0x5b80));
+        };
+        let offset = bit / 8;
+        if offset >= self.constant(length.clone(), depth + 1)?.integer()? {
+            return Err(Error::Limit);
+        }
+        let offset = self
+            .constant(base.clone(), depth + 1)?
+            .integer()?
+            .checked_add(offset)
+            .ok_or(Error::Limit)?;
+        if offset >= 256 {
+            return Err(Error::Limit);
+        }
+        let owner = object.path.parent();
+        let address = self
+            .field_metadata(&owner, *b"_ADR", depth)?
+            .ok_or(Error::Missing)?
+            .integer()?;
+        if address & !0x1f0007 != 0 {
+            return Err(Error::Type);
+        }
+        // Only a device immediately under a segment-zero/base-bus-zero root is supported.
+        let root = owner.parent();
+        let id = self
+            .field_metadata(&root, *b"_HID", depth)?
+            .ok_or(Error::Missing)?;
+        if !matches!(id, Value::Integer(0x030ad041 | 0x080ad041))
+            && !matches!(&id,Value::String(v) if v==b"PNP0A03" || v==b"PNP0A08")
+        {
+            return Err(Error::Type);
+        }
+        for member in [*b"_SEG", *b"_BBN"] {
+            if let Some(value) = self.field_metadata(&root, member, depth)? {
+                if value.integer()? != 0 {
+                    return Err(Error::Type);
+                }
+            }
+        }
+        Ok(Value::Integer(
+            reader.read(PciField {
+                address: address as u32,
+                offset: offset as u16,
+                bytes: 1,
+            })? & 255,
+        ))
+    }
     fn object(
         &self,
         index: usize,
@@ -786,6 +981,8 @@ impl<'a> Namespace<'a> {
                 let mut frame = Frame {
                     scope: o.path.parent(),
                     locals: core::array::from_fn(|_| Value::Uninitialized),
+                    names: Vec::new(),
+                    fields: Vec::new(),
                     args: core::array::from_fn(|i| match args.get(i) {
                         Some(Value::Integer(value)) => Value::Integer(value & self.integer_mask),
                         Some(value) => value.clone(),
@@ -795,6 +992,13 @@ impl<'a> Namespace<'a> {
                 self.execute(&mut Reader::new(body), &mut frame, depth + 1, steps)?
                     .ok_or(Error::NoReturn)
             }
+            Kind::Field {
+                region,
+                bit,
+                bits,
+                flags,
+            } => self.field(region, *bit, *bits, *flags, depth + 1),
+            Kind::Region { .. } => Err(Error::Unsupported(0x5b80)),
             Kind::Opaque(op) => Err(Error::Unsupported(*op)),
             Kind::External => Err(Error::Missing),
             _ => Err(Error::Type),
@@ -876,6 +1080,19 @@ impl<'a> Namespace<'a> {
             }
             b'\\' | b'^' | 0x2e | 0x2f | b'A'..=b'Z' | b'_' => {
                 let name = r.name(&f.scope)?;
+                if let Some(index) = f.names.iter().position(|(p, _)| *p == name.path) {
+                    return Ok(f.names[index].1.clone());
+                }
+                if let Some(field) = f.fields.iter().find(|field| field.name == name.path) {
+                    let Value::Buffer(bytes) = &f.names[field.buffer].1 else {
+                        return Err(Error::Type);
+                    };
+                    return Ok(Value::Integer(u64::from(u32::from_le_bytes(
+                        bytes[field.offset..field.offset + 4]
+                            .try_into()
+                            .map_err(|_| Error::Type)?,
+                    ))));
+                }
                 let index = self.resolve(&name)?;
                 let count = if let Kind::Method { args, .. } = self.objects[index].kind {
                     args
@@ -907,6 +1124,61 @@ impl<'a> Namespace<'a> {
         while r.at < r.bytes.len() {
             step(steps)?;
             match r.peek()? {
+                8 => {
+                    r.byte()?;
+                    let name = r.name(&f.scope)?;
+                    if !name.search
+                        || name.tail != 1
+                        || f.names.len() >= 16
+                        || f.names.iter().any(|(p, _)| *p == name.path)
+                        || f.fields.iter().any(|v| v.name == name.path)
+                    {
+                        return Err(Error::Target);
+                    }
+                    let value = self.data(r, &f.scope, depth + 1, steps)?;
+                    if f.names
+                        .iter()
+                        .try_fold(value_cost(&value, 0)?, |cost, (_, v)| {
+                            cost.checked_add(value_cost(v, 0)?).ok_or(Error::Limit)
+                        })?
+                        > MAX_VALUE_BYTES
+                    {
+                        return Err(Error::Limit);
+                    }
+                    f.names.push((name.path, value));
+                }
+                0x8a => {
+                    r.byte()?;
+                    let source = r.name(&f.scope)?;
+                    let offset = self.expr(r, f, depth + 1, steps)?.integer()?;
+                    let name = r.name(&f.scope)?;
+                    if !name.search
+                        || name.tail != 1
+                        || f.fields.len() >= 16
+                        || f.names.iter().any(|(p, _)| *p == name.path)
+                        || f.fields.iter().any(|v| v.name == name.path)
+                    {
+                        return Err(Error::Target);
+                    }
+                    let buffer = f
+                        .names
+                        .iter()
+                        .position(|(p, _)| *p == source.path)
+                        .ok_or(Error::Target)?;
+                    let Value::Buffer(bytes) = &f.names[buffer].1 else {
+                        return Err(Error::Type);
+                    };
+                    let offset = usize::try_from(offset).map_err(|_| Error::Limit)?;
+                    if offset.checked_add(4).is_none_or(|end| end > bytes.len()) {
+                        return Err(Error::Limit);
+                    }
+                    f.fields.push(BufferField {
+                        name: name.path,
+                        buffer,
+                        offset,
+                    });
+                }
+
                 0xa4 => {
                     r.byte()?;
                     return Ok(Some(self.expr(r, f, depth + 1, steps)?));
@@ -960,7 +1232,15 @@ struct Frame {
     scope: Path,
     locals: [Value; 8],
     args: [Value; 7],
+    names: Vec<(Path, Value)>,
+    fields: Vec<BufferField>,
 }
+struct BufferField {
+    name: Path,
+    buffer: usize,
+    offset: usize,
+}
+
 fn target(r: &mut Reader<'_>, f: &mut Frame, value: Value) -> Result<(), Error> {
     // Compound local/argument stores are outside the pure subset; refusing them also
     // prevents repeated stores/calls from amplifying large buffers into unbounded frames.
@@ -975,6 +1255,21 @@ fn target(r: &mut Reader<'_>, f: &mut Frame, value: Value) -> Result<(), Error> 
         }
         n @ 0x68..=0x6e => {
             f.args[usize::from(n - 0x68)] = value;
+            Ok(())
+        }
+        b'\\' | b'^' | 0x2e | 0x2f | b'A'..=b'Z' | b'_' => {
+            r.at -= 1;
+            let name = r.name(&f.scope)?;
+            let field = f
+                .fields
+                .iter()
+                .find(|field| field.name == name.path)
+                .ok_or(Error::Target)?;
+            let Value::Buffer(bytes) = &mut f.names[field.buffer].1 else {
+                return Err(Error::Type);
+            };
+            bytes[field.offset..field.offset + 4]
+                .copy_from_slice(&(value.integer()? as u32).to_le_bytes());
             Ok(())
         }
         _ => Err(Error::Target),

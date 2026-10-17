@@ -616,7 +616,7 @@ jobs:
       - name: Assert e1000 receive and interrupt delivery
         run: |
           grep -F 'e1000: received ARP reply from 10.0.2.2' build/serial.log
-          grep -E 'descriptor recycled, INTx vector 0x2[3-9a-f], interrupts [1-9][0-9]*' build/serial.log
+          grep -E 'descriptor recycled, INTx vector 0x(2[3-9a-f]|3[0-7]), interrupts [1-9][0-9]*' build/serial.log
 
       - name: Assert AHCI MSI completions
         run: |
@@ -694,6 +694,10 @@ jobs:
         run: make kernel KERNEL_FEATURES=hal-driver-net-multi-test 2>&1 | tee /tmp/job.log
       - name: Verify independent adapters, shared INTx and captured public RX/TX
         run: python3 scripts/check-network-multi.py 2>&1 | tee -a /tmp/job.log
+      - name: Build poisoned-line firmware INTx proof
+        run: make kernel KERNEL_FEATURES=hal-driver-net-multi-test,hal-pci-intx-poison-test 2>&1 | tee -a /tmp/job.log
+      - name: Verify ACPI routes without valid Interrupt Line bytes
+        run: python3 scripts/check-network-multi.py --intx-routing-only 2>&1 | tee -a /tmp/job.log
       - name: Build combined six-storage four-NIC fixture
         run: make kernel KERNEL_FEATURES=hal-driver-multi-test,hal-driver-net-multi-test 2>&1 | tee -a /tmp/job.log
       - name: Verify all ten devices together on Q35

@@ -3,7 +3,8 @@
 
 Build with make kernel KERNEL_FEATURES=hal-driver-net-multi-test.
 Each adapter has its own user-network backend and packet capture. Segment zero only;
-BAR/bridge assignments still come from firmware, not native resource allocation.
+Firmware routing comes from evaluated ACPI, not Interrupt Line; optional native BAR
+allocation is exercised by the separate resource fixtures.
 """
 import argparse
 import os
@@ -139,13 +140,67 @@ def boot(qemu, kernel, names, machine, bridge=False, shared=False, storage=False
     return text
 
 
+def intx_refusal(qemu, kernel, machine, mode):
+    """Injected advertised routes must not downgrade to the valid firmware line byte."""
+    aml_tools = runpy.run_path(str(ROOT / 'scripts' / 'check-aml.py'))
+    package, method, device, table = [aml_tools[k] for k in ['package', 'method', 'device', 'table']]
+    if mode == 'unsupported-pic':
+        payload = method(b'_PIC', bytes([0xa4, 0]), 1)
+    else:
+        value = bytes([0]) if mode == 'malformed-prt' else package([0x12], bytes([1]) + package([0x12], bytes([4, 0x0c, 0xff, 0xff, 0, 0, 0, 0, 0x0a, 11])))
+        child = device(b'NLXI', bytes([8]) + b'_ADR' + bytes([0x0c, 0, 0, 28, 0]) + method(b'_PRT', bytes([0xa4]) + value))
+        payload = package([0x10], b'\\' + bytes([0x2e]) + b'_SB_PCI0' + child)
+    label = f'intx-refuse-{machine}-{mode}'
+    aml = ROOT / 'build' / f'{label}.aml'
+    aml.write_bytes(table(payload))
+    log = ROOT / 'build' / f'{label}.log'
+    command = [qemu, '-machine', 'q35,sata=off' if machine == 'q35' else 'pc',
+               '-kernel', str(kernel), '-m', '512M', '-nographic', '-no-reboot',
+               '-net', 'none', '-netdev', 'user,id=n0,ipv6=off', '-device', 'e1000,netdev=n0',
+               '-acpitable', f'file={aml}']
+    with log.open('w') as output:
+        process = subprocess.Popen(command, cwd=ROOT, stdout=output, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 45
+            while time.monotonic() < deadline:
+                text = log.read_text(errors='replace')
+                if 'kernel heap selftest:' in text or process.poll() is not None:
+                    break
+                time.sleep(.1)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=5)
+    text = log.read_text(errors='replace')
+    assert 'kernel heap selftest:' in text, text
+    assert not re.search(r'PANIC|BUGCHECK|CPU exception', text), text
+    assert 'e1000: not brought up: Interrupt' in text, text
+    assert 'e1000: bound and started' not in text and 'e1000: instance' not in text, text
+    assert ('ACPI INTx evaluation refused:' in text or 'ACPI INTx scope mapping refused:' in text
+            or 'SSDT refused atomically:' in text), text
+    print(f'PASS: {label}: advertised-but-refused routes never fall back to Interrupt Line', flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--qemu', default=os.environ.get('QEMU', 'qemu-system-x86_64'))
     parser.add_argument('--kernel', type=Path, default=ROOT / 'build' / 'nolx.elf')
+    parser.add_argument('--intx-routing-only', action='store_true', help='require hal-pci-intx-poison-test; verify direct/shared/bridged/nested PC and Q35')
     parser.add_argument('--storage-fixture-only', action='store_true', help='require both multi-test features; six storage controllers plus four NICs on Q35')
     args = parser.parse_args()
     (ROOT / 'build').mkdir(exist_ok=True)
+    if args.intx_routing_only:
+        for machine in ['pc', 'q35']:
+            for options in [{}, {'shared': True}, {'bridge': True}, {'bridge': True, 'nested': True}]:
+                text = boot(args.qemu, args.kernel.resolve(), ['e1000'] * 2, machine, **options)
+                assert text.count('INTx line poisoned to ff') == 2, text
+                assert 'evaluated ACPI INTx routing authorized:' in text, text
+                if machine == 'q35':
+                    assert 'interrupt model=APIC, _PIC notified=true' in text, text
+                    assert re.search(r'INTx vector 0x3[0-7], interrupts [1-9]', text), text
+            for mode in ['malformed-prt', 'unmapped-scope', 'unsupported-pic']:
+                intx_refusal(args.qemu, args.kernel.resolve(), machine, mode)
+        return
     if args.storage_fixture_only:
         boot(args.qemu, args.kernel.resolve(), ['e1000', 'e1000', 'virtio-net', 'virtio-net'], 'q35', storage=True)
         return

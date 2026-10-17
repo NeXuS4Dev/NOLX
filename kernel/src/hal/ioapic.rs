@@ -28,6 +28,12 @@ static NMI_ROUTE_BASE: [AtomicU64; MAX_IO_APIC_NMIS] =
 static NMI_ROUTE_LOW_REGISTER: [AtomicU32; MAX_IO_APIC_NMIS] =
     [const { AtomicU32::new(0) }; MAX_IO_APIC_NMIS];
 
+const PCI_GSIS: usize = 24;
+static PCI_BASE: [AtomicU64; PCI_GSIS] = [const { AtomicU64::new(0) }; PCI_GSIS];
+static PCI_REGISTER: [AtomicU32; PCI_GSIS] = [const { AtomicU32::new(0) }; PCI_GSIS];
+static PCI_DESTINATION: AtomicU32 = AtomicU32::new(0);
+static PCI_PROGRAMMED: [AtomicU32; PCI_GSIS] = [const { AtomicU32::new(0) }; PCI_GSIS];
+
 /// Failure while validating or programming the I/O APICs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IoApicError {
@@ -238,6 +244,32 @@ pub fn init(madt: &Madt, destination_apic_id: u32) -> Result<(), IoApicError> {
         NMI_ROUTE_BASE[index].store(route.base, Ordering::Relaxed);
         NMI_ROUTE_LOW_REGISTER[index].store(u32::from(route.low_register), Ordering::Relaxed);
     }
+    // Retain only non-ISA/non-NMI GSIs in the bounded native PCI vector domain.
+    PCI_DESTINATION.store(destination_apic_id << 24, Ordering::Relaxed);
+    for gsi in 0..PCI_GSIS {
+        PCI_BASE[gsi].store(0, Ordering::Relaxed);
+        PCI_PROGRAMMED[gsi].store(0, Ordering::Relaxed);
+        if gsi < 3
+            || gsi == 12
+            || madt
+                .io_apic_nmi_sources()
+                .iter()
+                .any(|n| n.global_interrupt == gsi as u32)
+        {
+            continue;
+        }
+        let Some((state, pin)) = find_route(&states, descriptions.len(), gsi as u32) else {
+            continue;
+        };
+        let register = redirection_register(pin)?;
+        if [0, 1, 12].iter().any(|irq| {
+            legacy_routes[*irq].is_some_and(|r| r.base == state.base && r.low_register == register)
+        }) {
+            continue;
+        }
+        PCI_REGISTER[gsi].store(u32::from(register), Ordering::Relaxed);
+        PCI_BASE[gsi].store(state.base, Ordering::Release);
+    }
     Ok(())
 }
 
@@ -258,25 +290,53 @@ pub fn unmask_legacy_irq(irq: u8) -> bool {
     true
 }
 
-/// Route a firmware-assigned PCI INTx line as active-low/level-triggered, then unmask it.
-/// Only legacy GSI assignments already covered by MADT initialization are supported here.
-/// Extended PCI link-device routing still requires ACPI `_PRT`/resource evaluation.
-pub fn unmask_pci_irq(irq: u8) -> bool {
-    let index = usize::from(irq);
-    if !(3..LEGACY_IRQS).contains(&index) || irq == 12 {
-        return false;
-    }
-    let base = IRQ_ROUTE_BASE[index].load(Ordering::Acquire);
-    if base == 0 {
-        return false;
+/// Program a validated current firmware GSI, preserving its actual electrical flags.
+/// Fixed vectors 0x23..0x37 exclude PIT/keyboard/mouse and MADT NMI reservations.
+/// Shared owners must agree exactly. Readback failure leaves the input masked.
+pub fn unmask_pci_route(irq: nolx_power_core::routing::Interrupt) -> Option<u8> {
+    let index = usize::try_from(irq.gsi).ok()?;
+    if index >= PCI_GSIS || !irq.level || !irq.shared {
+        return None;
     }
     let _guard = super::cpu::InterruptGuard::disable();
-    let register = IRQ_ROUTE_LOW_REGISTER[index].load(Ordering::Relaxed) as u8;
-    let old = ioapic_read(base, register);
-    ioapic_write(base, register, old | REDIRECTION_MASKED);
-    let value = (old | REDIRECTION_ACTIVE_LOW | REDIRECTION_LEVEL_TRIGGERED) & !REDIRECTION_MASKED;
+    let base = PCI_BASE[index].load(Ordering::Acquire);
+    if base == 0 {
+        return None;
+    }
+    let register = PCI_REGISTER[index].load(Ordering::Relaxed) as u8;
+    let vector = VECTOR_BASE + index as u8;
+    let value = u32::from(vector)
+        | REDIRECTION_LEVEL_TRIGGERED
+        | if irq.active_low {
+            REDIRECTION_ACTIVE_LOW
+        } else {
+            0
+        };
+    let previous = PCI_PROGRAMMED[index].load(Ordering::Relaxed);
+    if previous != 0 && previous != value {
+        return None;
+    }
+    let destination = PCI_DESTINATION.load(Ordering::Relaxed);
+    ioapic_write(
+        base,
+        register,
+        ioapic_read(base, register) | REDIRECTION_MASKED,
+    );
+    ioapic_write(base, register + 1, destination);
+    ioapic_write(base, register, value | REDIRECTION_MASKED);
+    const WRITABLE: u32 = 0x1afff;
+    if ioapic_read(base, register) & WRITABLE != value | REDIRECTION_MASKED
+        || ioapic_read(base, register + 1) & 0xff000000 != destination
+    {
+        return None;
+    }
     ioapic_write(base, register, value);
-    true
+    if ioapic_read(base, register) & WRITABLE != value {
+        ioapic_write(base, register, value | REDIRECTION_MASKED);
+        return None;
+    }
+    PCI_PROGRAMMED[index].store(value, Ordering::Release);
+    Some(vector)
 }
 
 /// Unmask MADT NMI-source routes after the local APIC and NMI IDT path are ready.

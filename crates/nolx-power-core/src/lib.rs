@@ -20,6 +20,7 @@
 
 pub mod aml;
 pub mod root;
+pub mod routing;
 
 /// `_STA` bit 0: the device is present.
 pub const STA_PRESENT: u32 = 1 << 0;

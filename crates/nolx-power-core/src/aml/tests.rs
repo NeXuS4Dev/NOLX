@@ -502,3 +502,149 @@ fn revision_one_qword_literals_cannot_invent_high_bits_in_status_or_buffer_sizes
     n.load(&bytes).unwrap();
     assert_eq!(n.evaluate(&path("\\WIDE"), &[]), Ok(Value::Integer(15)));
 }
+
+#[test]
+fn pic_notification_validates_the_entire_body_before_mutating_only_named_integer() {
+    let mut bytes = [vec![8], b"PICF".to_vec(), vec![0]].concat();
+    bytes.extend(method(b"_PIC", 1, &[0x70, 0x68, b'P', b'I', b'C', b'F']));
+    let mut ns = Namespace::new();
+    ns.load(&bytes).unwrap();
+    assert_eq!(ns.select_interrupt_model(true), Ok(true));
+    assert_eq!(ns.evaluate(&path("\\PICF"), &[]), Ok(Value::Integer(1)));
+    assert_eq!(ns.select_interrupt_model(false), Ok(true));
+    assert_eq!(ns.evaluate(&path("\\PICF"), &[]), Ok(Value::Integer(0)));
+    assert!(ns.evaluate(&path("\\_PIC"), &[Value::Integer(1)]).is_err());
+    assert_eq!(Namespace::new().select_interrupt_model(true), Ok(false));
+    for body in [
+        vec![0x70, 0x68, b'P', b'I', b'C', b'F', 0xa3],
+        vec![0x70, 1, b'P', b'I', b'C', b'F'],
+    ] {
+        let bytes = [
+            vec![8],
+            b"PICF".to_vec(),
+            vec![0],
+            method(b"_PIC", 1, &body),
+        ]
+        .concat();
+        let mut ns = Namespace::new();
+        ns.load(&bytes).unwrap();
+        assert!(ns.select_interrupt_model(true).is_err());
+        assert_eq!(ns.evaluate(&path("\\PICF"), &[]), Ok(Value::Integer(0)));
+    }
+}
+#[test]
+fn private_method_buffer_fields_are_fresh_bounded_and_cannot_write_namespace_buffers() {
+    let buffer = pkg(&[0x11], vec![0x0a, 4, 0, 0, 0, 0]);
+    let body = [
+        vec![8],
+        b"PRR0".to_vec(),
+        buffer.clone(),
+        vec![0x8a],
+        b"PRR0".to_vec(),
+        vec![0],
+        b"PRRI".to_vec(),
+        vec![0x70, 0x68],
+        b"PRRI".to_vec(),
+        vec![0xa4],
+        b"PRR0".to_vec(),
+    ]
+    .concat();
+    let bytes = method(b"IQCR", 1, &body);
+    let mut ns = Namespace::new();
+    ns.load(&bytes).unwrap();
+    for value in [11, 20, 0] {
+        assert_eq!(
+            ns.evaluate(&path("\\IQCR"), &[Value::Integer(value)]),
+            Ok(Value::Buffer((value as u32).to_le_bytes().to_vec()))
+        );
+    }
+    assert!(ns.evaluate(&path("\\PRR0"), &[]).is_err());
+    let bytes = [
+        vec![8],
+        b"PRR0".to_vec(),
+        buffer,
+        method(
+            b"BAD0",
+            0,
+            &[
+                0x8a, b'P', b'R', b'R', b'0', 0, b'F', b'L', b'D', b'0', 0xa4, 0,
+            ],
+        ),
+    ]
+    .concat();
+    let mut ns = Namespace::new();
+    ns.load(&bytes).unwrap();
+    assert!(ns.evaluate(&path("\\BAD0"), &[]).is_err());
+    assert_eq!(
+        ns.evaluate(&path("\\PRR0"), &[]),
+        Ok(Value::Buffer(vec![0; 4]))
+    );
+}
+fn pci_field_fixture(adr: Vec<u8>, flags: u8) -> Vec<u8> {
+    let region = [
+        vec![0x5b, 0x80],
+        b"PCFG".to_vec(),
+        vec![2, 0x0a, 0x60, 0x0a, 4],
+    ]
+    .concat();
+    let field = pkg(
+        &[0x5b, 0x81],
+        [b"PCFG".to_vec(), vec![flags], b"PRQ0".to_vec(), vec![8]].concat(),
+    );
+    let child = pkg(
+        &[0x5b, 0x82],
+        [b"ISA0".to_vec(), adr, region, field].concat(),
+    );
+    pkg(
+        &[0x5b, 0x82],
+        [
+            b"PCI0".to_vec(),
+            vec![8],
+            b"_HID".to_vec(),
+            vec![0x0d],
+            b"PNP0A03\0".to_vec(),
+            child,
+        ]
+        .concat(),
+    )
+}
+#[test]
+fn pci_fields_require_readonly_provider_static_root_metadata_and_byte_access() {
+    struct Reader;
+    impl FieldReader for Reader {
+        fn read(&self, f: PciField) -> Result<u64, Error> {
+            assert_eq!(
+                f,
+                PciField {
+                    address: 0x10000,
+                    offset: 0x60,
+                    bytes: 1
+                }
+            );
+            Ok(11)
+        }
+    }
+    let adr = [vec![8], b"_ADR".to_vec(), vec![0x0c, 0, 0, 1, 0]].concat();
+    let bytes = pci_field_fixture(adr.clone(), 1);
+    let mut ns = Namespace::new();
+    ns.load(&bytes).unwrap();
+    assert!(ns.evaluate(&path("\\PCI0.ISA0.PRQ0"), &[]).is_err());
+    ns.set_field_reader(&Reader);
+    assert_eq!(
+        ns.evaluate(&path("\\PCI0.ISA0.PRQ0"), &[]),
+        Ok(Value::Integer(11))
+    );
+    for flags in [0, 2, 0x11] {
+        let bytes = pci_field_fixture(adr.clone(), flags);
+        let mut ns = Namespace::new();
+        ns.set_field_reader(&Reader);
+        ns.load(&bytes).unwrap();
+        assert!(ns.evaluate(&path("\\PCI0.ISA0.PRQ0"), &[]).is_err());
+    }
+    // Metadata method recursion must be refused, not restart the interpreter budget.
+    let bytes = pci_field_fixture(method(b"_ADR", 0, &[0xa4, b'P', b'R', b'Q', b'0']), 1);
+    let mut ns = Namespace::new();
+    ns.set_field_reader(&Reader);
+    ns.load(&bytes).unwrap();
+    assert!(ns.evaluate(&path("\\PCI0.ISA0.PRQ0"), &[]).is_err());
+}
