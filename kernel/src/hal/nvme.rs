@@ -567,14 +567,25 @@ fn find_controller() -> Option<(Bdf, DeviceId)> {
         })
 }
 
-/// Poll `ready` until it returns true, at most [`POLL_LIMIT`] times.
+/// Poll against a two-second HPET deadline, with a finite iteration ceiling and clockless fallback.
+/// Completion DMA can be asynchronous to the vCPU; a CPU-speed-only loop is not a timeout.
 fn poll(
     mut ready: impl FnMut() -> Result<bool, Failure>,
     step: &'static str,
 ) -> Result<(), Failure> {
-    for _ in 0..POLL_LIMIT {
+    let clock = super::hpet::counter().zip(super::hpet::frequency_hz());
+    for iteration in 0..POLL_LIMIT * 100 {
         if ready()? {
             return Ok(());
+        }
+        match (clock, super::hpet::counter()) {
+            (Some((start, frequency)), Some(now)) => {
+                if super::hpet::elapsed_ticks(start, now) >= frequency.saturating_mul(2) {
+                    break;
+                }
+            }
+            _ if iteration >= POLL_LIMIT - 1 => break,
+            _ => {}
         }
         core::hint::spin_loop();
     }
@@ -694,5 +705,24 @@ impl Disk {
             self.io.cq.release();
             self.data.release();
         }
+    }
+}
+
+/// Exercise an actual false predicate through the same deadline as controller completions.
+#[cfg(feature = "hal-driver-lifecycle-test")]
+pub(crate) fn deadline_selftest(console: &mut dyn HalConsole) {
+    let clock = super::hpet::counter().zip(super::hpet::frequency_hz());
+    assert!(poll(|| Ok(true), "immediate-ready selftest").is_ok());
+    assert!(matches!(
+        poll(|| Ok(false), "deadline selftest"),
+        Err(Failure::Timeout("deadline selftest"))
+    ));
+    if let Some((start, hz)) = clock {
+        let end = super::hpet::counter().expect("HPET disappeared during deadline test");
+        assert!(
+            super::hpet::elapsed_ticks(start, end) >= hz.saturating_mul(2),
+            "poll expired on CPU iteration speed before its deadline"
+        );
+        let _ = writeln!(console, "nvme: poll deadline selftest: ready predicate accepted, false predicate timed out after two HPET seconds");
     }
 }

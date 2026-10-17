@@ -215,6 +215,7 @@ pub fn lifecycle_selftest(console: &mut dyn HalConsole) {
         console,
         "driver: recursive framework and public I/O callbacks refused with Busy"
     );
+    super::nvme::deadline_selftest(console);
     crate::mm::mmio::lifecycle_selftest(console);
     let devices = started().unwrap();
     let mut tested = 0;

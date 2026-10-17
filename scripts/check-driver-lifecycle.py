@@ -64,6 +64,7 @@ def boot(qemu, kernel, names, machine="pc"):
     assert 'in use 0 -> 0 bytes, integrity ok' in text, text
     assert 'NOLX: address space selftest:' in text, text
     assert 'driver: recursive framework and public I/O callbacks refused with Busy' in text, text
+    assert 'nvme: poll deadline selftest: ready predicate accepted, false predicate timed out after two HPET seconds' in text, text
     assert 'mm: MMIO lifecycle: stale access refused, VA reused, partial-map OOM rolled back, shared root retained' in text, text
     for name in names:
         assert f'driver: {name} MMIO mappings released and reused across all three cycles' in text, text

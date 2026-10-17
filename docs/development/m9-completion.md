@@ -268,3 +268,22 @@ The seventh fixture contains all five native driver kinds on Q35 (`sata=off` avo
 unused onboard AHCI controller being selected first). It asserts real ECAM reads/writes and
 then runs the same stop/restart/removal checks: the unowned platform configuration window
 survives while driver-owned windows are reclaimed. This also passed locally.
+
+### NVMe regression found during MMIO verification
+
+Do not treat the first MMIO CI runs as green: run
+[39009409943](https://github.com/NeXuS4Dev/NOLX/actions/runs/39009409943) on `09830d6`
+failed boot smoke, and run
+[39009517583](https://github.com/NeXuS4Dev/NOLX/actions/runs/39009517583) on `c4325eb`
+failed the isolated NVMe boot. The latter serial log reports filesystem `Io(110)` (completion
+poll timeout), after 157 block requests. The lifecycle job passed in both runs; that does not
+supersede the regression failure.
+
+Inspection found NVMe's completion/reset poll still had the old CPU-speed-only million-loop
+budget, unlike AHCI/virtio waits. It now uses the same two-second HPET deadline, with a finite
+100-million-iteration ceiling and million-iteration clockless fallback. This fixes the timeout
+policy defect; the old logs do not establish why a particular completion was delayed. A kernel
+selftest exercises immediate success and an always-false predicate through the actual deadline;
+all seven lifecycle fixtures assert its marker. Sixteen additional local NVMe boots (four in
+parallel, each with xHCI and e1000) passed filesystem/retained-read checks after the change;
+host mount/reboot and three malformed-media refusals also passed again.
