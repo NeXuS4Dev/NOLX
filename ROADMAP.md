@@ -1095,3 +1095,15 @@ restart then re-enumerates fresh input objects. PC/Q35 two-controller fixtures e
 failed startup/stop cleanup, pinned ownership, live peer input and fresh keys after both recoveries.
 Recovery cannot reopen shutdown admission. Native recovery is deliberately admitted only for audited
 xHCI contexts; storage/network partial-start recovery and interrupt-resource reclamation remain open.
+
+
+M9 xHCI interrupt checkpoint: direct-root USB2 boot HID now uses per-handle MSI-X/MSI with a
+bounded acknowledge/mask/notify top half and IRQ-only idle event service; no decoding, ring access,
+framework checkout or reclamation in ISR. Startup/control enumeration remains bounded/polled;
+missing APIC/message capability is explicitly labelled polling. PC/Q35 interrupt-observer fixtures
+require 600+ real interrupts per 604-report workload, plus ring wraps, hotplug, object readers,
+independent controller/restart/recovery routes and rollback after an already delivered startup IRQ.
+Checked stop detaches/masks/disables message delivery before DMA/MMIO release; late vectors ignore
+retired state. Supersedes the earlier polled-only limitation. MSI-X is bounded to validated BAR0
+window tables; vectors remain statically reserved. General USB/Executive bindings, dynamic IRQ
+resource ownership, other-driver failure recovery and the remaining firmware/power gates stay open.

@@ -6,8 +6,8 @@
 //! [`nolx_input_core::KeyEvent`], so a USB keyboard and a PS/2 keyboard produce the same events.
 //!
 //! Scope: the xHCI operations this crate names (run/stop, reset, port reset, enable slot), the
-//! link, normal, and event TRBs, and the boot protocol keyboard report. Hubs, isochronous and
-//! interrupt transfers, and class drivers other than the keyboard are not here.
+//! link, normal, and event TRBs, primary interrupt/dequeue rules, and direct-root boot keyboard/
+//! mouse descriptors and interrupt-IN reports. Hubs, isochronous transfers and general HID are open.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -15,6 +15,7 @@
 
 use nolx_input_core::KeyEvent;
 pub mod device;
+pub mod interrupt;
 
 // Capability registers, from the controller's base.
 

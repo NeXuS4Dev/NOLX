@@ -1,4 +1,4 @@
-//! Bounded polled direct-root USB2 boot-HID transport. No hubs or external DMA pointers.
+//! Bounded direct-root USB2 boot-HID transport with polled control and IRQ-scheduled event drain.
 use super::*;
 use crate::hal::dma::Dma;
 use crate::sync::IrqMutex;
@@ -84,6 +84,7 @@ struct Host {
     devices: [Option<Device>; SLOTS],
     blocked: [bool; PORTS],
     controller: u32,
+    reports: usize,
 }
 fn write64(regs: &Region, offset: u64, value: u64) -> Result<(), Failure> {
     regs.write32(offset, value as u32)?;
@@ -109,7 +110,8 @@ impl Host {
         write64(
             &self.regs,
             self.runtime + 0x18,
-            self.event.address(u64::from(self.event_index) * 16) | 8,
+            usb::interrupt::dequeue(self.event.address(0), self.event_index, false)
+                .ok_or(Failure::Unsupported)?,
         )?;
         Ok(Some(event))
     }
@@ -132,6 +134,7 @@ impl Host {
             && residual <= length
             && length - residual == length
         {
+            self.reports = self.reports.saturating_add(1);
             let report = device.data.read_array::<8>(512);
             if device.hid.protocol == 1 {
                 if let Some(changes) = usb::report_events(&device.previous, &report) {
@@ -562,6 +565,7 @@ pub(super) fn start(
         devices: core::array::from_fn(|_| None),
         blocked: [false; PORTS],
         controller,
+        reports: 0,
     });
     let host = guard.as_mut().unwrap();
     host.table
@@ -577,7 +581,10 @@ pub(super) fn start(
     fence(Ordering::Release);
     host.regs.write32(op, usb::USBCMD_RUN)?;
     poll(|| Ok(host.regs.read32(op + 4)? & 1 == 0), "run")?;
-    #[cfg(feature = "hal-xhci-start-fault-test")]
+    #[cfg(all(
+        feature = "hal-xhci-start-fault-test",
+        not(feature = "hal-xhci-irq-start-fault-test")
+    ))]
     {
         static INJECT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
         if INJECT.swap(false, Ordering::AcqRel) {
@@ -591,17 +598,18 @@ pub(super) fn start(
     host.command(0, 23, 0)?; // No-op completion proves command/event DMA before device enumeration.
     let _ = writeln!(
         console,
-        "xhci: command/event rings online, context={context}, polled HID"
+        "xhci: command/event rings online, context={context}, polled startup; HID route pending"
     );
     host.scan(console)?;
     Ok(())
 }
 /// Service bounded event batches from the idle consumer, never from an ISR.
-pub(super) fn poll_events(dev: usize, console: &mut dyn HalConsole) {
+pub(super) fn poll_events(dev: usize, console: &mut dyn HalConsole) -> (bool, usize) {
     let mut guard = HOSTS[dev].lock();
     let Some(host) = guard.as_mut() else {
-        return;
+        return (false, 0);
     };
+    let before = host.reports;
     for _ in 0..256 {
         match host.next_event() {
             Ok(Some(e)) => host.dispatch(e),
@@ -611,6 +619,12 @@ pub(super) fn poll_events(dev: usize, console: &mut dyn HalConsole) {
     if let Err(error) = host.scan(console) {
         let _ = writeln!(console, "usb: scan refused: {error:?}");
     }
+    let more = host
+        .event
+        .read_array::<1>(u64::from(host.event_index) * 16 + 12)[0]
+        & 1
+        == u8::from(host.event_cycle);
+    (more, host.reports.saturating_sub(before))
 }
 
 pub(super) fn active(dev: usize) -> bool {
@@ -642,4 +656,25 @@ pub(super) unsafe fn release_host(dev: usize) {
             host.table.release();
         }
     }
+}
+
+pub(super) fn finish_events(dev: usize) -> Result<(), Failure> {
+    if let Some(host) = HOSTS[dev].lock().as_ref() {
+        write64(
+            &host.regs,
+            host.runtime + 0x18,
+            usb::interrupt::dequeue(host.event.address(0), host.event_index, true)
+                .ok_or(Failure::Unsupported)?,
+        )?;
+    }
+    Ok(())
+}
+pub(super) fn interrupt_probe(dev: usize) -> Result<(), Failure> {
+    finish_events(dev)?;
+    HOSTS[dev]
+        .lock()
+        .as_mut()
+        .ok_or(Failure::NoController)?
+        .command(0, 23, 0)?;
+    finish_events(dev)
 }

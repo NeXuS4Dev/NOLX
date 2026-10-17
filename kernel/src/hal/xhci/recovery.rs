@@ -57,6 +57,7 @@ fn owner(info: Info) -> usize {
 }
 fn quarantined(t: &Test, pages: usize, mappings: usize, console: &mut dyn HalConsole) {
     assert_eq!(driver_start::state(t.dev), Ok(State::Failed));
+    irq::detached_test(t.dev);
     assert_eq!(driver_start::state(t.peer), Ok(State::Started));
     assert_eq!(dma::live_pages(), pages);
     assert_eq!(mmio::live_mappings(), mappings);
@@ -179,8 +180,9 @@ fn terminal(info: Info, reader: ReaderId, usage: Option<u8>) {
     input::close(reader).unwrap();
     assert_eq!(input::read(reader), Err(input::Error::Stale));
 }
-fn recover_restart(t: &mut Test) {
+fn recover_restart(t: &mut Test, console: &mut dyn HalConsole) {
     driver_start::recover(t.dev).unwrap();
+    irq::detached_test(t.dev);
     assert_eq!(driver_start::state(t.dev), Ok(State::Stopped));
     assert_eq!(driver_start::recover(t.dev), Err(Error::BadState));
     assert_eq!(dma::live_pages(), 8);
@@ -193,6 +195,7 @@ fn recover_restart(t: &mut Test) {
         0
     );
     driver_start::start(t.dev).unwrap();
+    BINDINGS[t.dev].lock().log.replay(console);
     assert_eq!(driver_start::state(t.dev), Ok(State::Started));
     assert_eq!(dma::live_pages(), 16);
     assert_eq!(mmio::live_mappings(), t.mappings);
@@ -227,7 +230,7 @@ pub(super) fn step(console: &mut dyn HalConsole) {
 fn advance(t: &mut Test, console: &mut dyn HalConsole) {
     match t.phase {
         0 if mouse_event(t, 7) => {
-            recover_restart(t);
+            recover_restart(t, console);
             t.phase = 1;
             let _ = writeln!(console, "xhci-recovery: armed first restarted keyboard, startup owner reclaimed only after quiescence; fresh key required");
         }
@@ -250,7 +253,7 @@ fn advance(t: &mut Test, console: &mut dyn HalConsole) {
             let _ = writeln!(console, "xhci-recovery: armed stop quarantine, neutral EOF and repeated cleanup failure retain 16 DMA pages/MMIO; peer input required");
         }
         2 if mouse_event(t, 8) => {
-            recover_restart(t);
+            recover_restart(t, console);
             t.phase = 3;
             let _ = writeln!(console, "xhci-recovery: armed second restarted keyboard, old producer/reader/open/MMIO retired; fresh key required");
         }

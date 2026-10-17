@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify native polled xHCI boot-HID input, ring wrap and root-port DMA reclamation.
+"""Verify native xHCI boot-HID input, ring wrap and root-port DMA reclamation.
 
 Default kernel by default; --objects additionally requires hal-input-object-test.
 Direct USB2 boot keyboard/mouse only, PC and Q35. Every transition must reach the
@@ -13,18 +13,22 @@ import re
 import socket
 import subprocess
 import time
+from xhci_irq_checks import verify_interrupts
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def boot(qemu, kernel, machine, objects=False):
+def boot(qemu, kernel, machine, objects=False, interrupts=False, transport="default", no_apic=False):
     label = f'input-usb-{machine}' + ('-objects' if objects else '')
+    label += f'-{transport}' + ('-no-apic' if no_apic else '')
     log = ROOT / 'build' / f'{label}.log'
     qmp = ROOT / 'build' / f'{label}.sock'
     qmp.unlink(missing_ok=True)
     command = [qemu, '-machine', 'q35,sata=off' if machine == 'q35' else 'pc',
                '-kernel', str(kernel), '-m', '512M', '-nographic', '-no-reboot', '-net', 'none',
-               '-device', 'qemu-xhci,id=xhci', '-device', 'usb-kbd,bus=xhci.0,id=kbd',
+               '-device', 'qemu-xhci,id=xhci' + {'default': '', 'msi': ',msi=on,msix=off', 'polled': ',msi=off,msix=off'}[transport], '-device', 'usb-kbd,bus=xhci.0,id=kbd',
                '-device', 'usb-mouse,bus=xhci.0,id=mouse', '-qmp', f'unix:{qmp},server=on,wait=off']
+    if no_apic:
+        command += ['-cpu', 'qemu64,-apic']
     with log.open('w') as output:
         process = subprocess.Popen(command, cwd=ROOT, stdout=output, stderr=subprocess.STDOUT)
         connection = None
@@ -100,6 +104,12 @@ def boot(qemu, kernel, machine, objects=False):
                 ids = re.findall(r'input: usb keyboard usage=0x04 pressed=true device=(\d+):(\d+)', text)
                 assert len(ids) == 302 and len(set(ids)) == 2 and ids[0][0] == ids[-1][0] and int(ids[-1][1]) > int(ids[0][1]), ids
                 print(f'PASS: input-objects-{machine}: independent fast/slow readers, explicit overflow resync, neutral EOF, generation reuse and stale producer/reader/open refusal', flush=True)
+            if interrupts:
+                arms, batches = verify_interrupts(text, reports=604, transport='MSI' if transport == 'msi' else 'MSI-X')
+                print(f'PASS: xhci-irq-{machine}-{transport}: {arms} live route(s), {batches} IRQ-admitted HID batches, 600+ hardware interrupts, no timer-poll fallback', flush=True)
+            if transport == 'polled' or no_apic:
+                assert 'polled fallback' in text and 'xhci: handle=0 MSI' not in text, text
+                assert 'xhci: irq work' not in text, text
             assert 'in use 0 -> 0 bytes, integrity ok' in text, text
             assert text.count('DMA released') == 3, text
             print(f'PASS: usb-{machine}: 604 key transitions, mouse motion/buttons, two ring wraps, unsupported HID refusal, disconnect/reconnect; DMA baseline 13 -> 8 -> 3 -> 8 -> 3', flush=True)
@@ -121,10 +131,15 @@ def main():
     parser.add_argument('--qemu', default=os.environ.get('QEMU', 'qemu-system-x86_64'))
     parser.add_argument('--kernel', type=Path, default=ROOT / 'build' / 'nolx.elf')
     parser.add_argument('--objects', action='store_true', help='require hal-input-object-test; verify extra independent consumers and stale handles')
+    parser.add_argument('--interrupts', action='store_true', help='require hal-xhci-irq-test and real MSI/MSI-X IRQ-admitted HID work')
+    parser.add_argument('--transport', choices=('default', 'msi', 'polled'), default='default')
+    parser.add_argument('--no-apic', action='store_true', help='verify explicitly labelled polling on a PIC-only CPU')
     args = parser.parse_args()
+    if args.interrupts and (args.transport == 'polled' or args.no_apic):
+        parser.error('--interrupts cannot claim the polled/PIC-only profiles')
     (ROOT / 'build').mkdir(exist_ok=True)
     for machine in ['pc', 'q35']:
-        boot(args.qemu, args.kernel.resolve(), machine, args.objects)
+        boot(args.qemu, args.kernel.resolve(), machine, args.objects, args.interrupts, args.transport, args.no_apic)
 
 
 if __name__ == '__main__':

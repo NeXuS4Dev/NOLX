@@ -53,7 +53,10 @@ M9 to the already implemented boot probes. Check items only with executable evid
       Direct-root USB2 boot-HID rings/slots/addressing and hotplug are now exercised on PC/Q35;
       two controllers now have framework stop/restart/removal and failure-quarantine checks;
       checked xHCI failed-start/failed-stop recovery is now exercised with repeated refusal;
-      hubs, SuperSpeed, interrupt delivery and general device/endpoint recovery remain open.
+      MSI/MSI-X input delivery now has IRQ-only idle admission and explicit polling fallbacks;
+      hubs, SuperSpeed and general device/endpoint recovery remain open.
+- [x] Per-controller MSI-X/MSI boot-HID delivery with IRQ-only idle admission, bounded event
+      batches, safe stop/re-arm and explicit no-capability/PIC-only polling fallbacks (below).
 - [x] HID boot keyboard/mouse reports delivered to bounded kernel input event objects,
       with independent subscriptions, source/device identity, state resync and stale-handle refusal.
 - [ ] Executive/process-handle, security/namespace and waitable/user-facing input bindings;
@@ -896,3 +899,69 @@ recovery/lifecycle/fault PC/Q35 boots, default USB PC/Q35 and PS/2, seven storag
 boots and two failed-shutdown boots with recovery refusal. Host/native Clippy, formatting,
 **257 unsafe blocks / zero missing invariants**, **21 default image checks**, boot/layout/generated
 checks and **363 conformance assertions** passed. These local results are separate from CI evidence.
+
+
+## xHCI interrupt delivery checkpoint (2026-10-17)
+
+This supersedes the earlier **polled-only** xHCI limitation, not the remaining general USB gates.
+The supported direct-root USB2 boot-HID profile now uses per-framework-handle vectors `0xd0..0xdf`.
+MSI-X entry zero is programmed through the existing owned BAR0 window, after validating that table
+and PBA fit and do not overlap each other or the standard capability/port, runtime/interrupter or doorbell register blocks. MSI is supported
+when MSI-X is absent. MSI-X tables outside this bounded BAR0 window are explicitly refused, not
+silently relabelled as IRQ-driven. Missing message capability or local APIC selects an explicitly
+logged polled profile; failed programming/delivery proof fails startup and uses checked rollback.
+
+Startup and synchronous USB control/enumeration commands remain bounded/polled. After enumeration,
+a No-op command and actual delivered vector prove the interrupt path without holding the host lock
+while waiting. The top half only reads the retained source status, masks IE, acknowledges EINT/IP,
+counts the interrupt and notifies idle. It does not lock the host/framework, touch rings, decode
+input, log, allocate or reclaim DMA. IMAN IP need not remain set after MSI/MSI-X delivery; USBSTS
+EINT is checked instead and no unrelated W1C status is echoed. The normal idle event batch is at
+most 256 events. ERDP advances without clearing EHB per event; re-enable/clear-EHB at batch end
+rechecks queued work, and a non-empty ring schedules continuation. Existing bounded synchronous
+root-device enumeration can also consume events while waiting for its commands; this is not a
+claim of asynchronous/real-time enumeration or a general USB scheduler.
+
+A routed host does **not** consume events because the timer happened to fire: service requires a
+claimed interrupt or continuation of its bounded batch. Stop retires input, detaches the software
+source, masks controller IE/INTE, disables/read-backs PCI MSI/MSI-X, then performs the existing
+halt/reset/bus-master proof before releasing DMA/MMIO. Failed quiescence keeps ownership pinned
+with its source detached; recovery/restart proves a fresh route. The reserved vector handler still
+EOIs late vectors without touching retired MMIO. Vectors are statically reserved, not dynamically
+allocated/reclaimed; general interrupt-resource ownership and other-driver failure recovery remain open.
+
+Executable verification:
+
+- `hal-xhci-irq-test` + `check-usb-input.py --interrupts` and `--interrupts --transport msi`:
+  PC/Q35, 604 actual HID report batches and 600+ real controller interrupts per fixture, 604 key
+  transitions, mouse motion/button, two ring wraps, unsupported tablet refusal, unplug/reconnect
+  and exact DMA `13 -> 8 -> 3 -> 8 -> 3`. The native observer asserts that an armed host without
+  pending work refuses idle admission. Parser negative tests reject console-only, polling, zero
+  counters, stale routes and one probe followed by 600 purported polled reports.
+- The same image with `--transport polled` or `--no-apic`: PC/Q35 repeat the complete workload,
+  require the explicit fallback marker and forbid IRQ-work markers.
+- `hal-input-object-test,hal-xhci-irq-test`: PC/Q35 repeat IRQ-driven input with independent readers,
+  overflow repair, neutral EOF and stale-generation refusal; the PS/2 observer also remains covered.
+- `check-xhci-lifecycle.py --interrupts`: lifecycle/start-fault/stop-fault/recovery modes combine their
+  existing feature with `hal-xhci-irq-test`. PC/Q35 require distinct controller vectors, advancing
+  IRQ counters for every re-arm, actual IRQ-admitted fresh keys/peer mouse reports and existing
+  DMA/MMIO/stale-object assertions. Native stopped/recovered/quarantined checks inject a late
+  reserved vector and assert its source is detached and its delivery counter unchanged.
+- `--mode irq-start-fault`, `hal-xhci-irq-start-fault-test`: inject failure **after** HID enumeration,
+  MSI-X setup and a delivered IRQ, then require safe rollback, ignored late vectors, actual peer
+  input, failed-record removal and final DMA zero. This complements the earlier post-Run fault,
+  which occurs before message delivery is armed.
+
+The USB CI job builds and runs all these profiles. Four new portable tests cover W1C/EHB/dequeue
+and malformed/overlapping MSI-X window rules. General USB/hubs/SuperSpeed/endpoint recovery,
+Executive/user input bindings, nonzero-segment native drivers, other-driver failure recovery,
+general AML/PCI routing and device D-states/S3/SMP power remain open. **M9 remains incomplete.**
+
+
+Local checkpoint verification passed **37 distinct native fixtures**: 21 interrupt/input/object/
+xHCI lifecycle fixtures, three default USB/PS2 fixtures, seven existing storage/network lifecycle
+fixtures and six normal/failed six-driver shutdown fixtures. Both overlapping Rust host suites
+passed **797 tests** each; five negative proof-parser tests, host/native Clippy, formatting, image
+validation (21 checks), boot/link/layout/generated/conformance checks (**369 assertions**) and the
+unsafe audit (**257 blocks, zero missing SAFETY comments**) also passed. The complete CI workflow
+is required on the pushed revision; these local results do not close the remaining M9 gates.

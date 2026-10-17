@@ -13,10 +13,11 @@ import re
 import socket
 import subprocess
 import time
+from xhci_irq_checks import verify_interrupts
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def boot(qemu, kernel, machine, mode):
+def boot(qemu, kernel, machine, mode, interrupts=False):
     label = f'input-xhci-lifecycle-{machine}-{mode}'
     log = ROOT / 'build' / f'{label}.log'
     qmp = ROOT / 'build' / f'{label}.sock'
@@ -40,7 +41,7 @@ def boot(qemu, kernel, machine, mode):
                     assert process.poll() is None, text
                     time.sleep(.005)
                 raise AssertionError(f'missing {marker}:\n{log.read_text(errors="replace")}')
-            initial = {'start-fault': 'xhci-test: start fault armed peer=', 'recovery': 'xhci-recovery: armed startup quarantine'}
+            initial = {'start-fault': 'xhci-test: start fault armed peer=', 'irq-start-fault': 'xhci-test: start fault armed peer=', 'recovery': 'xhci-recovery: armed startup quarantine'}
             wait(initial.get(mode, 'xhci-test: armed cycle=0'))
             connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             connection.settimeout(5)
@@ -80,16 +81,22 @@ def boot(qemu, kernel, machine, mode):
                 assert 'failed-start quarantine retains MMIO/DMA' in text, text
                 assert 'repeated failed cleanup retains 11 DMA pages/MMIO' in text, text
                 assert 'repeated cleanup failure retain 16 DMA pages/MMIO' in text, text
+                if interrupts:
+                    verify_interrupts(text, reports=4, controllers=2, arms=3)
                 print(f'PASS: xhci-recovery-{machine}: failed start/stop, repeated cleanup refusal pins DMA/MMIO, checked recovery and fresh hardware input, live peer, neutral EOF/stale identities, final DMA 0 and frozen-shutdown recovery refusal', flush=True)
                 return
-            if mode == 'start-fault':
+            if mode in ('start-fault', 'irq-start-fault'):
                 execute('input-send-event', {'events': [
                     {'type': 'rel', 'data': {'axis': 'x', 'value': 7}},
                     {'type': 'btn', 'data': {'down': True, 'button': 'left'}}]})
                 text = wait('failed record safely removed, DMA 0')
                 assert 'injected post-run start failure' in text, text
                 assert 'failed-start rollback reclaimed MMIO/DMA' in text, text
-                print(f'PASS: xhci-start-fault-{machine}: post-run exposed DMA/MMIO rollback, live peer input and safe failed-record removal, DMA 0', flush=True)
+                if mode == 'irq-start-fault':
+                    assert 'injected post-run start failure (after armed MSI-X)' in text, text
+                if interrupts:
+                    verify_interrupts(text, controllers=2 if mode == 'irq-start-fault' else 1, arms=2 if mode == 'irq-start-fault' else 1)
+                print(f'PASS: xhci-{mode}-{machine}: post-run exposed DMA/MMIO rollback, live peer input and safe failed-record removal, DMA 0', flush=True)
                 return
             for cycle, name in enumerate('abcd'):
                 wait(f'xhci-test: armed cycle={cycle}')
@@ -102,6 +109,8 @@ def boot(qemu, kernel, machine, mode):
             if mode == 'stop-fault':
                 text = wait('neutral EOF, polling/start/removal refused')
                 assert 'retains 8 DMA pages and MMIO, bus master active' in text, text
+                if interrupts:
+                    verify_interrupts(text, reports=8, controllers=2, arms=5)
                 print(f'PASS: xhci-stop-fault-{machine}: unproven quiescence pins eight DMA pages and MMIO; neutral EOF, stale polling/start/removal refused', flush=True)
                 return
             text = wait('final removal; DMA 16 -> 0')
@@ -110,6 +119,8 @@ def boot(qemu, kernel, machine, mode):
             assert 'DMA 16 -> 0' in text, text
             text = wait('input: usb mouse dx=0 dy=0 buttons=0')
             assert 'in use 0 -> 0 bytes, integrity ok' in text, text
+            if interrupts:
+                verify_interrupts(text, reports=8, controllers=2, arms=5)
             print(f'PASS: xhci-lifecycle-{machine}: two PCI controllers, three restarts, fresh input and live peer, neutral EOF, stale input/MMIO refusal, DMA 16 -> 8 -> 16 (three times) -> 0, final removal', flush=True)
         finally:
             if connection is not None:
@@ -127,10 +138,11 @@ def boot(qemu, kernel, machine, mode):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kernel', type=Path, default=ROOT / 'build' / 'nolx.elf')
-    parser.add_argument('--mode', choices=('lifecycle', 'start-fault', 'stop-fault', 'recovery'), default='lifecycle')
+    parser.add_argument('--mode', choices=('lifecycle', 'start-fault', 'stop-fault', 'recovery', 'irq-start-fault'), default='lifecycle')
+    parser.add_argument('--interrupts', action='store_true', help='also require hal-xhci-irq-test; prove independent IRQ vectors and re-arming')
     args = parser.parse_args()
     for machine in ('pc', 'q35'):
-        boot(os.environ.get('QEMU', 'qemu-system-x86_64'), args.kernel.resolve(), machine, args.mode)
+        boot(os.environ.get('QEMU', 'qemu-system-x86_64'), args.kernel.resolve(), machine, args.mode, args.interrupts)
 
 
 if __name__ == '__main__':

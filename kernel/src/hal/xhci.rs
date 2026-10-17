@@ -1,15 +1,16 @@
 //! The xHCI controller's bring-up: find the controller by its class code, enable it, map its
 //! registers through an [`mmio`] window, halt and reset it, and report the state of each root port.
-//! Everything is polled, and failure is reported without stopping boot.
+//! Startup/control commands are bounded and polled; live input uses MSI/MSI-X when available.
 //!
 //! The register offsets, the status bits, and the port arithmetic live in `nolx-usb-core`, where
 //! they are host-tested. This module supplies register access and bounded polling.
 //!
-//! The live transport retains bounded rings and direct-root USB2 boot-HID devices. It polls
-//! completions in idle context; disconnect disables the slot before its DMA pages are freed.
-//! Each framework handle owns its controller/MMIO/DMA; polling excludes lifecycle callbacks.
-//! Hubs, SuperSpeed, interrupt delivery and power integration remain open.
+//! The live transport retains bounded rings and direct-root USB2 boot-HID devices. It drains
+//! completions in IRQ-scheduled idle context; disconnect disables the slot before its DMA pages are freed.
+//! Each framework handle owns its controller/MMIO/DMA; deferred service excludes lifecycle callbacks.
+//! Hubs, SuperSpeed, general HID and S3/Executive power integration remain open.
 
+mod irq;
 mod live;
 #[cfg(feature = "hal-xhci-recovery-test")]
 mod recovery;
@@ -53,6 +54,8 @@ pub enum Failure {
     NoController,
     /// Framework checkout or a retained hardware owner refuses this operation.
     Busy,
+    /// MSI/MSI-X setup, delivery proof or interrupt masking/readback failed.
+    Interrupt,
     /// A DMA allocation could not be obtained.
     Memory,
     /// Controller/device features exceed the supported direct-root boot-HID profile.
@@ -233,7 +236,8 @@ fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<(), Failure> {
         op,
         ports,
         console,
-    )
+    )?;
+    irq::arm(dev, bdf, regs, op, console)
 }
 
 /// Stop the controller's run bit and wait until it reports halted.
@@ -310,6 +314,9 @@ fn stop_device(dev: usize) -> bool {
     };
     // Retire producers even on failed quiescence, but never free hardware-visible storage then.
     live::retire(dev);
+    if irq::disarm(dev, bdf).is_err() {
+        return false;
+    }
     #[cfg(feature = "hal-xhci-recovery-test")]
     if recovery::refuse_stop(dev) {
         return false;
@@ -365,7 +372,7 @@ fn poll(
     Err(Failure::Timeout(step))
 }
 
-/// Poll native USB HID completions and consume source-tagged input in idle context.
+/// Service IRQ-notified native USB HID completions in idle; explicit polling only without a route.
 pub fn poll_events(console: &mut dyn HalConsole) {
     if let Ok(started) = driver_start::started() {
         for (dev, name) in started.into_iter().flatten() {
@@ -382,7 +389,18 @@ pub fn poll_on(dev: usize, console: &mut dyn HalConsole) -> Result<(), Failure> 
         dev,
         "xhci",
         || {
-            live::poll_events(dev, console);
+            let Some(delivered) = irq::work(dev) else {
+                return Ok(());
+            };
+            let (more, reports) = live::poll_events(dev, console);
+            irq::finish(dev, more)?;
+            #[cfg(feature = "hal-xhci-irq-test")]
+            if reports > 0 {
+                let kind = if delivered == 0 { "polled" } else { "irq" };
+                let _ = writeln!(console, "xhci: {kind} work handle={dev} vector={:#x} delivered={delivered} reports={reports}", irq::vector(dev));
+            }
+            #[cfg(not(feature = "hal-xhci-irq-test"))]
+            let _ = (delivered, reports);
             Ok(())
         },
         |error| {
@@ -404,4 +422,13 @@ pub fn lifecycle_selftest(console: &mut dyn HalConsole) {
 #[cfg(feature = "hal-xhci-recovery-test")]
 pub fn recovery_selftest(console: &mut dyn HalConsole) {
     recovery::step(console);
+}
+
+/// Statically reserved MSI vectors are acknowledged even after their controller detaches.
+pub fn handles_vector(vector: u8) -> bool {
+    irq::handles(vector)
+}
+/// Bounded top half: acknowledge/mask and notify idle, with no allocation/ring or framework access.
+pub fn on_interrupt(vector: u8) {
+    irq::interrupt(vector);
 }

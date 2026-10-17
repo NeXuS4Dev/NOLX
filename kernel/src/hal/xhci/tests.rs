@@ -162,6 +162,7 @@ fn advance(test: &mut Test, console: &mut dyn HalConsole) {
         while matches!(input::read(test.mouse_reader).unwrap(), Read::Event(_)) {}
         test.old_region = BINDINGS[test.handle].lock().region.unwrap();
         driver_start::stop(test.handle).unwrap();
+        irq::detached_test(test.handle);
         assert_eq!(driver_start::state(test.handle), Ok(State::Stopped));
         assert_eq!(driver_start::state(test.peer), Ok(State::Started));
         crate::mm::audit().unwrap();
@@ -203,6 +204,7 @@ fn advance(test: &mut Test, console: &mut dyn HalConsole) {
     if test.cycle < 3 {
         let old = test.keyboard.id;
         driver_start::start(test.handle).unwrap();
+        BINDINGS[test.handle].lock().log.replay(console);
         assert_eq!(driver_start::state(test.handle), Ok(State::Started));
         crate::mm::audit().unwrap();
         assert_eq!(dma::live_pages(), test.pages);
@@ -241,6 +243,7 @@ fn advance(test: &mut Test, console: &mut dyn HalConsole) {
             let mappings = mmio::live_mappings();
             assert_eq!(driver_start::stop(test.peer), Err(Error::OpFailed));
             assert_eq!(driver_start::state(test.peer), Ok(State::Failed));
+            irq::detached_test(test.peer);
             assert_eq!(dma::live_pages(), pages);
             assert_eq!(mmio::live_mappings(), mappings);
             assert!(live::active(test.peer));
@@ -271,6 +274,7 @@ fn advance(test: &mut Test, console: &mut dyn HalConsole) {
 )))]
 fn finish_peer(test: &mut Test, console: &mut dyn HalConsole) {
     driver_start::stop(test.peer).unwrap();
+    irq::detached_test(test.peer);
     // Pointer reader must receive neutral button state then EOF too.
     loop {
         match input::read(test.mouse_reader).unwrap() {
@@ -327,6 +331,7 @@ fn start_fault_step(console: &mut dyn HalConsole) {
                 BINDINGS[d].lock().bdf.is_some() && driver_start::state(d) == Ok(State::Failed)
             })
             .unwrap();
+        irq::detached_test(failed);
         assert!(removable(failed));
         assert!(!live::active(failed));
         let bdf = BINDINGS[failed].lock().bdf.unwrap();

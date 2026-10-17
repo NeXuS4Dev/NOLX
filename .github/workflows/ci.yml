@@ -712,7 +712,7 @@ jobs:
         if: failure()
 
   usb-hid:
-    name: Native USB HID input, multi-controller lifecycle and DMA safety
+    name: Native USB HID interrupts, lifecycle and DMA safety
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -729,17 +729,27 @@ jobs:
         run: make kernel 2>&1 | tee /tmp/job.log
       - name: Verify PC and Q35 boot-HID input, ring wrap and disconnect reclamation
         run: python3 scripts/check-usb-input.py 2>&1 | tee -a /tmp/job.log
+      - name: Reject misleading interrupt proof logs
+        run: python3 -m unittest discover -s scripts -p 'test_xhci_irq_checks.py' 2>&1 | tee -a /tmp/job.log
+      - name: Build interrupt observer image
+        run: make kernel KERNEL_FEATURES=hal-xhci-irq-test 2>&1 | tee -a /tmp/job.log
+      - name: Verify MSI-X and MSI delivery, plus explicit no-capability and PIC-only fallbacks
+        run: |
+          python3 scripts/check-usb-input.py --interrupts 2>&1 | tee -a /tmp/job.log
+          python3 scripts/check-usb-input.py --interrupts --transport msi 2>&1 | tee -a /tmp/job.log
+          python3 scripts/check-usb-input.py --transport polled 2>&1 | tee -a /tmp/job.log
+          python3 scripts/check-usb-input.py --no-apic 2>&1 | tee -a /tmp/job.log
       - name: Build independent input-object observer image
-        run: make kernel KERNEL_FEATURES=hal-input-object-test 2>&1 | tee -a /tmp/job.log
+        run: make kernel KERNEL_FEATURES=hal-input-object-test,hal-xhci-irq-test 2>&1 | tee -a /tmp/job.log
       - name: Verify independent readers, overflow resync and stale USB identities
-        run: python3 scripts/check-usb-input.py --objects 2>&1 | tee -a /tmp/job.log
+        run: python3 scripts/check-usb-input.py --objects --interrupts 2>&1 | tee -a /tmp/job.log
       - name: Verify PS/2 through the same input-object API
         run: python3 scripts/check-ps2-input.py --objects 2>&1 | tee -a /tmp/job.log
       - name: Verify two-controller restart, rollback, quarantine and checked recovery
         run: |
-          for mode in lifecycle start-fault stop-fault recovery; do
-            make kernel KERNEL_FEATURES=hal-xhci-${mode}-test 2>&1 | tee -a /tmp/job.log
-            python3 scripts/check-xhci-lifecycle.py --mode "$mode" 2>&1 | tee -a /tmp/job.log
+          for mode in lifecycle start-fault stop-fault recovery irq-start-fault; do
+            make kernel KERNEL_FEATURES=hal-xhci-${mode}-test,hal-xhci-irq-test 2>&1 | tee -a /tmp/job.log
+            python3 scripts/check-xhci-lifecycle.py --mode "$mode" --interrupts 2>&1 | tee -a /tmp/job.log
           done
       - name: Annotate USB serial logs on failure
         if: failure()

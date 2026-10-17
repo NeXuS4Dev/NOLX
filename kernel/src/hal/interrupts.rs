@@ -47,6 +47,9 @@ extern "C" fn nolx_interrupt_dispatch(frame_pointer: *mut InterruptFrame) -> *mu
     if apic::is_enabled() && super::e1000::handles_vector(vector) {
         return device_completion(frame_pointer, || super::e1000::on_interrupt(vector));
     }
+    if apic::is_enabled() && super::xhci::handles_vector(vector) {
+        return device_completion(frame_pointer, || super::xhci::on_interrupt(vector));
+    }
     if super::virtio_net::handles_vector(vector) {
         return device_completion(frame_pointer, || super::virtio_net::on_interrupt(vector));
     }
