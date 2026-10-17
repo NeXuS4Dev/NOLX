@@ -312,6 +312,10 @@ fn stop_device(dev: usize) -> bool {
     if tests::inject_stop(dev) {
         return false;
     }
+    #[cfg(feature = "hal-power-quiesce-stop-fault-test")]
+    if region.is_some() {
+        return false;
+    }
     if let Some(regs) = region {
         let quiesced = (|| {
             let op = u64::from(regs.read8(usb::CAP_CAPLENGTH)?);

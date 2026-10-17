@@ -1079,3 +1079,11 @@ require fresh keyboard input after three restarts and mouse input while its peer
 post-run startup rollback and failed-stop DMA/MMIO quarantine are separate executable modes.
 Supersedes earlier single-host/framework limitations. General USB, interrupts, quarantine recovery,
 Executive/user input bindings and global power/S3 remain open; M9 is not complete.
+
+
+M9 shutdown checkpoint: the persistent registry now irreversibly freezes device admission,
+flushes all started storage before stopping any driver, then stops in reverse order. BSP PC/Q35
+six-driver fixtures verify held USB input and PS2 reader retirement, DMA 38 -> 0, full segment-zero PCI
+bus-master readback, actual S5 and independently persisted disk data. Flush failure, stop failure
+and foreign active bus masters refuse S5 without reopening admission. General executive/cache/SMP
+shutdown orchestration, quarantine recovery and S3 save/resume remain open; M9 is still incomplete.

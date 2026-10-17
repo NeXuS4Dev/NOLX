@@ -215,3 +215,98 @@ fn driver_identity_survives_stop_restart_and_removal() {
     assert_eq!(registry.driver_name(usize::MAX), Err(Error::UnknownDevice));
     assert_eq!(registry.start(dev), Err(Error::BadState));
 }
+
+fn shutdown_registry(stop: fn(usize) -> bool) -> Registry<1, 3> {
+    let mut reg = Registry::new();
+    reg.add_driver(Driver {
+        name: "shutdown",
+        matches: NIC_RULES,
+        ops: Dispatch {
+            probe: accept,
+            start: ok,
+            stop,
+        },
+    })
+    .unwrap();
+    for _ in 0..3 {
+        let d = reg.add_device(NIC).unwrap();
+        reg.bind(d).unwrap();
+        reg.start(d).unwrap();
+    }
+    reg
+}
+#[test]
+fn shutdown_flushes_every_device_before_reverse_stop_and_freezes_all_admission() {
+    use std::cell::RefCell;
+    let calls = RefCell::new(std::vec::Vec::new());
+    let mut reg = shutdown_registry(ok);
+    assert_eq!(
+        reg.quiesce(
+            |d, n| {
+                assert_eq!(n, "shutdown");
+                calls.borrow_mut().push((0, d));
+                true
+            },
+            |d| calls.borrow_mut().push((1, d))
+        ),
+        Ok(3)
+    );
+    assert_eq!(
+        *calls.borrow(),
+        [(0, 0), (0, 1), (0, 2), (1, 2), (1, 1), (1, 0)]
+    );
+    assert!(reg.frozen());
+    assert_eq!(reg.start(0), Err(Error::Busy));
+    assert_eq!(reg.stop(0), Err(Error::Busy));
+    assert_eq!(reg.remove(0), Err(Error::Busy));
+    assert_eq!(reg.bind(0), Err(Error::Busy));
+    assert_eq!(reg.add_device(NIC), Err(Error::Busy));
+    assert_eq!(reg.add_driver(good_driver(NIC_RULES)), Err(Error::Busy));
+    assert_eq!(reg.quiesce(|_, _| panic!(), |_| panic!()), Err(Error::Busy));
+    for d in 0..3 {
+        assert_eq!(reg.state(d), Ok(State::Stopped));
+    }
+}
+#[test]
+fn shutdown_barrier_failure_stops_nothing_and_stays_frozen() {
+    let mut reg = shutdown_registry(ok);
+    assert_eq!(
+        reg.quiesce(|d, _| d != 1, |_| panic!()),
+        Err(Error::OpFailed)
+    );
+    assert!(reg.frozen());
+    for d in 0..3 {
+        assert_eq!(reg.state(d), Ok(State::Started));
+        assert_eq!(reg.start(d), Err(Error::Busy));
+    }
+}
+#[test]
+fn shutdown_stop_failure_never_releases_failed_or_unvisited_devices() {
+    let mut reg = shutdown_registry(|d| d != 1);
+    let mut released = std::vec::Vec::new();
+    assert_eq!(
+        reg.quiesce(|_, _| true, |d| released.push(d)),
+        Err(Error::OpFailed)
+    );
+    assert_eq!(released, [2]);
+    assert_eq!(reg.state(2), Ok(State::Stopped));
+    assert_eq!(reg.state(1), Ok(State::Failed));
+    assert_eq!(reg.state(0), Ok(State::Started));
+    assert_eq!(reg.remove(1), Err(Error::Busy));
+}
+#[test]
+fn shutdown_failed_record_refuses_before_any_barrier_or_stop() {
+    let mut reg = shutdown_registry(fail);
+    assert_eq!(reg.stop(1), Err(Error::OpFailed));
+    assert_eq!(
+        reg.quiesce(|_, _| panic!(), |_| panic!()),
+        Err(Error::BadState)
+    );
+    assert!(reg.frozen());
+}
+#[test]
+fn empty_shutdown_is_valid_but_not_reusable() {
+    let mut reg: Registry<0, 0> = Registry::new();
+    assert_eq!(reg.quiesce(|_, _| panic!(), |_| panic!()), Ok(0));
+    assert_eq!(reg.quiesce(|_, _| panic!(), |_| panic!()), Err(Error::Busy));
+}

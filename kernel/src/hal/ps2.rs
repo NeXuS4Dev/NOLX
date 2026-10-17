@@ -196,3 +196,19 @@ pub fn on_interrupt() {
         }
     }
 }
+
+/// Irreversibly retire legacy input producers and mask their interrupt delivery for shutdown.
+pub fn quiesce() {
+    let _interrupts = super::cpu::InterruptGuard::disable();
+    apic::mask_legacy_irq(1);
+    apic::mask_legacy_irq(12);
+    pic::mask_irq(1);
+    pic::mask_irq(12);
+    let mut state = STATE.lock();
+    for id in [state.keyboard_id.take(), state.mouse_id.take()]
+        .into_iter()
+        .flatten()
+    {
+        let _ = super::input::disconnect(id);
+    }
+}

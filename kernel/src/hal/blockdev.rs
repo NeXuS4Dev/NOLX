@@ -235,3 +235,15 @@ pub(crate) fn bounds_selftest(dev: usize) {
         "invalid request reached hardware"
     );
 }
+
+/// Coordinator-only durable barrier while the framework is exclusively checked out and frozen.
+/// This preserves the driver's normal queued FLUSH path without recursively entering admission.
+pub(super) fn shutdown_flush(handle: usize) -> Result<(), nolxfs::DevError> {
+    let backend = BINDINGS.lock().1.get(handle).copied().flatten();
+    match backend {
+        Some(VIRTIO) => super::virtio_blk::with_disk(handle, |disk| disk.flush()),
+        Some(AHCI) => super::ahci::with_disk(handle, |disk| disk.flush()),
+        Some(NVME) => super::nvme::with_disk(handle, |disk| disk.flush()),
+        _ => Err(nolxfs::DevError::Io(19)),
+    }
+}

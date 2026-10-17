@@ -16,7 +16,8 @@
 //! ```
 //!
 //! Scope: match rules, binding, the lifecycle, and capacity. Interrupts, DMA, power policy, and
-//! the calls into the kernel are the driver's business and sit outside this crate.
+//! the calls into the kernel are the driver's business and sit outside this crate. A bounded
+//! shutdown transaction supplies platform flush/release callbacks and permanently freezes admission.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -157,10 +158,11 @@ struct Device {
 }
 
 /// A fixed-capacity registry of drivers and devices. `D` is the driver capacity and `N` the device
-/// capacity.
+/// capacity. Shutdown permanently freezes mutations and transport admission, including on failure.
 pub struct Registry<const D: usize, const N: usize> {
     drivers: [Option<Driver>; D],
     devices: [Option<Device>; N],
+    frozen: bool,
 }
 
 impl<const D: usize, const N: usize> Default for Registry<D, N> {
@@ -176,6 +178,7 @@ impl<const D: usize, const N: usize> Registry<D, N> {
         Self {
             drivers: [None; D],
             devices: [None; N],
+            frozen: false,
         }
     }
 
@@ -184,6 +187,9 @@ impl<const D: usize, const N: usize> Registry<D, N> {
     /// # Errors
     /// [`Error::Full`] when the registry has no free driver slot.
     pub fn add_driver(&mut self, driver: Driver) -> Result<usize, Error> {
+        if self.frozen {
+            return Err(Error::Busy);
+        }
         let index = self
             .drivers
             .iter()
@@ -216,6 +222,9 @@ impl<const D: usize, const N: usize> Registry<D, N> {
     /// # Errors
     /// [`Error::Full`] when the registry has no free device slot.
     pub fn add_device(&mut self, id: DeviceId) -> Result<usize, Error> {
+        if self.frozen {
+            return Err(Error::Busy);
+        }
         let index = self
             .devices
             .iter()
@@ -252,6 +261,9 @@ impl<const D: usize, const N: usize> Registry<D, N> {
     /// [`Error::BadState`] unless the device is `Discovered`; [`Error::NoDriver`] when no driver
     /// accepts it, in which case the device stays `Discovered`.
     pub fn bind(&mut self, dev: usize) -> Result<usize, Error> {
+        if self.frozen {
+            return Err(Error::Busy);
+        }
         let device = *self.device(dev)?;
         if device.state != State::Discovered {
             return Err(Error::BadState);
@@ -274,6 +286,9 @@ impl<const D: usize, const N: usize> Registry<D, N> {
     /// [`Error::BadState`] unless the device is `Bound` or `Stopped`; [`Error::OpFailed`] when the
     /// driver's start fails, in which case the device becomes `Failed`.
     pub fn start(&mut self, dev: usize) -> Result<(), Error> {
+        if self.frozen {
+            return Err(Error::Busy);
+        }
         let (state, driver) = {
             let record = self.device(dev)?;
             (record.state, record.driver)
@@ -301,6 +316,13 @@ impl<const D: usize, const N: usize> Registry<D, N> {
     /// [`Error::BadState`] unless the device is `Started`; [`Error::OpFailed`] when the driver's
     /// stop fails, in which case the device becomes `Failed`.
     pub fn stop(&mut self, dev: usize) -> Result<(), Error> {
+        if self.frozen {
+            return Err(Error::Busy);
+        }
+        self.stop_inner(dev)
+    }
+
+    fn stop_inner(&mut self, dev: usize) -> Result<(), Error> {
         let (state, driver) = {
             let record = self.device(dev)?;
             (record.state, record.driver)
@@ -327,6 +349,9 @@ impl<const D: usize, const N: usize> Registry<D, N> {
     /// # Errors
     /// [`Error::Busy`] for a started device; [`Error::BadState`] for a device already removed.
     pub fn remove(&mut self, dev: usize) -> Result<(), Error> {
+        if self.frozen {
+            return Err(Error::Busy);
+        }
         let state = self.device(dev)?.state;
         match state {
             State::Started => Err(Error::Busy),
@@ -336,6 +361,52 @@ impl<const D: usize, const N: usize> Registry<D, N> {
                 Ok(())
             }
         }
+    }
+
+    /// Admission is permanently closed after a shutdown attempt, successful or not.
+    #[must_use]
+    pub const fn frozen(&self) -> bool {
+        self.frozen
+    }
+
+    /// Freeze admission, flush every started device, then stop in reverse discovery order.
+    /// The caller holds exclusive registry ownership across this operation. `flush` must reject
+    /// unknown/unsupported drivers; `after_stop` releases platform resources only after success.
+    /// Failure is fail-closed: no restart, retry, binding or removal may reopen admission. Earlier
+    /// successful stops stay stopped; failed callbacks retain their own unsafe-to-free resources.
+    /// Failed records refuse preflight even if their hardware might already have rolled back.
+    pub fn quiesce(
+        &mut self,
+        mut flush: impl FnMut(usize, &'static str) -> bool,
+        mut after_stop: impl FnMut(usize),
+    ) -> Result<usize, Error> {
+        if self.frozen {
+            return Err(Error::Busy);
+        }
+        self.frozen = true;
+        if self
+            .devices
+            .iter()
+            .flatten()
+            .any(|d| d.state == State::Failed)
+        {
+            return Err(Error::BadState);
+        }
+        // No device is stopped until all durable barriers succeed.
+        for dev in 0..N {
+            if self.state(dev) == Ok(State::Started) && !flush(dev, self.driver_name(dev)?) {
+                return Err(Error::OpFailed);
+            }
+        }
+        let mut stopped = 0;
+        for dev in (0..N).rev() {
+            if self.state(dev) == Ok(State::Started) {
+                self.stop_inner(dev)?;
+                after_stop(dev);
+                stopped += 1;
+            }
+        }
+        Ok(stopped)
     }
 
     fn device(&self, dev: usize) -> Result<&Device, Error> {

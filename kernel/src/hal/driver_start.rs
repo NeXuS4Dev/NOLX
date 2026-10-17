@@ -144,6 +144,38 @@ pub fn remove(dev: usize) -> Result<(), Error> {
     })
 }
 
+/// Irreversibly freeze all public transport admission and quiesce every started driver.
+/// Flushes run under the same checkout, using private retained disk access, never recursive I/O.
+pub fn quiesce(console: &mut dyn HalConsole) -> Result<usize, Error> {
+    with_registry(|registry| {
+        registry.quiesce(
+            |dev, name| {
+                #[cfg(feature = "hal-power-quiesce-flush-fault-test")]
+                if name == "virtio-blk" {
+                    return false;
+                }
+                let durable = match name {
+                    "virtio-blk" | "ahci" | "nvme" => super::blockdev::shutdown_flush(dev).is_ok(),
+                    "e1000" | "virtio-net" | "xhci" => true,
+                    _ => false,
+                };
+                let _ = writeln!(
+                    console,
+                    "power: barrier handle={dev} driver={name} durable={durable}"
+                );
+                durable
+            },
+            |dev| {
+                // SAFETY: stop succeeded with hardware quiescence and detached software users; registry
+                // checkout plus permanent freeze exclude all submissions, starts and concurrent callbacks.
+                unsafe {
+                    crate::mm::mmio::release_owned(dev);
+                }
+            },
+        )
+    })
+}
+
 /// A stable snapshot of started handles and their driver names, without retaining a registry lock.
 pub fn started() -> Result<[Option<(usize, &'static str)>; DEVICES], Error> {
     with_registry(|registry| {
@@ -173,6 +205,9 @@ pub(crate) fn device_operation<T, E>(
     refused: impl FnOnce(Error) -> E,
 ) -> Result<T, E> {
     with_registry(|registry| {
+        if registry.frozen() {
+            return Err(Error::Busy);
+        }
         let running = (0..DEVICES).any(|dev| {
             registry.state(dev) == Ok(nolx_df_core::State::Started)
                 && registry.driver_name(dev) == Ok(name)
@@ -193,6 +228,9 @@ pub(crate) fn device_operation_handle<T, E>(
     refused: impl FnOnce(Error) -> E,
 ) -> Result<T, E> {
     with_registry(|registry| {
+        if registry.frozen() {
+            return Err(Error::Busy);
+        }
         if registry.state(dev) != Ok(nolx_df_core::State::Started)
             || registry.driver_name(dev) != Ok(name)
         {
@@ -219,6 +257,9 @@ pub(crate) fn device_io_handle<T>(
     op: impl FnOnce() -> Result<T, nolxfs::DevError>,
 ) -> Result<T, nolxfs::DevError> {
     with_registry(|registry| {
+        if registry.frozen() {
+            return Err(Error::Busy);
+        }
         if registry.state(dev) != Ok(nolx_df_core::State::Started) {
             return Err(Error::UnknownDevice);
         }

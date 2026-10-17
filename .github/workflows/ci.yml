@@ -862,7 +862,7 @@ jobs:
         if: failure()
 
   acpi-s5:
-    name: ACPI S5 actual shutdown and active-DMA refusal
+    name: ACPI S5, six-driver shutdown and fail-closed DMA refusal
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -879,10 +879,20 @@ jobs:
         run: make kernel KERNEL_FEATURES=hal-power-test-s5 2>&1 | tee /tmp/job.log
       - name: Observe guest shutdown through QMP
         run: python3 scripts/check-power-s5.py 2>&1 | tee -a /tmp/job.log
+      - name: Build independent filesystem reader
+        run: cargo build -p nolxfs-dump 2>&1 | tee -a /tmp/job.log
+      - name: Verify six-driver quiescence and flush, stop and foreign-DMA refusals
+        run: |
+          for mode in normal flush-fault stop-fault unowned; do
+            feature=hal-power-quiesce-test
+            if [ "$mode" != normal ]; then feature=hal-power-quiesce-${mode}-test; fi
+            make kernel KERNEL_FEATURES="$feature" 2>&1 | tee -a /tmp/job.log
+            python3 scripts/check-power-quiesce.py --mode "$mode" 2>&1 | tee -a /tmp/job.log
+          done
       - name: Annotate serial logs on failure
         if: failure()
         run: |
-          for log in build/power-s5-*.log; do
+          for log in build/power-s5-*.log build/power-quiesce-*.log; do
             tr -cd '\11\12\40-\176' < "$log" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
           done
       - uses: ./.github/actions/report-failure

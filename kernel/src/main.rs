@@ -216,7 +216,7 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         let mut round_robin_reported = false;
         let mut user_test_started = false;
         let mut user_test_reported = false;
-        #[cfg(feature = "hal-power-test-s5")]
+        #[cfg(any(feature = "hal-power-test-s5", feature = "hal-power-quiesce-test"))]
         let mut power_test_started = false;
         loop {
             hal::xhci::poll_events(&mut console);
@@ -292,6 +292,15 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
             if memory_selftest_done && !lifecycle_test_done {
                 lifecycle_test_done = true;
                 hal::driver_start::lifecycle_selftest(&mut console);
+            }
+
+            #[cfg(feature = "hal-power-quiesce-test")]
+            if memory_selftest_done
+                && !power_test_started
+                && hal::power::quiesce_test_ready(&mut console)
+            {
+                power_test_started = true;
+                hal::power::quiesce_selftest(&mut console);
             }
 
             #[cfg(feature = "hal-power-test-s5")]

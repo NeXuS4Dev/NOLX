@@ -82,7 +82,9 @@ M9 to the already implemented boot probes. Check items only with executable evid
       the bounded PC/Q35 profile; ACPI refusal never selects the no-ACPI board fallback.
 - [ ] Consume evaluated link resources for PCI interrupt routing and complete general
       device binding, replacing the firmware Interrupt Line fallback.
-- [ ] Device power-state/quiesce policy and S3 save/resume path.
+- [ ] Complete device power-state/quiesce policy and S3 save/resume path.
+      BSP device-level shutdown freeze/flush/stop and fail-closed S5 gates now have six-driver
+      PC/Q35 evidence; higher-layer cache/user-task/SMP orchestration and S3 remain open.
 - [x] ACPI S5 entry with QMP observing actual guest shutdown and QEMU exit zero, not a
       printed hypothetical word. The unsafe primitive requires prior system quiescence;
       its test VM has no active DMA, and a negative test refuses an active bus master.
@@ -789,3 +791,57 @@ lifecycle fixtures including combined PC/Q35 and recursive USB-poll Busy refusal
 **254 unsafe blocks / zero missing invariants**, boot/layout/generated-file checks, **21 default
 image checks** and **357 conformance assertions** passed. The verifier waits for complete terminal
 messages (not partially written serial prefixes) before evaluating final ownership evidence.
+
+
+## Fail-closed BSP device shutdown checkpoint (2026-10-17)
+
+The persistent registry now owns an irreversible admission freeze. Once shutdown starts, new
+registration/binding/start/stop/removal and public block/network/USB I/O refuse Busy. Diagnostic
+snapshots remain available. One framework checkout spans preflight, all flushes, all stops and
+post-stop resource release; it never holds the framework IRQ lock over callbacks. Failed records
+refuse preflight. Every started driver must pass its barrier before **any** controller is stopped;
+stops run in reverse discovery order. Only successful stop permits owned MMIO reclamation. Any
+flush/stop failure leaves admission closed, earlier stops intact and unsafe-to-free state pinned.
+Unknown started drivers refuse rather than silently bypassing policy. There is no retry/resume
+or forced free after a partial shutdown.
+
+`hal::power::quiesce_devices` integrates the six native driver types. Storage uses retained private
+FLUSH commands under the checked-out framework, not recursive public admission. PS/2 producers
+are retired and IRQ1/IRQ12 masked after successful controller stops. Completion additionally
+requires zero owned DMA pages, an allocator audit, and PCI bus-master-disable readback from a
+complete scan of **all 256 segment-zero buses**; truncated inventories, malformed bridges and
+nonzero-segment MCFG descriptions refuse. An active foreign PCI function is never disabled just
+to authorize S5. Register/transport owners cannot restart after the final scan.
+
+Five new `nolx-df-core` tests cover flush-before-stop ordering, reverse stop/release order,
+permanent mutation freeze, all-or-nothing barriers, partial-stop failure, failed-record preflight
+and empty/repeated shutdown. The host suite now totals **790 tests** in each overlapping suite.
+`scripts/check-power-quiesce.py` exercises four modes on **PC and Q35** (eight native fixtures):
+
+- Healthy: all six native driver types, three real disk backends and real held USB key/button
+  input. It writes new backend-specific data before shutdown; barriers and all six stops succeed,
+  USB/PS2 subscriptions drain neutral state/EOF, new I/O/start/repeated shutdown refuse, DMA drops
+  **38 -> 0**, and QMP observes `guest-shutdown` with exit zero. The host independently checks the
+  new raw sectors and mounts all three NOLXFS files (8192 bytes, CRC `0x9ea14b00`).
+- Flush fault: the injected failed barrier stops no devices, retains all 38 DMA pages and refuses
+  S5 with permanent admission freeze. This is a deliberate failure injection, not a disk-fault claim.
+- Stop fault: withheld xHCI quiescence proof leaves its Failed record/DMA/MMIO pinned; earlier
+  successful reverse-order stops stay stopped, removal refuses and no S5 occurs.
+- Unowned master: a test-only VGA PCI bus-master bit remains enabled and unchanged after all
+  registered drivers stop/DMA reaches zero. The final audit refuses S5; no force-disable is used.
+
+All eight fixtures passed locally with QEMU 11.0.2, with native feature Clippy and host checks.
+CI extends the existing S5 job with these modes and independent disk verification. Final revision
+CI evidence is reported separately; no PR is created.
+
+**Scope is device-level BSP shutdown, not complete system suspend/power management.** The public
+quiesce operation does not commit higher-layer dirty caches, terminate producers/user tasks, park
+other CPUs or stop firmware DMA. The unsafe S5 primitive still requires those preconditions;
+its dedicated fixture has completed users/filesystem/cache tests and no APs running. S3 state
+save/restore, D-state transitions, general multi-segment/firmware power control, interrupt resource
+reclamation and recovery from failed shutdown remain open. M9 is not complete.
+
+Final local hygiene also passed host/native Clippy, formatting, all **256 unsafe blocks with
+zero missing invariants**, **21 default image checks**, boot/layout/generated-file checks and
+**361 conformance assertions**. Existing default USB PC/Q35 and PS/2 input, seven storage/network
+lifecycle fixtures, and the original three primitive-only S5 fixtures passed as regressions.
