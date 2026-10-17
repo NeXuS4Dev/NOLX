@@ -16,6 +16,7 @@
 use nolx_input_core::KeyEvent;
 pub mod device;
 pub mod interrupt;
+pub mod transfer;
 
 // Capability registers, from the controller's base.
 

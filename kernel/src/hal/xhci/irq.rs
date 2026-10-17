@@ -267,7 +267,8 @@ pub(super) fn finish(dev: usize, more: bool) -> Result<(), Failure> {
 }
 #[cfg(any(
     feature = "hal-xhci-lifecycle-test",
-    feature = "hal-xhci-recovery-test"
+    feature = "hal-xhci-recovery-test",
+    feature = "hal-xhci-transfer-fault-test"
 ))]
 pub(super) fn detached_test(dev: usize) {
     assert!(SOURCES[dev].lock().is_none());

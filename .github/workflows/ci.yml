@@ -745,9 +745,9 @@ jobs:
         run: python3 scripts/check-usb-input.py --objects --interrupts 2>&1 | tee -a /tmp/job.log
       - name: Verify PS/2 through the same input-object API
         run: python3 scripts/check-ps2-input.py --objects 2>&1 | tee -a /tmp/job.log
-      - name: Verify two-controller restart, rollback, quarantine and checked recovery
+      - name: Verify controller lifecycle, actual transfer STALL and fail-closed slot repair
         run: |
-          for mode in lifecycle start-fault stop-fault recovery irq-start-fault; do
+          for mode in lifecycle start-fault stop-fault recovery irq-start-fault transfer-fault; do
             make kernel KERNEL_FEATURES=hal-xhci-${mode}-test,hal-xhci-irq-test 2>&1 | tee -a /tmp/job.log
             python3 scripts/check-xhci-lifecycle.py --mode "$mode" --interrupts 2>&1 | tee -a /tmp/job.log
           done

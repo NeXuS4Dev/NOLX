@@ -6,6 +6,7 @@ use core::sync::atomic::{fence, Ordering};
 use nolx_input_core::events::{Kind, PointerEvent, Source};
 use nolx_input_core::objects::{Class, DeviceId, Location};
 use nolx_usb_core::device as wire;
+use usb::transfer::{self, Completion};
 const SLOTS: usize = 8;
 const PORTS: usize = 16;
 static HOSTS: [IrqMutex<Option<Host>>; driver_start::DEVICES] =
@@ -56,7 +57,29 @@ fn publish(page: &Dma, offset: u64, trb: &usb::Trb) {
     fence(Ordering::Release);
     page.write(offset + 12, &trb[12..13]);
 }
+#[derive(Clone, Copy, Debug)]
+enum Cause {
+    Transfer(Completion),
+    Disconnect,
+    Enumeration,
+    Doorbell,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PortState {
+    Ready,
+    Bound,
+    Faulted,
+}
+#[derive(Clone, Copy, Debug)]
+enum Health {
+    Active,
+    Retiring(Cause),
+    Quarantined(Cause),
+}
 struct Device {
+    health: Health,
+    #[cfg(feature = "hal-xhci-transfer-fault-test")]
+    fault_ring: Option<Ring>,
     slot: u8,
     port: u8,
     hid: wire::Hid,
@@ -68,6 +91,15 @@ struct Device {
     pending: u64,
     previous: usb::BootReport,
     object: Option<DeviceId>,
+}
+impl Device {
+    fn retire(&mut self, cause: Cause) {
+        self.pending = 0;
+        if let Some(id) = self.object.take() {
+            let _ = super::super::input::disconnect(id);
+        }
+        self.health = Health::Retiring(cause);
+    }
 }
 struct Host {
     regs: Region,
@@ -82,9 +114,12 @@ struct Host {
     event_index: u16,
     event_cycle: bool,
     devices: [Option<Device>; SLOTS],
-    blocked: [bool; PORTS],
+    blocked: [PortState; PORTS],
     controller: u32,
     reports: usize,
+    commands_usable: bool,
+    #[cfg(feature = "hal-xhci-transfer-fault-test")]
+    owner: usize,
 }
 fn write64(regs: &Region, offset: u64, value: u64) -> Result<(), Failure> {
     regs.write32(offset, value as u32)?;
@@ -123,17 +158,28 @@ impl Host {
         let Some(device) = self.devices.iter_mut().flatten().find(|d| d.slot == slot) else {
             return;
         };
-        if wire::endpoint(&event) != wire::dci(device.hid.endpoint).unwrap()
-            || wire::pointer(&event) != device.pending
-        {
+        if !matches!(device.health, Health::Active) {
             return;
         }
         let length = if device.hid.protocol == 1 { 8 } else { 3 };
-        let residual = wire::residual(&event);
-        if matches!(usb::completion_code(&event), 1 | 13)
-            && residual <= length
-            && length - residual == length
-        {
+        let outcome = transfer::classify(
+            transfer::Pending {
+                slot,
+                endpoint: wire::dci(device.hid.endpoint).unwrap(),
+                pointer: device.pending,
+                length,
+            },
+            &event,
+        );
+        match outcome {
+            Completion::Unrelated => return,
+            Completion::Failed(_) | Completion::InvalidResidual => {
+                device.retire(Cause::Transfer(outcome));
+                return;
+            }
+            _ => {}
+        }
+        if outcome == Completion::Report {
             self.reports = self.reports.saturating_add(1);
             let report = device.data.read_array::<8>(512);
             if device.hid.protocol == 1 {
@@ -156,18 +202,43 @@ impl Host {
                 );
             }
         }
-        if matches!(usb::completion_code(&event), 1 | 13) {
+        if matches!(outcome, Completion::Report | Completion::Short) {
             device.pending =
                 device
                     .interrupt
                     .put(device.data.address(512), length, 1 << 10 | 1 << 5);
-            let _ = self.regs.write32(
-                self.doorbell + u64::from(slot) * 4,
-                u32::from(wire::dci(device.hid.endpoint).unwrap()),
-            );
+            if self
+                .regs
+                .write32(
+                    self.doorbell + u64::from(slot) * 4,
+                    u32::from(wire::dci(device.hid.endpoint).unwrap()),
+                )
+                .is_err()
+            {
+                device.retire(Cause::Doorbell);
+            }
         }
     }
     fn command(&mut self, parameter: u64, kind: u8, slot: u8) -> Result<u8, Failure> {
+        if !self.commands_usable {
+            return Err(Failure::CommandUnavailable);
+        }
+        #[cfg(feature = "hal-xhci-transfer-fault-test")]
+        if kind == 10 && super::faults::refuse_disable(self.owner) {
+            return Err(Failure::Completion(5));
+        }
+        let result = self.run_command(parameter, kind, slot);
+        #[cfg(feature = "hal-xhci-transfer-fault-test")]
+        let result = super::faults::command_result(self.owner, kind, result);
+        let reusable = match &result {
+            Ok(_) => true,
+            Err(Failure::Completion(code)) => transfer::command_reusable(*code),
+            _ => false,
+        };
+        self.commands_usable &= reusable;
+        result
+    }
+    fn run_command(&mut self, parameter: u64, kind: u8, slot: u8) -> Result<u8, Failure> {
         let pointer = self
             .command
             .put(parameter, 0, u32::from(kind) << 10 | u32::from(slot) << 24);
@@ -278,6 +349,9 @@ impl Host {
         // Allocate before exposing pointers. On any later failure, disable the slot before release.
         let [input, output, control, interrupt, data] = allocate_pages::<5>()?;
         let mut device = Device {
+            health: Health::Active,
+            #[cfg(feature = "hal-xhci-transfer-fault-test")]
+            fault_ring: None,
             slot: 0,
             port,
             hid: wire::Hid {
@@ -347,6 +421,8 @@ impl Host {
                         .write(u64::from(device.slot) * 8, &0u64.to_le_bytes());
                     release(device);
                 } else {
+                    device.retire(Cause::Enumeration);
+                    device.health = Health::Quarantined(Cause::Enumeration);
                     self.devices[index] = Some(device);
                 }
                 Err(error)
@@ -440,6 +516,79 @@ impl Host {
             .write32(self.doorbell + u64::from(d.slot) * 4, u32::from(dci))?;
         Ok(())
     }
+    fn cleanup(&mut self, index: usize, console: &mut dyn HalConsole) -> Result<(), Failure> {
+        let d = self.devices[index].as_ref().ok_or(Failure::Unsupported)?;
+        let cause = match d.health {
+            Health::Retiring(c) | Health::Quarantined(c) => c,
+            Health::Active => return Err(Failure::Busy),
+        };
+        let (slot, port) = (d.slot, d.port);
+        if let Cause::Transfer(outcome) = cause {
+            let _ = writeln!(console, "usb: transfer fault port={port} slot={slot} outcome={outcome:?}; input retired, no rearm");
+        }
+        if let Err(error) = self.command(0, 10, slot) {
+            self.devices[index].as_mut().unwrap().health = Health::Quarantined(cause);
+            let _ = writeln!(console, "usb: slot quarantine port={port} slot={slot} cause={cause:?} cleanup={error:?}; DMA retained, explicit repair required");
+            return Err(error);
+        }
+        let d = self.devices[index].take().unwrap();
+        self.table.write(u64::from(slot) * 8, &0u64.to_le_bytes());
+        release(d);
+        self.blocked[usize::from(port - 1)] = if matches!(cause, Cause::Disconnect) {
+            PortState::Ready
+        } else {
+            PortState::Faulted
+        };
+        let _ = writeln!(
+            console,
+            "usb: device DMA ownership live pages={}",
+            crate::hal::dma::live_pages()
+        );
+        let _ = writeln!(
+            console,
+            "usb: disconnected port={port} slot={slot}, DMA released"
+        );
+        Ok(())
+    }
+    fn repair(&mut self, port: u8, console: &mut dyn HalConsole) -> Result<(), Failure> {
+        if port == 0 || port > self.ports {
+            return Err(Failure::Unsupported);
+        }
+        if !self.commands_usable {
+            return Err(Failure::CommandUnavailable);
+        }
+        if let Some(index) = self
+            .devices
+            .iter()
+            .position(|d| d.as_ref().is_some_and(|d| d.port == port))
+        {
+            if !matches!(
+                self.devices[index].as_ref().unwrap().health,
+                Health::Quarantined(_)
+            ) {
+                return Err(Failure::Busy);
+            }
+            self.cleanup(index, console)?;
+        } else if self.blocked[usize::from(port - 1)] != PortState::Faulted {
+            return Err(Failure::Busy);
+        }
+        if self
+            .regs
+            .read32(usb::port_register_offset(self.op as u8, port).unwrap())?
+            & 1
+            != 0
+        {
+            self.blocked[usize::from(port - 1)] = PortState::Bound;
+            let result = self.attach(port, console);
+            if result.is_err() {
+                self.blocked[usize::from(port - 1)] = PortState::Faulted;
+            }
+            result
+        } else {
+            self.blocked[usize::from(port - 1)] = PortState::Ready;
+            Ok(())
+        }
+    }
     fn scan(&mut self, console: &mut dyn HalConsole) -> Result<(), Failure> {
         for port in 1..=self.ports {
             let connected = self
@@ -448,37 +597,33 @@ impl Host {
                 & 1
                 != 0;
             if !connected {
-                self.blocked[usize::from(port - 1)] = false;
                 if let Some(index) = self
                     .devices
                     .iter()
                     .position(|d| d.as_ref().is_some_and(|d| d.port == port))
                 {
-                    let slot = self.devices[index].as_ref().unwrap().slot;
-                    let device = self.devices[index].as_mut().unwrap();
-                    device.pending = 0;
-                    // Input records contain no DMA references. Retire the public producer even
-                    // if hardware quiescence later fails; quarantined pages must stay pinned.
-                    if let Some(id) = device.object.take() {
-                        super::super::input::disconnect(id).expect("USB input producer lifetime");
+                    if matches!(self.devices[index].as_ref().unwrap().health, Health::Active) {
+                        self.devices[index]
+                            .as_mut()
+                            .unwrap()
+                            .retire(Cause::Disconnect);
                     }
-                    self.command(0, 10, slot)?;
-                    let d = self.devices[index].take().unwrap();
-                    self.table.write(u64::from(slot) * 8, &0u64.to_le_bytes());
-                    release(d);
-                    let _ = writeln!(
-                        console,
-                        "usb: device DMA ownership live pages={}",
-                        crate::hal::dma::live_pages()
-                    );
-                    let _ = writeln!(
-                        console,
-                        "usb: disconnected port={port} slot={slot}, DMA released"
-                    );
+                    if matches!(
+                        self.devices[index].as_ref().unwrap().health,
+                        Health::Retiring(_)
+                    ) {
+                        let _ = self.cleanup(index, console);
+                    }
                 }
-            } else if !self.blocked[usize::from(port - 1)] {
-                self.blocked[usize::from(port - 1)] = true;
+                if !self.devices.iter().flatten().any(|d| d.port == port) {
+                    self.blocked[usize::from(port - 1)] = PortState::Ready;
+                }
+            } else if self.blocked[usize::from(port - 1)] == PortState::Ready
+                && !self.devices.iter().flatten().any(|d| d.port == port)
+            {
+                self.blocked[usize::from(port - 1)] = PortState::Bound;
                 if let Err(error) = self.attach(port, console) {
+                    self.blocked[usize::from(port - 1)] = PortState::Faulted;
                     let _ = writeln!(
                         console,
                         "usb: port={port} enumeration refused: {error:?}; live DMA pages={}",
@@ -518,6 +663,10 @@ fn release(d: Device) {
         d.control.page.release();
         d.interrupt.page.release();
         d.data.release();
+        #[cfg(feature = "hal-xhci-transfer-fault-test")]
+        if let Some(ring) = d.fault_ring {
+            ring.page.release();
+        }
     }
 }
 pub(super) fn start(
@@ -563,9 +712,12 @@ pub(super) fn start(
         event_index: 0,
         event_cycle: true,
         devices: core::array::from_fn(|_| None),
-        blocked: [false; PORTS],
+        blocked: [PortState::Ready; PORTS],
         controller,
         reports: 0,
+        commands_usable: true,
+        #[cfg(feature = "hal-xhci-transfer-fault-test")]
+        owner: dev,
     });
     let host = guard.as_mut().unwrap();
     host.table
@@ -614,6 +766,14 @@ pub(super) fn poll_events(dev: usize, console: &mut dyn HalConsole) -> (bool, us
         match host.next_event() {
             Ok(Some(e)) => host.dispatch(e),
             _ => break,
+        }
+    }
+    for index in 0..SLOTS {
+        if host.devices[index]
+            .as_ref()
+            .is_some_and(|d| matches!(d.health, Health::Retiring(_)))
+        {
+            let _ = host.cleanup(index, console);
         }
     }
     if let Err(error) = host.scan(console) {
@@ -677,4 +837,92 @@ pub(super) fn interrupt_probe(dev: usize) -> Result<(), Failure> {
         .ok_or(Failure::NoController)?
         .command(0, 23, 0)?;
     finish_events(dev)
+}
+
+pub(super) fn repair_port(
+    dev: usize,
+    port: u8,
+    console: &mut dyn HalConsole,
+) -> Result<(), Failure> {
+    HOSTS[dev]
+        .lock()
+        .as_mut()
+        .ok_or(Failure::NoController)?
+        .repair(port, console)
+}
+
+#[cfg(feature = "hal-xhci-transfer-fault-test")]
+pub(super) fn quarantined_test(dev: usize, port: u8, stalled: bool, usable: bool) {
+    let host = HOSTS[dev].lock();
+    let host = host.as_ref().unwrap();
+    let d = host
+        .devices
+        .iter()
+        .flatten()
+        .find(|d| d.port == port)
+        .unwrap();
+    assert!(matches!(d.health, Health::Quarantined(_)));
+    assert_eq!(d.pending, 0);
+    assert!(d.object.is_none());
+    assert_eq!(host.commands_usable, usable);
+    if stalled {
+        assert_eq!(
+            d.output.read_array::<1>(host.context * 5)[0] & 7,
+            2,
+            "real hardware endpoint must be Halted"
+        );
+    }
+}
+#[cfg(feature = "hal-xhci-transfer-fault-test")]
+pub(super) fn stall_test(dev: usize, port: u8) -> Result<(), Failure> {
+    let mut guard = HOSTS[dev].lock();
+    let host = guard.as_mut().ok_or(Failure::NoController)?;
+    let index = host
+        .devices
+        .iter()
+        .position(|d| d.as_ref().is_some_and(|d| d.port == port))
+        .ok_or(Failure::Unsupported)?;
+    let mut d = host.devices[index].take().unwrap();
+    // Dedicated fault image only: submit to unsupported IN endpoint 2. QEMU's HID device
+    // returns STALL, and xHCI writes a real code-6 completion and Halted output context.
+    // Both endpoints' rings/buffers remain owned until Disable Slot or whole-controller stop.
+    let result = (|| {
+        d.input.write(0, &[0; 4096]);
+        let slot = d.output.read_array::<64>(0);
+        d.input.write(host.context, &slot[..host.context as usize]);
+        let value = u32::from_le_bytes(slot[..4].try_into().unwrap());
+        dword(&d.input, host.context, (value & !(31 << 27)) | 5 << 27);
+        dword(&d.input, 4, 1 | 1 << 5);
+        let old_ep = d.output.read_array::<64>(host.context * 3);
+        let ep = host.context * 6;
+        d.input.write(ep, &old_ep[..host.context as usize]);
+        let value = u32::from_le_bytes(old_ep[..4].try_into().unwrap());
+        dword(&d.input, ep, value & !7);
+        d.fault_ring = Some(Ring::from_page(Dma::new().ok_or(Failure::Memory)?));
+        let ring = d.fault_ring.as_mut().unwrap();
+        let pending = ring.put(d.data.address(512), 8, 1 << 10 | 1 << 5);
+        let cycle = ring
+            .page
+            .read_array::<1>(pending - ring.page.address(0) + 12)[0]
+            & 1;
+        d.input
+            .write(ep + 8, &(pending | u64::from(cycle)).to_le_bytes());
+        host.command(d.input.address(0), 12, d.slot)?;
+        d.hid.endpoint = 0x82;
+        d.pending = pending;
+        host.regs
+            .write32(host.doorbell + u64::from(d.slot) * 4, 5)?;
+        Ok(())
+    })();
+    host.devices[index] = Some(d);
+    result
+}
+
+#[cfg(feature = "hal-xhci-transfer-fault-test")]
+pub(super) fn retired_test(dev: usize, port: u8) {
+    let host = HOSTS[dev].lock();
+    let host = host.as_ref().unwrap();
+    assert!(!host.devices.iter().flatten().any(|d| d.port == port));
+    assert!(host.blocked[usize::from(port - 1)] == PortState::Faulted);
+    assert!(host.commands_usable);
 }

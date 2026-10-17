@@ -210,7 +210,8 @@ pub(crate) unsafe fn release_owned(owner: usize) {
 #[cfg(any(
     feature = "hal-driver-lifecycle-test",
     feature = "hal-xhci-lifecycle-test",
-    feature = "hal-xhci-recovery-test"
+    feature = "hal-xhci-recovery-test",
+    feature = "hal-xhci-transfer-fault-test"
 ))]
 pub(crate) fn live_mappings() -> usize {
     ARENA.lock().live()

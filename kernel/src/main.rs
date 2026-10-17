@@ -221,6 +221,10 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         loop {
             hal::xhci::poll_events(&mut console);
             hal::input::report_events(&mut console);
+            #[cfg(feature = "hal-xhci-transfer-fault-test")]
+            if memory_selftest_done {
+                hal::xhci::transfer_selftest(&mut console);
+            }
             #[cfg(feature = "hal-xhci-recovery-test")]
             if memory_selftest_done {
                 hal::xhci::recovery_selftest(&mut console);

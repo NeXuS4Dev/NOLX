@@ -54,7 +54,8 @@ M9 to the already implemented boot probes. Check items only with executable evid
       two controllers now have framework stop/restart/removal and failure-quarantine checks;
       checked xHCI failed-start/failed-stop recovery is now exercised with repeated refusal;
       MSI/MSI-X input delivery now has IRQ-only idle admission and explicit polling fallbacks;
-      hubs, SuperSpeed and general device/endpoint recovery remain open.
+      failed-transfer retirement, root-slot repair and command-timeout quarantine now have
+      executable checks; hubs, SuperSpeed and general endpoint-level recovery remain open.
 - [x] Per-controller MSI-X/MSI boot-HID delivery with IRQ-only idle admission, bounded event
       batches, safe stop/re-arm and explicit no-capability/PIC-only polling fallbacks (below).
 - [x] HID boot keyboard/mouse reports delivered to bounded kernel input event objects,
@@ -968,3 +969,63 @@ passed **797 tests** each; five negative proof-parser tests, host/native Clippy,
 validation (21 checks), boot/link/layout/generated/conformance checks (**369 assertions**) and the
 unsafe audit (**257 blocks, zero missing SAFETY comments**) also passed. The complete CI workflow
 is required on the pushed revision; these local results do not close the remaining M9 gates.
+
+
+## xHCI failed-transfer and root-slot repair checkpoint (2026-10-18)
+
+This extends the IRQ/lifecycle checkpoint to failed **device transfers**, not just controller
+start/stop faults. Ordinary interrupt-IN completion now matches event type, slot, endpoint and
+outstanding aligned TRB pointer before considering status or reading data; retired/foreign and
+Event Data completions cannot consume or rearm a Normal TRB. Complete successful reports decode;
+short reports skip stale trailing bytes and rearm; invalid residuals or unsuccessful completions
+retire the public producer to neutral EOF, clear pending work and never rearm the failed device.
+
+Idle cleanup tries Disable Slot once. Only its successful matching completion permits DCBAA
+pointer removal and release of device DMA. Failure retains every device page and a distinct
+quarantined state; subsequent timer ticks, IRQs or physical reconnection cannot silently retry or
+bind a second slot for that port. Other root ports/controllers remain serviceable. Kernel-only
+`repair_port_on` admits only the exact Started xHCI handle and a quarantined slot or safely retired
+faulted port, under framework callback exclusion. It retries checked cleanup, then resets and
+re-enumerates only the connected root device. Healthy ports, stale/unknown handles and invalid
+ports refuse. This is not a user syscall or Executive input-object binding.
+
+Command completions are tracked conservatively: missing/access-invalid/mismatched outcomes,
+reserved/unknown codes and stopped/aborted command-ring results forbid further command submission.
+No root repair can clear this poison. A checked controller stop/reset and explicit restart can;
+all unproven DMA remains pinned until that hardware proof. This prevents timeout retries from
+wrapping/reusing command pointers while older commands could still complete. A known unsuccessful
+terminal completion allows an explicit retry, but never authorizes DMA reclamation by itself.
+
+`hal-xhci-transfer-fault-test` / `check-xhci-lifecycle.py --mode transfer-fault --interrupts`:
+
+- Two physical PCI controllers, real keyboard/mouse reports and actual MSI-X. The dedicated fault
+  image configures an unsupported keyboard IN endpoint 2 on its **own additional DMA ring**;
+  QEMU's HID device returns STALL, xHCI writes code 6 and an actual Halted output context. No
+  completion bytes are fabricated. The normal image contains none of this fault configuration.
+- Hold `a`; two injected pre-submit Disable Slot refusals retain **17 pages**, including the test
+  endpoint's extra ring, and neutral EOF. Only new peer mouse input permits checked slot repair;
+  genuine Disable Slot returns the extra page and re-enumeration restores the ordinary 16-page
+  baseline, unchanged controller/MMIO ownership and peer identity. Fresh `c` is required.
+- Disconnect the held `c` keyboard. Hardware actually completes Disable Slot, but the test hook
+  deliberately withholds that result from the ownership layer (a lost-proof simulation, not a
+  claim that QEMU timed out). DMA stays pinned at 16, repeated repair/command reuse refuses, and
+  new peer input gates whole-controller stop/reset/restart: `16 -> 8 -> 11`. Reconnect must
+  publish a new input generation and deliver fresh `d` through interrupts.
+- A second actual STALL has no cleanup refusal: successful automatic Disable Slot releases six
+  device/test pages to the 11-page peer-plus-host baseline without binding a replacement. New
+  peer input then gates explicit repair of that empty faulted root port; fresh `e`, neutral EOF,
+  stale producer/reader/open/MMIO checks and final stop/removal require **DMA zero**.
+
+The CI USB lifecycle loop includes this mode on PC and Q35. Four portable tests cover affinity,
+short/malformed/error completions and command-ring reuse policy. This is bounded **root-slot**
+repair, not Reset Endpoint/Set TR Dequeue Pointer/USB clear-halt recovery, arbitrary control-transfer
+retries, asynchronous command cancellation, hubs or SuperSpeed. Those and the remaining firmware,
+Executive/input, other-driver recovery and power/S3/SMP gates remain open. **M9 is not complete.**
+
+
+Local checkpoint verification passed **39 distinct native fixtures**: the two new PC/Q35 transfer
+failure fixtures plus all 37 preceding interrupt/input/lifecycle/shutdown regressions. Both
+(overlapping) Rust host suites passed **801 tests** each; five negative IRQ-proof-parser tests,
+host/native Clippy, formatting, default image validation (21 checks), boot/link/layout/generated
+checks, **374 conformance assertions** and the unsafe audit (**257 blocks, zero missing SAFETY
+comments**) passed. CI is required on the pushed revision; this does not close the remaining M9 gates.

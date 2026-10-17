@@ -1107,3 +1107,14 @@ Checked stop detaches/masks/disables message delivery before DMA/MMIO release; l
 retired state. Supersedes the earlier polled-only limitation. MSI-X is bounded to validated BAR0
 window tables; vectors remain statically reserved. General USB/Executive bindings, dynamic IRQ
 resource ownership, other-driver failure recovery and the remaining firmware/power gates stay open.
+
+
+M9 xHCI transfer-failure checkpoint: exact slot/endpoint/TRB affinity gates report decoding and
+rearm. Failed transfers retire input to neutral EOF and stop producers; checked Disable Slot is
+required before device DMA release. Quarantined root slots and safely retired faulted ports admit
+explicit repair/re-enumeration, not timer-driven retries or duplicate bindings. Missing/aborted/
+stopped/invalid command outcomes poison command reuse until checked whole-controller stop/reset.
+PC/Q35 fixtures generate real STALL completions and Halted endpoint contexts, exercise cleanup
+refusal and successful reclamation, and deliberately withhold an actual Disable Slot completion
+proof to verify pinned DMA and reset-only recovery. Fresh keyboard and peer mouse input gate each
+repair. General endpoint reset/dequeue/clear-halt, hubs, SuperSpeed and remaining M9 gates stay open.

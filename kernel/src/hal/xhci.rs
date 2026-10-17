@@ -10,6 +10,8 @@
 //! Each framework handle owns its controller/MMIO/DMA; deferred service excludes lifecycle callbacks.
 //! Hubs, SuperSpeed, general HID and S3/Executive power integration remain open.
 
+#[cfg(feature = "hal-xhci-transfer-fault-test")]
+mod faults;
 mod irq;
 mod live;
 #[cfg(feature = "hal-xhci-recovery-test")]
@@ -54,6 +56,8 @@ pub enum Failure {
     NoController,
     /// Framework checkout or a retained hardware owner refuses this operation.
     Busy,
+    /// A command outcome was missing, stopped, aborted or invalid; full controller reset required.
+    CommandUnavailable,
     /// MSI/MSI-X setup, delivery proof or interrupt masking/readback failed.
     Interrupt,
     /// A DMA allocation could not be obtained.
@@ -431,4 +435,30 @@ pub fn handles_vector(vector: u8) -> bool {
 /// Bounded top half: acknowledge/mask and notify idle, with no allocation/ring or framework access.
 pub fn on_interrupt(vector: u8) {
     irq::interrupt(vector);
+}
+
+/// Explicitly retry a quarantined root slot; only checked Disable Slot permits DMA release.
+/// Re-enumerate if still connected. A poisoned command ring requires controller stop/restart.
+pub fn repair_port_on(dev: usize, port: u8, console: &mut dyn HalConsole) -> Result<(), Failure> {
+    driver_start::device_operation_handle(
+        dev,
+        "xhci",
+        || {
+            let result = live::repair_port(dev, port, console);
+            irq::finish(dev, false)?;
+            result
+        },
+        |error| {
+            if error == nolx_df_core::Error::Busy {
+                Failure::Busy
+            } else {
+                Failure::NoController
+            }
+        },
+    )
+}
+#[cfg(feature = "hal-xhci-transfer-fault-test")]
+/// Verify actual stalled transfer, pinned slots and explicit repair from idle context.
+pub fn transfer_selftest(console: &mut dyn HalConsole) {
+    faults::step(console);
 }

@@ -41,7 +41,7 @@ def boot(qemu, kernel, machine, mode, interrupts=False):
                     assert process.poll() is None, text
                     time.sleep(.005)
                 raise AssertionError(f'missing {marker}:\n{log.read_text(errors="replace")}')
-            initial = {'start-fault': 'xhci-test: start fault armed peer=', 'irq-start-fault': 'xhci-test: start fault armed peer=', 'recovery': 'xhci-recovery: armed startup quarantine'}
+            initial = {'transfer-fault': 'xhci-transfer: armed held keyboard', 'start-fault': 'xhci-test: start fault armed peer=', 'irq-start-fault': 'xhci-test: start fault armed peer=', 'recovery': 'xhci-recovery: armed startup quarantine'}
             wait(initial.get(mode, 'xhci-test: armed cycle=0'))
             connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             connection.settimeout(5)
@@ -63,6 +63,39 @@ def boot(qemu, kernel, machine, mode, interrupts=False):
                 execute('input-send-event', {'events': [{'type': 'key', 'data': {
                     'down': down, 'key': {'type': 'qcode', 'data': name}}}]})
 
+            if mode == 'transfer-fault':
+                def mouse(dx):
+                    execute('input-send-event', {'events': [
+                        {'type': 'rel', 'data': {'axis': 'x', 'value': dx}},
+                        {'type': 'btn', 'data': {'down': True, 'button': 'left'}}]})
+                key('a', True)
+                wait('repeated cleanup refusal retains 17 pages; require peer dx=7')
+                key('a', False)
+                mouse(7)
+                wait('slot repair completed, DMA/MMIO baselines and peer identity preserved; require c')
+                key('c', True)
+                wait('armed lost disconnect cleanup proof; remove keyboard')
+                execute('device_del', {'id': 'kbd'})
+                wait('lost Disable Slot proof pins 16 pages; command reuse/repair refused, neutral EOF; require peer dx=8')
+                key('c', False)
+                mouse(8)
+                wait('controller reset cleared poisoned ring, DMA 16 -> 8 -> 11; reconnect keyboard')
+                execute('device_add', {'driver': 'usb-kbd', 'bus': 'keys.0', 'id': 'kbd2'})
+                wait('reconnected fresh generation; require d')
+                key('d', True)
+                wait('automatic successful slot cleanup returned to 11 pages; require peer dx=9')
+                key('d', False)
+                mouse(9)
+                wait('faulted empty port explicitly repaired without controller reset; require e')
+                key('e', True)
+                text = wait('PASS actual stalled transfer, slot repair, lost command proof, live peer, fresh input, stale identities and final DMA 0')
+                assert text.count('outcome=Failed(6)') == 4, 'two actual STALLs, exactly two refused cleanup attempts and two successful cleanups required'
+                assert 'injected lost Disable Slot proof' in text, text
+                assert 'actual STALL code=6 and Halted endpoint' in text, text
+                if interrupts:
+                    verify_interrupts(text, reports=7, controllers=2, arms=3)
+                print(f'PASS: xhci-transfer-fault-{machine}: actual IRQ-delivered STALL/Halted endpoint, pinned slot cleanup/refusal, explicit repair and fresh input, lost Disable Slot proof poisons command reuse, checked controller reset, live peer, stale input and final DMA 0', flush=True)
+                return
             if mode == 'recovery':
                 def mouse(dx):
                     execute('input-send-event', {'events': [
@@ -138,7 +171,7 @@ def boot(qemu, kernel, machine, mode, interrupts=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kernel', type=Path, default=ROOT / 'build' / 'nolx.elf')
-    parser.add_argument('--mode', choices=('lifecycle', 'start-fault', 'stop-fault', 'recovery', 'irq-start-fault'), default='lifecycle')
+    parser.add_argument('--mode', choices=('lifecycle', 'start-fault', 'stop-fault', 'recovery', 'irq-start-fault', 'transfer-fault'), default='lifecycle')
     parser.add_argument('--interrupts', action='store_true', help='also require hal-xhci-irq-test; prove independent IRQ vectors and re-arming')
     args = parser.parse_args()
     for machine in ('pc', 'q35'):
