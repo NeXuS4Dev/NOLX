@@ -22,9 +22,11 @@ def main():
     args = parser.parse_args()
     (ROOT / 'build').mkdir(exist_ok=True)
     for machine in ['pc', 'q35']:
-        for levels in [0, 1, 2]:
+        for levels, memory in [(0,512),(1,512),(2,512),(0,3072 if machine == 'q35' else 1536)]:
             text = boot(args.qemu, args.kernel.resolve(), ['e1000', 'e1000', 'virtio-net', 'virtio-net'],
-                        machine, bridge=levels > 0, nested=levels == 2, storage=True)
+                        machine, bridge=levels > 0, nested=levels == 2, storage=True, memory=memory)
+            assert 'pci: resource policy=AML root _CRS;' in text, text
+            assert 'aml: evaluated PCI root resources authorized' in text, text
             injected = re.search(r'pci: resource fault injection: (\d+) BAR addresses and bridge forwarding cleared before native assignment', text)
             assert injected, text
             summary = re.search(r'pci: native resource assignment: (\d+) BARs, (\d+) bridge windows, readback verified', text)
@@ -39,15 +41,21 @@ def main():
                 start, end = int(start, 16), int(end, 16)
                 size = end - start
                 assert size > 0 and size & (size - 1) == 0 and start % size == 0, assignments
-                low, high = (0xc0000000, 0xf0000000) if kind == 'mem' else (0xc000, 0xf000)
-                assert low <= start < end <= high, assignments
+                if kind == 'mem':
+                    windows = [(int(a,16),int(b,16)) for a,b in re.findall(r'aml: PCI root Memory aperture (0x[0-9a-f]+)\.\.(0x[0-9a-f]+) flags=0x1',text)]
+                    assert any(a <= start < end <= b for a,b in windows), assignments
+                    assert 0x80000000 <= start < end <= 0xf0000000, assignments
+                    excluded = [(int(a,16),int(b,16)) for a,b in re.findall(r'pci: resource memory exclusion (0x[0-9a-f]+)\.\.(0x[0-9a-f]+)',text)]
+                    assert excluded and all(end <= a or b <= start for a,b in excluded), assignments
+                else:
+                    assert 0xc000 <= start < end <= 0xf000, assignments
                 assert all(end <= a or b <= start for a, b in ranges[kind]), assignments
                 ranges[kind].append((start, end))
                 if levels:
                     # All endpoints and inner bridges are behind the top-level bridge;
                     # its own BAR is correctly assigned on its parent/root bus.
                     assert bdf[:2] in {'00', '01', '02'}, assignments
-            print(f'PASS: native resources {machine}, bridge depth {levels}: {summary[1]} BARs / {summary[2]} windows, no aliases, 6 media and 4 wire endpoints verified', flush=True)
+            print(f'PASS: native resources {machine}, RAM {memory} MiB, bridge depth {levels}: {summary[1]} BARs / {summary[2]} windows, no aliases, 6 media and 4 wire endpoints verified', flush=True)
 
 
 if __name__ == '__main__':

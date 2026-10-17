@@ -15,6 +15,7 @@ const EBDA_MIN: u64 = 0x400;
 const EBDA_MAX: u64 = 0xA0000;
 const BIOS_SCAN_START: u64 = 0xE0000;
 const BIOS_SCAN_END: u64 = 0x100000;
+static RSDP_ADVERTISED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Firmware tables needed by the local-APIC and HPET HAL backends.
 pub struct PlatformTables {
@@ -127,6 +128,7 @@ fn find_rsdp_in(start: u64, end: u64) -> Option<Rsdp> {
         let bytes =
             unsafe { core::slice::from_raw_parts(phys::direct_ptr::<u8>(address), available) };
         if bytes.get(..8) == Some(&b"RSD PTR "[..]) {
+            RSDP_ADVERTISED.store(true, core::sync::atomic::Ordering::Release);
             if let Ok(rsdp) = Rsdp::parse(bytes) {
                 return Some(rsdp);
             }
@@ -210,6 +212,26 @@ const MAX_FIRMWARE_DEVICES: usize = 128;
 static FIRMWARE_DEVICES: crate::sync::IrqMutex<[Option<FirmwareDevice>; MAX_FIRMWARE_DEVICES]> =
     crate::sync::IrqMutex::new([None; MAX_FIRMWARE_DEVICES]);
 
+/// Root resource provenance: absent ACPI alone permits the old bounded board fallback.
+// Fixed boot metadata must survive interpreter teardown without heap ownership. The
+// bounded payload is only 392 bytes, not a large device catalog or DMA allocation.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Copy)]
+pub enum RootResourceState {
+    /// No ACPI platform exists.
+    Absent,
+    /// ACPI exists but its namespace or root resources cannot authorize allocation.
+    Refused,
+    /// One completely validated root template, independent of unrelated device-method errors.
+    Ready(power::root::RootResources),
+}
+static ROOT_RESOURCES: crate::sync::IrqMutex<RootResourceState> =
+    crate::sync::IrqMutex::new(RootResourceState::Absent);
+/// Snapshot evaluated root resource provenance before PCI allocation.
+pub fn root_resources() -> RootResourceState {
+    *ROOT_RESOURCES.lock()
+}
+
 static FIRMWARE_CATALOG_COMPLETE: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 /// Snapshot one evaluated firmware device without copying the whole catalog onto the stack.
@@ -230,12 +252,22 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
     use core::fmt::Write;
     use power::aml::Namespace;
     FIRMWARE_DEVICES.lock().fill(None);
+    *ROOT_RESOURCES.lock() = RootResourceState::Absent;
     FIRMWARE_CATALOG_COMPLETE.store(false, core::sync::atomic::Ordering::Release);
     let mut table_refusals = 0;
     let Some(platform) = discover() else {
-        let _ = writeln!(console, "aml: no ACPI platform; namespace unavailable");
+        if RSDP_ADVERTISED.load(core::sync::atomic::Ordering::Acquire) {
+            *ROOT_RESOURCES.lock() = RootResourceState::Refused;
+            let _ = writeln!(
+                console,
+                "aml: ACPI advertised but platform tables unavailable; allocation refused"
+            );
+        } else {
+            let _ = writeln!(console, "aml: no ACPI platform; namespace unavailable");
+        }
         return;
     };
+    *ROOT_RESOURCES.lock() = RootResourceState::Refused;
     let mut loaded = 0;
     let dsdt = platform
         .fadt
@@ -306,6 +338,40 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
         }
     } else {
         table_refusals += 1;
+    }
+    if table_refusals == 0 {
+        match power::root::discover(&namespace) {
+            Ok(resources) => {
+                for window in resources.iter() {
+                    let _ = writeln!(
+                        console,
+                        "aml: PCI root {:?} {} {:#x}..{:#x} flags={:#x}",
+                        window.space,
+                        if window.producer {
+                            "aperture"
+                        } else {
+                            "reservation"
+                        },
+                        window.start,
+                        window.end,
+                        window.memory_flags
+                    );
+                }
+                *ROOT_RESOURCES.lock() = RootResourceState::Ready(resources);
+                let _ = writeln!(console, "aml: evaluated PCI root resources authorized");
+            }
+            Err(error) => {
+                let _ = writeln!(
+                    console,
+                    "aml: PCI root resource authorization refused: {error:?}"
+                );
+            }
+        }
+    } else {
+        let _ = writeln!(
+            console,
+            "aml: PCI root resource authorization refused: incomplete table load"
+        );
     }
     let mut retained = 0;
     let mut ready = 0;

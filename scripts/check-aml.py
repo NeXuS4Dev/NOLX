@@ -64,13 +64,23 @@ def boot(qemu, kernel, machine, mode):
     platform = 'q35,sata=off' if machine == 'q35' else 'pc'
     if mode == 'no-acpi':
         platform += ',acpi=off'
-    command = [qemu, '-machine', platform, '-kernel', str(kernel), '-m', '512M',
+    elif mode == 'unmapped-tables':
+        platform += ',max-ram-below-4g=3G'
+    command = [qemu, '-machine', platform, '-kernel', str(kernel), '-m', '3072M' if mode == 'unmapped-tables' else '512M',
                '-nographic', '-no-reboot', '-net', 'none']
-    if mode in ['methods', 'bad-table']:
+    if mode in ['methods', 'bad-table', 'bad-segment', 'multiple-roots']:
         aml = ROOT / 'build' / f'{name}.aml'
-        # A late unknown opcode must roll back an earlier Device, not publish a prefix.
-        aml.write_bytes(fixture() if mode == 'methods' else table(
-            package([0x10], b'\\_SB_' + device(b'TMP0', method(b'_STA', bytes([0xa4, 1])))) + bytes([0xfe])))
+        if mode == 'methods':
+            payload = fixture()
+        elif mode == 'bad-table':
+            # A late unsupported opcode must roll back the earlier device.
+            payload = table(package([0x10], b'\\_SB_' + device(b'TMP0', method(b'_STA', bytes([0xa4, 1])))) + bytes([0xfe]))
+        elif mode == 'bad-segment':
+            # A missing name INSIDE an existing method is not an absent _SEG default.
+            payload = table(package([0x10], b'\\' + bytes([0x2e]) + b'_SB_PCI0' + method(b'_SEG', bytes([0xa4]) + b'MISS')))
+        else:
+            payload = table(package([0x10], b'\\_SB_' + device(b'PCI1', bytes([8]) + b'_HID' + bytes([0x0c,0x41,0xd0,0x0a,3]))))
+        aml.write_bytes(payload)
         command += ['-acpitable', f'file={aml}']
     with log.open('w') as output:
         process = subprocess.Popen(command, cwd=ROOT, stdout=output, stderr=subprocess.STDOUT)
@@ -96,6 +106,11 @@ def boot(qemu, kernel, machine, mode):
     assert 'in use 0 -> 0 bytes, integrity ok' in text, text
     if mode == 'no-acpi':
         assert 'aml: no ACPI platform; namespace unavailable' in text, text
+        assert 'pci: resource policy=no-ACPI bounded board fallback' in text, text
+    elif mode == 'unmapped-tables':
+        assert 'aml: ACPI advertised but platform tables unavailable; allocation refused' in text, text
+        assert 'pci: native resource profile unavailable; firmware assignments retained' in text, text
+        assert 'pci: resource policy=' not in text, text
     else:
         assert 'aml: DSDT loaded atomically' in text, text
         # These are the machine's real SeaBIOS methods, not the injected SSDT.
@@ -115,6 +130,18 @@ def boot(qemu, kernel, machine, mode):
         if mode == 'bad-table':
             assert 'aml: SSDT refused atomically: Unsupported(254)' in text, text
             assert 'TMP0 _STA=' not in text, text
+        if mode in ['bad-table','bad-segment','multiple-roots']:
+            assert 'aml: PCI root resource authorization refused:' in text, text
+            assert 'pci: native resource profile unavailable; firmware assignments retained' in text, text
+            assert 'pci: resource policy=' not in text, text
+            if mode == 'bad-segment':
+                assert 'aml: SSDT loaded atomically' in text, text
+                assert 'PCI root resource authorization refused: Aml(Missing)' in text, text
+            if mode == 'multiple-roots':
+                assert 'PCI root resource authorization refused: Topology' in text, text
+        else:
+            assert 'aml: evaluated PCI root resources authorized' in text, text
+            assert 'pci: resource policy=AML root _CRS;' in text, text
     print(f'PASS: {name}: firmware AML evaluated, status/resource refusals preserved, no heap leak', flush=True)
 
 
@@ -128,7 +155,9 @@ def main():
     for machine in ['pc', 'q35']:
         boot(args.qemu, args.test_kernel.resolve(), machine, 'methods')
         boot(args.qemu, args.kernel.resolve(), machine, 'absent')
-        boot(args.qemu, args.kernel.resolve(), machine, 'bad-table')
+        for mode in ['bad-table','bad-segment','multiple-roots']:
+            boot(args.qemu, args.kernel.resolve(), machine, mode)
+    boot(args.qemu, args.kernel.resolve(), 'pc', 'unmapped-tables')
     boot(args.qemu, args.kernel.resolve(), 'pc', 'no-acpi')
 
 

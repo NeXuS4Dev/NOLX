@@ -319,3 +319,44 @@ fn command_disable_refusal_never_writes_bar_assignments() {
     assert!(fault.machine.writes[before..].is_empty());
     assert_eq!(fault.read_u32(bdf(0, 3, 0), 0x10), 0);
 }
+
+#[test]
+fn disjoint_firmware_apertures_never_allocate_across_holes_or_double_own_overlap() {
+    let mut pool = Pool::from_ranges(&[
+        Range::new(0xc0000000, 0x100000).unwrap(),
+        Range::new(0x80000000, 0x100000).unwrap(),
+    ])
+    .unwrap();
+    assert_eq!(pool.allocate(0x100000).unwrap().start, 0x80000000);
+    assert_eq!(pool.allocate(0x100000).unwrap().start, 0xc0000000);
+    assert_eq!(pool.allocate(4096), Err(Error::NoSpace));
+    assert!(matches!(
+        Pool::from_ranges(&[
+            Range::new(0x80000000, 0x200000).unwrap(),
+            Range::new(0x80100000, 0x100000).unwrap()
+        ]),
+        Err(Error::Overlap)
+    ));
+    assert!(matches!(
+        Pool::from_ranges(&[Range { start: 1, end: 1 }]),
+        Err(Error::InvalidRange)
+    ));
+    assert_eq!(
+        Pool::from_ranges(&[]).unwrap().allocate(4096),
+        Err(Error::NoSpace)
+    );
+}
+#[test]
+fn reservations_split_firmware_windows_without_joining_separate_ranges() {
+    let mut pool = Pool::from_ranges(&[
+        Range::new(0x80000000, 0x1000000).unwrap(),
+        Range::new(0xc0000000, 0x1000000).unwrap(),
+    ])
+    .unwrap();
+    pool.reserve(Range::new(0x80000000, 0x1000000).unwrap())
+        .unwrap();
+    pool.reserve(Range::new(0xc0000000, 0x400000).unwrap())
+        .unwrap();
+    assert_eq!(pool.allocate(0x400000).unwrap().start, 0xc0400000);
+    assert_eq!(pool.allocate(0x1000000), Err(Error::NoSpace));
+}

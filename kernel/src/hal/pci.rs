@@ -359,6 +359,8 @@ fn probe_ecam(console: &mut dyn HalConsole, inventory: &nolx_pci_core::Inventory
     );
 }
 
+static RESOURCE_MEMORY_MAP: IrqMutex<super::multiboot::MemoryMap> =
+    IrqMutex::new(super::multiboot::MemoryMap::empty());
 static RESOURCE_HOLE_CLEAR: AtomicBool = AtomicBool::new(false);
 static BAR_CACHE: IrqMutex<[Option<(Bdf, BarSet)>; nolx_pci_core::MAX_FUNCTIONS]> =
     IrqMutex::new([None; nolx_pci_core::MAX_FUNCTIONS]);
@@ -366,6 +368,7 @@ static BAR_CACHE: IrqMutex<[Option<(Bdf, BarSet)>; nolx_pci_core::MAX_FUNCTIONS]
 /// Validate the bounded PC/Q35 profile's memory aperture against the complete loader map.
 /// Any described memory (including reserved firmware regions) blocks this profile.
 pub(crate) fn record_boot_memory(map: &super::multiboot::MemoryMap) {
+    *RESOURCE_MEMORY_MAP.lock() = *map;
     let clear = !map.regions().is_empty()
         && map.truncated() == 0
         && map.regions().iter().all(|r| {
@@ -389,7 +392,8 @@ fn resource_test_target(info: &nolx_pci_core::FunctionInfo) -> bool {
 
 /// Repair missing boot BARs/windows on the bounded PC/Q35 segment-zero profile, before drivers.
 /// Firmware bus numbering remains required. Unknown host bridges/ambiguous memory maps retain
-/// firmware resources without guessing an aperture. This is not evaluated ACPI `_CRS` policy.
+/// firmware resources without guessing an aperture. Valid ACPI roots supply apertures;
+/// only absent ACPI permits the previous board fallback. Refused roots never downgrade.
 pub fn prepare_resources(console: &mut dyn HalConsole) {
     use nolx_pci_core::resources::{self, Pool, Range};
     let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
@@ -401,11 +405,107 @@ pub fn prepare_resources(console: &mut dyn HalConsole) {
         },
         0,
     );
-    let supported =
-        [0x1237_8086, 0x29c0_8086].contains(&host) && RESOURCE_HOLE_CLEAR.load(Ordering::Acquire);
-    if supported {
-        let mut memory = Pool::new(Range::new(0xc000_0000, 0x3000_0000).unwrap()).unwrap();
-        let mut io = Pool::new(Range::new(0xc000, 0x3000).unwrap()).unwrap();
+    let boot_map = *RESOURCE_MEMORY_MAP.lock();
+    let complete_map = !boot_map.regions().is_empty()
+        && boot_map.truncated() == 0
+        && boot_map
+            .regions()
+            .iter()
+            .all(|r| r.base.checked_add(r.length).is_some());
+    let board = [0x1237_8086, 0x29c0_8086].contains(&host);
+    let root = super::acpi::root_resources();
+    let pools = if board && complete_map {
+        match root {
+            super::acpi::RootResourceState::Ready(root) => {
+                use nolx_power_core::root::Space;
+                let ranges = |space, low, high| {
+                    root.iter()
+                        .filter(|w| {
+                            w.producer
+                                && w.space == space
+                                && (space != Space::Memory
+                                    || (w.memory_flags & 1 != 0 && w.memory_flags & 6 != 6))
+                        })
+                        .filter_map(|w| {
+                            let range = Range {
+                                start: w.start.max(low),
+                                end: w.end.min(high),
+                            };
+                            (range.start < range.end).then_some(range)
+                        })
+                        .collect::<alloc::vec::Vec<_>>()
+                };
+                // Retain a conservative chipset ceiling/legacy-I/O exclusion policy, but
+                // no address outside the evaluated producer windows can be allocated.
+                let mut memory = Pool::from_ranges(&ranges(
+                    Space::Memory,
+                    crate::mm::phys::DIRECT_MAP_BYTES,
+                    0xf000_0000,
+                ))
+                .unwrap();
+                let mut io = Pool::from_ranges(&ranges(Space::Io, 0xc000, 0xf000)).unwrap();
+                for window in root.iter().filter(|w| !w.producer) {
+                    let range = Range {
+                        start: window.start,
+                        end: window.end,
+                    };
+                    match window.space {
+                        Space::Memory => memory.reserve(range).unwrap(),
+                        Space::Io => io.reserve(range).unwrap(),
+                        Space::Bus => {}
+                    }
+                }
+                for region in boot_map.regions().iter().filter(|r| r.length != 0) {
+                    let _ = writeln!(
+                        console,
+                        "pci: resource memory exclusion {:#x}..{:#x}",
+                        region.base,
+                        region.base + region.length
+                    );
+                    memory
+                        .reserve(Range::new(region.base, region.length).unwrap())
+                        .unwrap();
+                }
+                for index in 0..128 {
+                    if let Some(device) = super::acpi::firmware_device(index) {
+                        if let Some(resources) = device.resources {
+                            for resource in resources.iter() {
+                                match resource {
+                                    nolx_power_core::Resource::Memory { base, length } => {
+                                        memory.reserve(Range::new(base, length).unwrap()).unwrap()
+                                    }
+                                    nolx_power_core::Resource::Io { base, length } => io
+                                        .reserve(
+                                            Range::new(u64::from(base), u64::from(length)).unwrap(),
+                                        )
+                                        .unwrap(),
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                let _=writeln!(console,"pci: resource policy=AML root _CRS; memory 0x80000000..0xf0000000, I/O 0xc000..0xf000, complete loader map excluded");
+                Some((memory, io))
+            }
+            super::acpi::RootResourceState::Absent
+                if RESOURCE_HOLE_CLEAR.load(Ordering::Acquire) =>
+            {
+                let _ = writeln!(
+                    console,
+                    "pci: resource policy=no-ACPI bounded board fallback"
+                );
+                Some((
+                    Pool::new(Range::new(0xc000_0000, 0x3000_0000).unwrap()).unwrap(),
+                    Pool::new(Range::new(0xc000, 0x3000).unwrap()).unwrap(),
+                ))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if let Some((mut memory, mut io)) = pools {
         for mapping in MAPPINGS.lock().iter().flatten() {
             let (base, bytes) = mapping.window.physical_range();
             memory.reserve(Range::new(base, bytes).unwrap()).unwrap();

@@ -18,9 +18,10 @@ M9 to the already implemented boot probes. Check items only with executable evid
       than relying on the legacy PCI Interrupt Line value.
 - [x] Assign missing memory32/memory64/I/O BARs and closed type-1 memory/I/O bridge
       windows on the bounded PC/Q35 segment-zero profile, with readback and rollback.
-- [ ] Generalize resource assignment using evaluated host-bridge `_CRS`: root apertures,
-      bus-number allocation, existing-resource rebalancing, nonzero segments and 64-bit
-      prefetchable windows rather than the bounded board profile.
+- [x] Consume evaluated host-bridge `_CRS` producer apertures for bounded PC/Q35 missing
+      BAR/window assignment; subtract complete loader maps, consumers and mapped windows.
+- [ ] Generalize beyond one segment-zero root: bus-number allocation, existing-resource
+      rebalancing, translated/variable windows and 64-bit prefetchable forwarding.
 - [x] Bind multiple virtio-blk/AHCI/NVMe PCI controllers on segment zero, including
       secondary buses, with per-controller queues, interrupts and independent lifecycle.
 - [x] Multi-adapter native e1000/virtio-net contexts with exact-handle public RX/TX.
@@ -68,8 +69,10 @@ M9 to the already implemented boot probes. Check items only with executable evid
 - [x] Publish a status-gated firmware-device/resource catalog without retaining interpreter heap.
 - [ ] Complete hardware-field/operation-region providers and the remaining AML operations
       needed by PCI host-bridge/link-device methods; do not mistake a partial catalog for discovery.
-- [ ] Consume evaluated host-bridge/link resources for native device binding and PCI routing,
-      replacing the bounded board apertures and firmware Interrupt Line fallback.
+- [x] Replace the fixed memory allocation aperture with evaluated root `_CRS` windows on
+      the bounded PC/Q35 profile; ACPI refusal never selects the no-ACPI board fallback.
+- [ ] Consume evaluated link resources for PCI interrupt routing and complete general
+      device binding, replacing the firmware Interrupt Line fallback.
 - [ ] Device power-state/quiesce policy and S3 save/resume path.
 - [x] ACPI S5 entry with QMP observing actual guest shutdown and QEMU exit zero, not a
       printed hypothetical word. The unsafe primitive requires prior system quiescence;
@@ -536,3 +539,45 @@ DualName/MultiName paths stay in their specified scope, even when no local prefi
 This rule was cross-checked against ACPICA `AcpiNsLookup` in
 [`nsaccess.c`](https://github.com/acpica/acpica/blob/master/source/components/namespace/nsaccess.c)
 and added to the existing namespace-shadowing regression test.
+
+
+## Evaluated PCI root aperture consumption (2026-10-17)
+
+`nolx-power-core::root` separately decodes Word/DWord/QWord address spaces with producer/
+consumer ownership retained, plus fixed I/O/memory reservations. Fixed positive decode,
+zero granularity/translation, exact bounds/length, supported flags and complete EndTag/checksum
+are required; unknown descriptors, resource-source extensions and overlapping producer windows
+refuse the entire template. No lossy device-resource record is promoted into allocation authority.
+Discovery evaluates PNP0A03/PNP0A08 `_HID`, usable `_STA`, optional `_SEG`/`_BBN` and `_CRS`;
+only one segment-zero/base-bus-zero root with a full 0..255 produced bus range is supported.
+A failing segment/base method never gets the absent-member zero default. Incomplete table loads
+and ambiguous roots prohibit allocation, while unrelated device-status errors remain explicit.
+
+The native planner now consumes multiple evaluated root windows rather than inventing its
+old 0xc0000000..0xf0000000 memory aperture. It subtracts every loader-map region regardless
+of RAM/reserved type, root consumer descriptors, decoded firmware-device reservations, MCFG
+and other live MMIO mappings, chipset PM/SMBus ports, and existing BARs/bridge reservations.
+The verified board IDs are still required. Allocations remain above the cached 2 GiB direct
+map and below 0xf0000000, with conservative I/O limits 0xc000..0xf000; read-only/prefetch-only
+memory apertures do not authorize ordinary MMIO. Native testing caught initial allocations
+below the direct map, which MMIO correctly refused as conflicting cache aliases; the planner
+now excludes that entire mapping, not just populated RAM. Missing ACPI alone retains the old
+bounded fallback. An advertised but invalid/unmapped ACPI root never downgrades to it.
+
+Local Rust 1.88.0 / QEMU 11.0.2 verification: ten new root tests and two disjoint-pool tests;
+57 power-core and 48 PCI-core tests passed. Eight cleared-firmware-assignment fixtures cover
+PC/Q35 root/one/two nested bridges at 512 MiB, PC at 1536 MiB and Q35 at 3072 MiB: 21/22/23
+BARs, 0/2/4 windows, six real disks, four NIC endpoints, 288 host-captured ARP exchanges and
+zero pinned DMA. Every assigned memory range is checked against the evaluated producer
+apertures and every loader-map exclusion. The AML harness now also checks failing `_SEG`,
+multiple roots, incomplete SSDT loads, true no-ACPI fallback and an advertised ACPI root beyond
+the direct-map limit (PC with 3 GiB); it has twelve fixtures in total. Dedicated CI results must
+be recorded separately from these local runs.
+
+Still bounded, not general PCI resource discovery: no new bus numbering, rebalancing, arbitrary
+roots/nonzero segments, translated windows, ROM BARs or native allocations above 4 GiB.
+Firmware tables beyond 2 GiB are refused rather than mapped; PC with 3 GiB demonstrates this
+negative path, while Q35's default relocated-memory layout remains supported. IRQ link methods,
+operation-region providers, xHCI/HID, failed-lifecycle recovery and global device power/S3 remain
+open. Existing physical PCI bindings are retained when allocation is refused; this is not a new
+general `_STA`-based driver-binding or power policy. **M9 remains incomplete. No PR opened.**

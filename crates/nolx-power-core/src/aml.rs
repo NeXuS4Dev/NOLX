@@ -695,6 +695,22 @@ impl<'a> Namespace<'a> {
         let mut steps = MAX_STEPS;
         self.object(index, args, 0, &mut steps)
     }
+    /// Evaluate a device member, distinguishing an absent member from failure inside one.
+    pub fn device_value(&self, path: &Path, member: [u8; 4]) -> Result<Option<Value>, Error> {
+        if !self
+            .objects
+            .iter()
+            .any(|o| &o.path == path && matches!(o.kind, Kind::Device))
+        {
+            return Err(Error::Type);
+        }
+        check_segment(&member)?;
+        let member = path.child(member)?;
+        if !self.objects.iter().any(|o| o.path == member) {
+            return Ok(None);
+        }
+        self.evaluate(&member, &[]).map(Some)
+    }
     /// Evaluate a device's `_STA`, using the ACPI default 0x0f only when the member
     /// genuinely does not exist. A failing method is never treated as an absent member.
     /// The boolean distinguishes the default from a computed result.

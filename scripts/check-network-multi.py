@@ -19,14 +19,16 @@ packets = WIRE['packets']
 GATEWAY = WIRE['GATEWAY']
 
 
-def boot(qemu, kernel, names, machine, bridge=False, shared=False, storage=False, nested=False):
+def boot(qemu, kernel, names, machine, bridge=False, shared=False, storage=False, nested=False, memory=512):
     label = ('mixed' if len(set(names)) > 1 else names[0]) + '-' + machine
     label += '-bridge' if bridge else '-shared' if shared else ''
     label += '-nested' if nested else ''
     label += '-storage' if storage else ''
+    if memory != 512:
+        label += f'-ram{memory}'
     log = ROOT / 'build' / f'net-multi-{label}.log'
     command = [qemu, '-machine', 'q35,sata=off' if machine == 'q35' else machine,
-               '-kernel', str(kernel), '-m', '512M', '-nographic', '-no-reboot', '-net', 'none']
+               '-kernel', str(kernel), '-m', f'{memory}M', '-nographic', '-no-reboot', '-net', 'none']
     if bridge:
         model = 'pcie-pci-bridge' if machine == 'q35' else 'pci-bridge'
         command += ['-device', model + ',id=nics' + (',chassis_nr=1' if machine == 'pc' else '')]

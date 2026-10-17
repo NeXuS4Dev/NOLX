@@ -69,6 +69,18 @@ impl Pool {
         }
         Ok(Self { free: vec![range] })
     }
+    /// Start with disjoint validated intervals. Overlap is an error, never double allocation.
+    pub fn from_ranges(ranges: &[Range]) -> Result<Self, Error> {
+        let mut free = ranges.to_vec();
+        free.sort_unstable_by_key(|r| r.start);
+        if free.iter().any(|r| r.start >= r.end) {
+            return Err(Error::InvalidRange);
+        }
+        if free.windows(2).any(|p| p[0].end > p[1].start) {
+            return Err(Error::Overlap);
+        }
+        Ok(Self { free })
+    }
     /// Remove an interval, including any overlap with earlier reservations.
     pub fn reserve(&mut self, reserved: Range) -> Result<(), Error> {
         if reserved.start >= reserved.end {

@@ -1038,3 +1038,15 @@ AML checkpoint CI [39022540188](https://github.com/NeXuS4Dev/NOLX/actions/runs/3
 on `353f5d0` passed all sixteen jobs, including seven firmware AML boots and the complete
 existing hardware-path regression suite. Host tests passed 743 tests in each overlapping
 command; PWR-012/013/014 are `tested-T1` and PWR-015 `tested-T2`. M9 remains in progress.
+
+
+**Root resource consumption checkpoint (2026-10-17):** evaluated host-bridge `_CRS` now
+supplies producer apertures to the missing-BAR/type-1-window allocator, rather than only a
+fixed board memory hole. Multiple disjoint memory/I/O ranges retain ownership and subtract
+loader-map and consumer reservations. Native allocations avoid the cached direct map and
+remain in the existing bounded PC/Q35 segment-zero policy. Only truly absent ACPI permits
+board fallback; incomplete, ambiguous or unreadable advertised roots refuse allocation.
+Eight resource fixtures cover nested bridges and RAM layouts with six media/four NICs and
+288 captured exchanges; twelve AML fixtures cover both acceptance and refusal. General
+root/topology/64-bit allocation and PCI link routing, USB/HID, recovery and global power/S3
+are still open; see the detailed M9 completion gate for limits and CI evidence.

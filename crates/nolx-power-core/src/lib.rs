@@ -19,6 +19,7 @@
 #![deny(missing_docs)]
 
 pub mod aml;
+pub mod root;
 
 /// `_STA` bit 0: the device is present.
 pub const STA_PRESENT: u32 = 1 << 0;
