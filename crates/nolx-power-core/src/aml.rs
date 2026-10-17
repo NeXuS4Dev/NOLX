@@ -252,7 +252,8 @@ impl<'a> Reader<'a> {
         Ok(Name {
             path,
             tail: count,
-            search,
+            // ACPI parent search applies only to a single unprefixed NameSeg.
+            search: search && count == 1,
         })
     }
 }
@@ -363,14 +364,6 @@ impl<'a> Namespace<'a> {
         loop {
             if let Some(index) = self.objects.iter().position(|o| o.path == path) {
                 return self.alias_target(index);
-            }
-            // Once the first segment resolves, a missing descendant is an error: do not
-            // silently bind a same-named subtree in a more distant enclosing scope.
-            if name.tail > 1 {
-                let prefix = &path.0[..path.0.len() - name.tail + 1];
-                if self.objects.iter().any(|o| o.path.0 == prefix) {
-                    return Err(Error::Missing);
-                }
             }
             if !name.search || path.0.len() <= name.tail {
                 return Err(Error::Missing);

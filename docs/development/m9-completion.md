@@ -531,3 +531,8 @@ pass. Historical 743-test CI evidence above is unchanged; the width correction i
 separately on the subsequent revision.
 Local verification of the width correction passed 745 tests in each overlapping host command,
 host and compatible-feature kernel Clippy, and all seven native firmware AML fixtures.
+Namespace name lookup also restricts parent search to single unprefixed NameSeg references;
+DualName/MultiName paths stay in their specified scope, even when no local prefix exists.
+This rule was cross-checked against ACPICA `AcpiNsLookup` in
+[`nsaccess.c`](https://github.com/acpica/acpica/blob/master/source/components/namespace/nsaccess.c)
+and added to the existing namespace-shadowing regression test.

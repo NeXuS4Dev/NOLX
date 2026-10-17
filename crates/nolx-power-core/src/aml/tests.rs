@@ -351,12 +351,17 @@ fn a_nearer_multisegment_prefix_does_not_fall_through_to_another_subtree() {
     );
     let bytes = [
         root,
-        pkg(&[0x5b, 0x82], [b"DEV0".to_vec(), child, method].concat()),
+        pkg(
+            &[0x5b, 0x82],
+            [b"DEV0".to_vec(), child, method.clone()].concat(),
+        ),
+        pkg(&[0x5b, 0x82], [b"DEV1".to_vec(), method].concat()),
     ]
     .concat();
     let mut n = Namespace::new();
     n.load(&bytes).unwrap();
     assert_eq!(n.device_status(&path("\\DEV0")), Err(Error::Missing));
+    assert_eq!(n.device_status(&path("\\DEV1")), Err(Error::Missing));
 }
 #[test]
 fn aliases_preserve_method_arity_and_original_definition_scope() {
