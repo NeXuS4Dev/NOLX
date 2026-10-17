@@ -116,7 +116,7 @@ fn check_segment(s: &[u8; 4]) -> Result<(), Error> {
 /// A pure AML result. References inside packages are retained as namespace paths.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Value {
-    /// Unsigned 64-bit AML integer (wrapping arithmetic).
+    /// Unsigned AML integer, stored in u64 and masked to the selected 32/64-bit model.
     Integer(u64),
     /// Owned resource/data bytes.
     Buffer(Vec<u8>),
@@ -262,6 +262,7 @@ impl<'a> Reader<'a> {
 pub struct Namespace<'a> {
     objects: Vec<Object<'a>>,
     value_bytes: usize,
+    integer_mask: u64,
 }
 impl Default for Namespace<'_> {
     fn default() -> Self {
@@ -281,7 +282,17 @@ impl<'a> Namespace<'a> {
         Self {
             objects,
             value_bytes: 0,
+            integer_mask: u64::MAX,
         }
+    }
+    /// Select the integer model inherited by every table: DSDT revision 0/1 uses 32 bits,
+    /// revision 2 and later uses 64 bits. `new()` defaults to the latter model.
+    pub fn with_dsdt_revision(revision: u8) -> Self {
+        let mut namespace = Self::new();
+        if revision < 2 {
+            namespace.integer_mask = u64::from(u32::MAX);
+        }
+        namespace
     }
     /// Number of retained objects.
     pub fn len(&self) -> usize {
@@ -538,7 +549,7 @@ impl<'a> Namespace<'a> {
         match op {
             0 => Ok(Value::Integer(0)),
             1 => Ok(Value::Integer(1)),
-            0xff => Ok(Value::Integer(u64::MAX)),
+            0xff => Ok(Value::Integer(self.integer_mask)),
             0x0a | 0x0b | 0x0c | 0x0e => {
                 let n = match op {
                     0x0a => 1,
@@ -550,7 +561,8 @@ impl<'a> Namespace<'a> {
                 Ok(Value::Integer(
                     b.iter()
                         .enumerate()
-                        .fold(0, |v, (i, b)| v | (u64::from(*b) << (i * 8))),
+                        .fold(0, |v, (i, b)| v | (u64::from(*b) << (i * 8)))
+                        & self.integer_mask,
                 ))
             }
             0x0d => {
@@ -631,6 +643,7 @@ impl<'a> Namespace<'a> {
             return Err(Error::Limit);
         }
         match value {
+            Value::Integer(value) => Ok(Value::Integer(value & self.integer_mask)),
             Value::DeferredReference(NameReference(name)) => {
                 let index = self.resolve(&name)?;
                 self.constant(
@@ -764,8 +777,10 @@ impl<'a> Namespace<'a> {
                 let mut frame = Frame {
                     scope: o.path.parent(),
                     locals: core::array::from_fn(|_| Value::Uninitialized),
-                    args: core::array::from_fn(|i| {
-                        args.get(i).cloned().unwrap_or(Value::Uninitialized)
+                    args: core::array::from_fn(|i| match args.get(i) {
+                        Some(Value::Integer(value)) => Value::Integer(value & self.integer_mask),
+                        Some(value) => value.clone(),
+                        None => Value::Uninitialized,
                     }),
                 };
                 self.execute(&mut Reader::new(body), &mut frame, depth + 1, steps)?
@@ -844,7 +859,7 @@ impl<'a> Namespace<'a> {
                     0x95 => truth(a < b),
                     _ => return Err(Error::Unsupported(u16::from(op))),
                 };
-                let v = Value::Integer(value);
+                let v = Value::Integer(value & self.integer_mask);
                 if op < 0x90 {
                     target(r, f, v.clone())?;
                 }

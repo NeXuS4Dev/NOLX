@@ -495,7 +495,7 @@ reported refusal; `firmware_device(index)` copies one record, not the whole arra
 boot stack. Native testing caught and fixed an earlier whole-array stack-overflow regression.
 Interpreter allocations are released before existing memory/heap tests; the catalog owns no heap.
 
-Local Rust 1.88.0 / QEMU 11.0.2 verification: 45 power-core tests (29 new), seven AML boots via
+Local Rust 1.88.0 / QEMU 11.0.2 verification: 47 power-core tests (31 new), seven AML boots via
 `scripts/check-aml.py`: PC/Q35 computed status and three resources; disabled, unsupported,
 malformed, looping and recursive methods; ordinary no-injected-SSDT boots; transactional
 late-opcode table refusal; and a no-ACPI VM. Both machine profiles load their real SeaBIOS DSDT
@@ -522,3 +522,12 @@ The six cleared-BAR/nested-bridge fixtures and three S5 fixtures were rerun loca
 integration and passed, including 216 host-captured ARP exchanges and zero pinned DMA.
 No general firmware routing, USB/HID, failed-lifecycle recovery or global power/S3 gate is closed
 by these results. **M9 is still not complete. No PR was opened.**
+
+The integer model is selected from the DSDT revision and inherited by all SSDTs: revision 1
+uses 32-bit constants, arguments, logical results and wrapping arithmetic; revision 2+ uses
+64 bits. Native evaluation refuses a missing/invalid DSDT instead of guessing an SSDT integer
+model. Two additional host tests cover width boundaries and overflow; 47 power-core tests now
+pass. Historical 743-test CI evidence above is unchanged; the width correction is verified
+separately on the subsequent revision.
+Local verification of the width correction passed 745 tests in each overlapping host command,
+host and compatible-feature kernel Clippy, and all seven native firmware AML fixtures.

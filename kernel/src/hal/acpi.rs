@@ -232,37 +232,36 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
     FIRMWARE_DEVICES.lock().fill(None);
     FIRMWARE_CATALOG_COMPLETE.store(false, core::sync::atomic::Ordering::Release);
     let mut table_refusals = 0;
-    let mut namespace = Namespace::new();
     let Some(platform) = discover() else {
         let _ = writeln!(console, "aml: no ACPI platform; namespace unavailable");
         return;
     };
     let mut loaded = 0;
-    if let Some(dsdt) = platform
+    let dsdt = platform
         .fadt
         .and_then(|f| read_sdt_at(f.dsdt))
-        .filter(|s| s.signature() == *b"DSDT")
-    {
-        match namespace.load(&dsdt.bytes()[36..]) {
-            Ok(()) => {
-                loaded += 1;
-                let _ = writeln!(
-                    console,
-                    "aml: DSDT loaded atomically, {} objects",
-                    namespace.len()
-                );
-            }
-            Err(error) => {
-                table_refusals += 1;
-                let _ = writeln!(console, "aml: DSDT refused atomically: {error:?}");
-            }
-        }
-    } else {
-        table_refusals += 1;
+        .filter(|s| s.signature() == *b"DSDT");
+    let Some(dsdt) = dsdt else {
         let _ = writeln!(
             console,
             "aml: DSDT unavailable or invalid; namespace incomplete"
         );
+        return;
+    };
+    let mut namespace = Namespace::with_dsdt_revision(dsdt.bytes()[8]);
+    match namespace.load(&dsdt.bytes()[36..]) {
+        Ok(()) => {
+            loaded += 1;
+            let _ = writeln!(
+                console,
+                "aml: DSDT loaded atomically, {} objects",
+                namespace.len()
+            );
+        }
+        Err(error) => {
+            table_refusals += 1;
+            let _ = writeln!(console, "aml: DSDT refused atomically: {error:?}");
+        }
     }
     if let Some(rsdp) = find_rsdp() {
         let address = if platform.used_xsdt {

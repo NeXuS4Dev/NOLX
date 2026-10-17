@@ -453,3 +453,47 @@ fn cyclic_forward_data_references_and_aliases_fail_with_a_depth_limit() {
     n.load(&aliases).unwrap();
     assert_eq!(n.evaluate(&path("\\BASE"), &[]), Err(Error::Limit));
 }
+
+#[test]
+fn dsdt_revision_controls_wrapping_ones_logical_and_shift_width_for_all_tables() {
+    let bytes = [
+        method(b"WRAP", 0, &[0xa4, 0x72, 0x0c, 255, 255, 255, 255, 1, 0]),
+        method(b"ONES", 0, &[0xa4, 0xff]),
+        method(b"TRUE", 0, &[0xa4, 0x92, 0]),
+        method(b"SHFT", 0, &[0xa4, 0x7a, 0xff, 0x0a, 32, 0]),
+    ]
+    .concat();
+    for (revision, wrap, ones, shift) in [
+        (1, 0, u32::MAX as u64, 0),
+        (2, 1u64 << 32, u64::MAX, u32::MAX as u64),
+    ] {
+        let mut n = Namespace::with_dsdt_revision(revision);
+        n.load(&bytes).unwrap();
+        for (name, value) in [
+            ("\\WRAP", wrap),
+            ("\\ONES", ones),
+            ("\\TRUE", ones),
+            ("\\SHFT", shift),
+        ] {
+            assert_eq!(n.evaluate(&path(name), &[]), Ok(Value::Integer(value)));
+        }
+        let ssdt = method(b"ARGS", 1, &[0xa4, 0x68]);
+        n.load(&ssdt).unwrap();
+        assert_eq!(
+            n.evaluate(&path("\\ARGS"), &[Value::Integer(u64::MAX)]),
+            Ok(Value::Integer(ones))
+        );
+    }
+}
+#[test]
+fn revision_one_qword_literals_cannot_invent_high_bits_in_status_or_buffer_sizes() {
+    let bytes = [
+        vec![8],
+        b"WIDE".to_vec(),
+        vec![0x0e, 15, 0, 0, 0, 1, 0, 0, 0],
+    ]
+    .concat();
+    let mut n = Namespace::with_dsdt_revision(1);
+    n.load(&bytes).unwrap();
+    assert_eq!(n.evaluate(&path("\\WIDE"), &[]), Ok(Value::Integer(15)));
+}
