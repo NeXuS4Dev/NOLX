@@ -1146,3 +1146,17 @@ and final stop/removal leaves DMA zero; shutdown freeze still refuses recovery. 
 withhold/refuse proof, not claims of naturally failing QEMU reset/config writes. Storage/virtio-net
 failed-start recovery, dynamic interrupt ownership, runtime TX-timeout policy and other M9 gates
 remain open. M9 is not complete.
+
+
+M9 virtio-net recovery checkpoint: retain common configuration and all loose/complete queue owners
+before fallible queue programming. Startup rollback and explicit recovery require observed virtio
+reset, PCI bus-master/INTx exclusion and disabled/masked MSI-X (MSI also disabled if present).
+Detach the software source first: retired vectors and unused primary aliases cannot advance
+counters or touch queues. Failure pins all four DMA pages and owned register/table mappings;
+failed records refuse transport/removal/restart until checked recovery. Four PC/Q35 fixtures swap
+modern-only/transitional targets and peers, exercise partial allocation/RX-queue exposure/post-ARP
+startup failures, repeated failed cleanup and withheld PCI proof, then prove eleven fresh tagged
+wire exchanges, independent RX/TX IRQ progress, stale mapping refusal and final DMA zero. Faults
+are deliberate proof refusals, not naturally failing emulated hardware. The recovery allowlist is
+xHCI/e1000/virtio-net only; storage failure recovery, dynamic IRQ allocation, runtime TX-timeout
+policy, general USB/Executive/PCI/firmware and S3 gates remain open. M9 is not complete.

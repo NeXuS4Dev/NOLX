@@ -706,10 +706,14 @@ jobs:
         run: make kernel KERNEL_FEATURES=hal-e1000-recovery-test 2>&1 | tee -a /tmp/job.log
       - name: Verify partial startup, failed-stop quarantine and fresh captured peer traffic
         run: python3 scripts/check-e1000-recovery.py 2>&1 | tee -a /tmp/job.log
+      - name: Build checked virtio-net failed-controller recovery fixture
+        run: make kernel KERNEL_FEATURES=hal-virtio-net-recovery-test 2>&1 | tee -a /tmp/job.log
+      - name: Verify modern/transitional partial startup and MSI-X recovery with captured traffic
+        run: python3 scripts/check-virtio-net-recovery.py 2>&1 | tee -a /tmp/job.log
       - name: Annotate serial logs on failure
         if: failure()
         run: |
-          for log in build/net-multi-*.log build/e1000-recovery-*.log; do
+          for log in build/net-multi-*.log build/e1000-recovery-*.log build/virtio-net-recovery-*.log; do
             tr -cd '\11\12\40-\176' < "$log" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
           done
       - uses: ./.github/actions/report-failure

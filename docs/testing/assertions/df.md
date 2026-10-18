@@ -34,3 +34,6 @@ DF-014 | NOLX M9 Checked failed-device recovery: only an open-admission Failed r
 
 
 DF-015 | NOLX M9 Native failed-device admission is audited per driver: xHCI/e1000 only; retained e1000 owners forbid failed removal/restart/public I/O, safe cleanup alone allows Failed to Stopped and MMIO release, explicit restart preserves peer and freeze cannot thaw | tested-T2 | scripts/check-e1000-recovery.py; PC/Q35 failed/unknown/healthy-peer recovery refusal, repeated quarantine, exact DMA/MMIO reclamation and frozen recovery/transport refusal; existing check-driver-lifecycle.py synthetic unaudited recovery still refuses without another stop callback
+
+
+DF-016 | NOLX M9 Audited virtio-net failed-device recovery refuses failed public I/O/removal/ordinary restart, retries only checked cleanup, releases DMA/MMIO only on success, preserves Started peers and never thaws shutdown freeze | tested-T2 | scripts/check-virtio-net-recovery.py; four PC/Q35 modern/transitional fixtures, repeated failure refusal, explicit Failed to Stopped recovery, independent peer traffic, stale MMIO, frozen recovery/transport and final DMA zero; unrelated driver recovery remains refused

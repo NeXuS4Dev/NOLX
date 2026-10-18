@@ -34,6 +34,8 @@ M9 to the already implemented boot probes. Check items only with executable evid
       and shared-root-preserving unmap on healthy stop (BSP only).
 - [x] Checked e1000 partial-start/failed-stop recovery with independently retained MMIO/DMA,
       per-source shared-INTx detachment, explicit reset/PCI proof and fresh captured peer traffic.
+- [x] Checked modern/transitional virtio-net partial-start/failed-stop recovery, with
+      retained queue/MMIO ownership, MSI-X detachment/readback and captured peer traffic.
 - [ ] Complete failed-start/failed-stop recovery for remaining native drivers and general
       interrupt-resource reclamation;
       remaining segment binding and firmware routing are tracked separately above.
@@ -1131,3 +1133,57 @@ recovery fixtures. Both overlapping Rust host suites passed **808 tests** each. 
 formatting, boot/Multiboot, 31 layout tests, generated files, five IRQ-proof-parser tests, **384
 conformance assertions** and the unsafe audit (**259 blocks**, zero missing SAFETY comments) passed.
 CI is still required on the pushed revision. This checkpoint does not close the remaining M9 gates.
+
+
+## Audited virtio-net failed-controller recovery checkpoint (2026-10-18)
+
+The modern transport retains its common configuration mapping immediately and keeps loose pages
+and partially configured RX/TX queues in per-handle owners. Queue shape/notify checks precede moves
+out of the loose-page array; each queue is retained before fallible address/vector/enable writes.
+Complete queues move into a NIC only through an infallible step. Fallible DRIVER_OK, notify, TX/ARP
+and IRQ validation runs in a scope that always restores the NIC owner before returning an error.
+No failed start can strand hardware-visible pages in inaccessible local variables.
+
+PCI memory access initially excludes bus mastering and INTx. Checked stop detaches `LIVE` first,
+blocks legacy INTx, disables MSI, disables and function-masks MSI-X, waits for virtio status reset
+readback zero, disables/reads PCI bus mastering, and revalidates message exclusion. Only then are
+complete/partial/loose DMA owners released and MMIO retired. Every failure preserves them. The
+interrupt handler refuses both detached sources and unassigned primary-vector aliases before
+counting or touching a queue. Reservations remain static; this is not a dynamic IRQ allocator.
+
+Framework recovery is now audited for xHCI/e1000/virtio-net only. Failed virtio-net public MAC/TX/RX,
+ordinary restart and removal refuse even when a peer is Started. Explicit recovery retries checked
+cleanup, moves only that record to Stopped, frees exactly four pages/five mappings and rejects the
+old Region; restart remains explicit. Permanent shutdown freeze still refuses recovery/transport.
+
+`hal-virtio-net-recovery-test` plus `scripts/check-virtio-net-recovery.py` passed four fixtures:
+PC/Q35, each with modern-only/transitional target/peer roles swapped. They cover:
+
+- A post-ARP startup failure after real RX/TX completions, failed automatic rollback and repeated
+  failed explicit cleanup: both adapters' eight total DMA pages and mappings remain owned.
+- Failed stop/repeated refusal with bus mastering still active; the peer retains its own RX/TX
+  interrupts and exchanges fresh traffic while the target's source is detached.
+- An allocation refusal after three actual pages, with checked rollback to the peer-only four-page
+  baseline. RX-queue-only startup failure instead pins all four target pages: native readbacks
+  verify RX enabled, TX disabled and DRIVER_OK clear, with PCI bus mastering still off.
+- Deliberately withheld otherwise valid PCI proof after real reset/master-disable: all pages stay
+  pinned until a later checked recovery. This is not a real QEMU reset or PCI-write failure.
+- Late software-dispatched RX/TX vectors and unused primary aliases cannot change retired/unassigned
+  counters. Eleven unique public ARP exchanges per fixture require selected RX IRQ progress, while
+  TX completion waits require that adapter's TX IRQ. Independent pcaps verify exact request/reply
+  bytes, nonce IPs and absence of cross-adapter requests. Final checked stop/removal yields DMA zero,
+  allocator audit succeeds, and frozen recovery/transport refuses.
+
+Two portable tests cover every status byte and combination of PCI DMA, INTx and message-exclusion
+proof, plus unrelated PCI bits. Scope remains BSP/segment-zero modern virtio transport, including
+transitional PCI devices exposing it. Legacy-only virtio, multiqueue/offload, runtime timeout policy,
+storage failed-start recovery, general USB/Executive/firmware/PCI and device-power/S3 remain open.
+M9 is not complete; no PR is created.
+
+Local verification passed **78 distinct native fixtures**: all 68 preceding USB/input, hardware
+lifecycle/shutdown, multi-adapter/firmware-routing and e1000 recovery fixtures, six standalone
+virtio-net wire/absent/no-APIC profiles, and four new recovery profiles. Both overlapping Rust
+suites passed **810 tests** each. Host/native Clippy, formatting, boot/Multiboot, 31 layout tests,
+generated files, five IRQ-proof-parser tests, **389 conformance assertions** and the unsafe audit
+(**260 blocks**, zero missing SAFETY comments) passed. Exact-revision CI is required after push;
+these checks do not close the remaining M9 gates.

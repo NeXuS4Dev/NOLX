@@ -237,6 +237,10 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
             if memory_selftest_done {
                 hal::e1000::recovery_selftest(&mut console);
             }
+            #[cfg(feature = "hal-virtio-net-recovery-test")]
+            if memory_selftest_done {
+                hal::virtio_net::recovery_selftest(&mut console);
+            }
             #[cfg(feature = "hal-input-object-test")]
             hal::input::hardware_selftest(&mut console);
             if !round_robin_reported && exec::round_robin_complete() {

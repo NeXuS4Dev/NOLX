@@ -1,6 +1,9 @@
 //! Modern virtio-net split RX/TX queues, MSI-X completions and bounded frame delivery.
 //! The gateway ARP exchange is a boot self-test peer, not a general IP configuration.
 
+#[cfg(feature = "hal-virtio-net-recovery-test")]
+mod recovery;
+
 use super::{
     dma::Dma,
     driver_start::{self, Log},
@@ -11,7 +14,7 @@ use crate::{
     mm::mmio::{self, Region},
     sync::IrqMutex,
 };
-use core::sync::atomic::{fence, AtomicUsize, Ordering};
+use core::sync::atomic::{fence, AtomicBool, AtomicUsize, Ordering};
 use nolx_df_core::{DeviceId, Dispatch, Driver, Match};
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
@@ -32,6 +35,22 @@ static TX_INTERRUPTS: [AtomicUsize; driver_start::DEVICES] =
     [const { AtomicUsize::new(0) }; driver_start::DEVICES];
 static DEVICE: [IrqMutex<Option<Nic>>; driver_start::DEVICES] =
     [const { IrqMutex::new(None) }; driver_start::DEVICES];
+static LIVE: [AtomicBool; driver_start::DEVICES] =
+    [const { AtomicBool::new(false) }; driver_start::DEVICES];
+static COMMON: [IrqMutex<Option<Region>>; driver_start::DEVICES] =
+    [const { IrqMutex::new(None) }; driver_start::DEVICES];
+struct Partial {
+    pages: [Option<Dma>; 4],
+    rx: Option<Queue>,
+    tx: Option<Queue>,
+}
+static PARTIAL: [IrqMutex<Partial>; driver_start::DEVICES] = [const {
+    IrqMutex::new(Partial {
+        pages: [const { None }; 4],
+        rx: None,
+        tx: None,
+    })
+}; driver_start::DEVICES];
 type StartRecord = Option<(Log, Result<(), Failure>)>;
 static START: [IrqMutex<StartRecord>; driver_start::DEVICES] =
     [const { IrqMutex::new(None) }; driver_start::DEVICES];
@@ -166,39 +185,147 @@ pub fn probe(console: &mut dyn HalConsole) {
     }
 }
 fn start(dev: usize) -> bool {
+    #[cfg(feature = "hal-virtio-net-recovery-test")]
+    recovery::claim(dev);
     let mut log = Log::new();
-    let outcome = bring_up(dev, &mut log).map(|nic| {
-        *DEVICE[dev].lock() = Some(nic);
-    });
+    let outcome = bring_up(dev, &mut log);
     let good = outcome.is_ok();
+    if !good && stop(dev) {
+        // SAFETY: rollback reset acknowledged, PCI DMA/messages disabled and source
+        // detached; callback checkout excludes any concurrent transport or lifecycle entry.
+        unsafe {
+            mmio::release_owned(dev);
+        }
+    }
     *START[dev].lock() = Some((log, outcome));
     good
 }
+fn pci_access(bdf: Bdf, dma: bool) -> Result<(), Failure> {
+    let command = ConfigAccess.read_u32(bdf, 4) & 0xffff;
+    let wanted = (command | 2 | (1 << 10)) & !4 | if dma { 4 } else { 0 };
+    ConfigAccess.write_u32(bdf, 4, wanted);
+    if ConfigAccess.read_u32(bdf, 4) & (6 | (1 << 10)) != wanted & (6 | (1 << 10)) {
+        return Err(Failure::Configuration);
+    }
+    Ok(())
+}
+fn disable_messages(bdf: Bdf) -> Result<(), Failure> {
+    use nolx_pci_core::msi;
+    let caps = nolx_pci_core::capabilities(&mut ConfigAccess, bdf);
+    if caps.truncated {
+        return Err(Failure::Configuration);
+    }
+    for cap in caps.as_slice() {
+        let (clear, set) = match cap.id {
+            msi::CAP_MSI => (1u32 << 16, 0),
+            msi::CAP_MSI_X => (1u32 << 31, 1u32 << 30),
+            _ => continue,
+        };
+        let old = ConfigAccess.read_u32(bdf, cap.offset);
+        ConfigAccess.write_u32(bdf, cap.offset, (old & !clear) | set);
+        if ConfigAccess.read_u32(bdf, cap.offset) & (clear | set) != set {
+            return Err(Failure::Configuration);
+        }
+    }
+    Ok(())
+}
+fn messages_disabled(bdf: Bdf) -> bool {
+    use nolx_pci_core::msi;
+    let caps = nolx_pci_core::capabilities(&mut ConfigAccess, bdf);
+    !caps.truncated
+        && caps.as_slice().iter().all(|cap| {
+            let control = ConfigAccess.read_u32(bdf, cap.offset) >> 16;
+            match cap.id {
+                msi::CAP_MSI => control & 1 == 0,
+                msi::CAP_MSI_X => control & 0xc000 == 0x4000,
+                _ => true,
+            }
+        })
+}
 fn stop(dev: usize) -> bool {
-    // Reset can wait for the device. Never hold the IRQ state lock across that wait.
-    let Some(nic) = DEVICE[dev].lock().take() else {
-        return true;
+    LIVE[dev].store(false, Ordering::Release);
+    let Some(bdf) = *BDFS[dev].lock() else {
+        return false;
     };
-    let result = nic
-        .common
-        .write8(u64::from(common::DEVICE_STATUS), 0)
-        .map_err(Failure::Access)
-        .and_then(|()| poll(|| Ok(nic.common.read8(u64::from(common::DEVICE_STATUS))? == 0)));
+    let common = *COMMON[dev].lock();
+    let result = (|| -> Result<(), Failure> {
+        let command = ConfigAccess.read_u32(bdf, 4) & 0xffff;
+        ConfigAccess.write_u32(bdf, 4, command | (1 << 10));
+        if ConfigAccess.read_u32(bdf, 4) & (1 << 10) == 0 {
+            return Err(Failure::Configuration);
+        }
+        disable_messages(bdf)?;
+        #[cfg(feature = "hal-virtio-net-recovery-test")]
+        if recovery::refuse_stop(dev) {
+            return Err(Failure::Timeout);
+        }
+        if let Some(common) = common {
+            common.write8(u64::from(common::DEVICE_STATUS), 0)?;
+            poll(|| Ok(common.read8(u64::from(common::DEVICE_STATUS))? == 0))?;
+        } else if !empty_dma(dev) {
+            return Err(Failure::Busy);
+        }
+        pci_access(bdf, false)?;
+        let status = if let Some(common) = common {
+            common.read8(u64::from(common::DEVICE_STATUS))?
+        } else {
+            0
+        };
+        if !net::stop_proven(
+            status,
+            ConfigAccess.read_u32(bdf, 4),
+            messages_disabled(bdf),
+        ) {
+            return Err(Failure::Configuration);
+        }
+        #[cfg(feature = "hal-virtio-net-recovery-test")]
+        if recovery::withhold_pci_proof(dev) {
+            return Err(Failure::Configuration);
+        }
+        Ok(())
+    })();
     if result.is_err() {
-        *DEVICE[dev].lock() = Some(nic);
         return false;
     }
-    let command = ConfigAccess.read_u32(nic.bdf, 4) & 0xffff;
-    ConfigAccess.write_u32(nic.bdf, 4, command & !4);
-    // SAFETY: virtio reset completed and PCI bus mastering is disabled; IRQ state owns no rings.
+    let nic = DEVICE[dev].lock().take();
+    let partial = core::mem::replace(
+        &mut *PARTIAL[dev].lock(),
+        Partial {
+            pages: [const { None }; 4],
+            rx: None,
+            tx: None,
+        },
+    );
+    // SAFETY: virtio reset reads zero, PCI bus mastering and messages read disabled,
+    // LIVE is false and callback checkout excludes users. Unique complete/partial owners
+    // are moved out only after proof; no descriptor or buffer is released on failure.
     unsafe {
-        nic.rx.ring.release();
-        nic.rx.data.release();
-        nic.tx.ring.release();
-        nic.tx.data.release();
+        for page in partial.pages.into_iter().flatten() {
+            page.release();
+        }
+        for queue in [partial.rx, partial.tx].into_iter().flatten() {
+            queue.ring.release();
+            queue.data.release();
+        }
+        if let Some(nic) = nic {
+            nic.rx.ring.release();
+            nic.rx.data.release();
+            nic.tx.ring.release();
+            nic.tx.data.release();
+        }
     }
-
+    *COMMON[dev].lock() = None;
     true
+}
+fn empty_dma(dev: usize) -> bool {
+    let p = PARTIAL[dev].lock();
+    p.pages.iter().all(Option::is_none)
+        && p.rx.is_none()
+        && p.tx.is_none()
+        && DEVICE[dev].lock().is_none()
+}
+pub(crate) fn removable(dev: usize) -> bool {
+    COMMON[dev].lock().is_none() && !LIVE[dev].load(Ordering::Acquire) && empty_dma(dev)
 }
 
 fn map(dev: usize, bars: &BarSet, cap: VirtioCap) -> Result<Region, Failure> {
@@ -253,38 +380,36 @@ struct Queue {
     used: u16,
 }
 impl Queue {
-    fn new(common: &Region, notify: Region, cap: VirtioCap, number: u16) -> Result<Self, Failure> {
+    fn new(
+        common: &Region,
+        notify: Region,
+        cap: VirtioCap,
+        number: u16,
+        pages: &mut [Option<Dma>; 4],
+    ) -> Result<Self, Failure> {
         common.write16(u64::from(common::QUEUE_SELECT), number)?;
         let size = common.read16(u64::from(common::QUEUE_SIZE))?.min(8);
         if size == 0 {
             return Err(Failure::Configuration);
         }
         let layout = virtio::split_layout(size)?;
-        common.write16(u64::from(common::QUEUE_SIZE), size)?;
-        let ring = Dma::new().ok_or(Failure::Memory)?;
-        let data = Dma::new().ok_or(Failure::Memory)?;
-        write64(common, common::QUEUE_DESC, ring.address(0))?;
-        write64(
-            common,
-            common::QUEUE_DRIVER,
-            ring.address(layout.avail_offset),
-        )?;
-        write64(
-            common,
-            common::QUEUE_DEVICE,
-            ring.address(layout.used_offset),
-        )?;
-        common.write16(u64::from(common::QUEUE_MSIX_VECTOR), number)?;
-        if common.read16(u64::from(common::QUEUE_MSIX_VECTOR))? != number {
+        let offset = common.read16(u64::from(common::QUEUE_NOTIFY_OFF))?;
+        let notify_at = virtio::notify_address(&cap, offset)
+            .checked_sub(u64::from(cap.offset))
+            .ok_or(Failure::Configuration)?;
+        if notify_at & 1 != 0
+            || notify_at
+                .checked_add(2)
+                .is_none_or(|end| end > notify.bytes())
+        {
             return Err(Failure::Configuration);
         }
-        let offset = common.read16(u64::from(common::QUEUE_NOTIFY_OFF))?;
-        let notify_at = virtio::notify_address(&cap, offset) - u64::from(cap.offset);
-        common.write16(u64::from(common::QUEUE_ENABLE), 1)?;
+        let index = usize::from(number) * 2;
+        // All fallible shape/notify accesses precede the infallible ownership move.
         Ok(Self {
             number,
-            ring,
-            data,
+            ring: pages[index].take().unwrap(),
+            data: pages[index + 1].take().unwrap(),
             layout,
             notify,
             notify_at,
@@ -292,6 +417,30 @@ impl Queue {
             available: 0,
             used: 0,
         })
+    }
+    fn configure(&self, common: &Region) -> Result<(), Failure> {
+        common.write16(u64::from(common::QUEUE_SELECT), self.number)?;
+        common.write16(u64::from(common::QUEUE_SIZE), self.size)?;
+        write64(common, common::QUEUE_DESC, self.ring.address(0))?;
+        write64(
+            common,
+            common::QUEUE_DRIVER,
+            self.ring.address(self.layout.avail_offset),
+        )?;
+        write64(
+            common,
+            common::QUEUE_DEVICE,
+            self.ring.address(self.layout.used_offset),
+        )?;
+        common.write16(u64::from(common::QUEUE_MSIX_VECTOR), self.number)?;
+        if common.read16(u64::from(common::QUEUE_MSIX_VECTOR))? != self.number {
+            return Err(Failure::Configuration);
+        }
+        common.write16(u64::from(common::QUEUE_ENABLE), 1)?;
+        if common.read16(u64::from(common::QUEUE_ENABLE))? != 1 {
+            return Err(Failure::Configuration);
+        }
+        Ok(())
     }
     fn publish(&mut self, len: u32, receive: bool) -> Result<(), Failure> {
         self.ring.write(
@@ -336,8 +485,6 @@ impl Queue {
 struct Nic {
     owner: usize,
     mac: [u8; 6],
-    bdf: Bdf,
-    common: Region,
     rx: Queue,
     tx: Queue,
     frames: FrameQueue<8>,
@@ -372,17 +519,21 @@ impl Nic {
     }
 }
 
-fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<Nic, Failure> {
+fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<(), Failure> {
     let bdf = BDFS[dev].lock().ok_or(Failure::NoDevice)?;
     let (rx_vector, tx_vector) = vectors(dev);
     if !super::apic::is_enabled() {
         return Err(Failure::Interrupt);
     }
-    let command = ConfigAccess.read_u32(bdf, 4) & 0xffff;
-    ConfigAccess.write_u32(bdf, 4, command | 6);
+    if !removable(dev) {
+        return Err(Failure::Busy);
+    }
+    pci_access(bdf, false)?;
+    disable_messages(bdf)?;
     let bars = nolx_pci_core::read_bars(&mut ConfigAccess, bdf);
     let caps = virtio::discover(&mut ConfigAccess, bdf);
     let common = map(dev, &bars, caps.common.ok_or(Failure::Configuration)?)?;
+    *COMMON[dev].lock() = Some(common);
     let cap = caps.notify.ok_or(Failure::Configuration)?;
     let notify = map(dev, &bars, cap)?;
     let config = map(dev, &bars, caps.device.ok_or(Failure::Configuration)?)?;
@@ -417,42 +568,70 @@ fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<Nic, Failure> {
     }
     msix::enable(dev, bdf, &bars, 0, rx_vector)?;
     msix::enable(dev, bdf, &bars, 1, tx_vector)?;
-    let rx = Queue::new(&common, notify, cap, 0)?;
-    let tx = Queue::new(&common, notify, cap, 1)?;
+    for index in 0..4 {
+        #[cfg(feature = "hal-virtio-net-recovery-test")]
+        if index == 3 && recovery::fail(dev, 1) {
+            return Err(Failure::Memory);
+        }
+        PARTIAL[dev].lock().pages[index] = Some(Dma::new().ok_or(Failure::Memory)?);
+    }
+    {
+        let mut partial = PARTIAL[dev].lock();
+        partial.rx = Some(Queue::new(&common, notify, cap, 0, &mut partial.pages)?);
+        partial.rx.as_ref().unwrap().configure(&common)?;
+    }
+    #[cfg(feature = "hal-virtio-net-recovery-test")]
+    if recovery::fail(dev, 2) {
+        return Err(Failure::Timeout);
+    }
+    pci_access(bdf, true)?;
+    let (rx, tx) = {
+        let mut partial = PARTIAL[dev].lock();
+        partial.tx = Some(Queue::new(&common, notify, cap, 1, &mut partial.pages)?);
+        partial.tx.as_ref().unwrap().configure(&common)?;
+        (partial.rx.take().unwrap(), partial.tx.take().unwrap())
+    };
     let mut nic = Nic {
         owner: dev,
         mac,
-        bdf,
-        common,
         rx,
         tx,
         frames: FrameQueue::new(),
     };
-    common.write8(
-        u64::from(common::DEVICE_STATUS),
-        virtio::INIT_STATUS_SEQUENCE[3],
-    )?;
-    nic.rx.publish(2048, true)?;
-    for exchange in 1..=2 {
-        let expected = RX_INTERRUPTS[dev].load(Ordering::Acquire) + 1;
-        nic.transmit(&arp::request(mac, [10, 0, 2, 15], [10, 0, 2, 2]))?;
-        poll(|| Ok(nic.rx.completed()))?;
-        if msix::wait_for_interrupts(&RX_INTERRUPTS[dev], expected) < expected {
-            return Err(Failure::Interrupt);
+    LIVE[dev].store(true, Ordering::Release);
+    let result = (|| {
+        common.write8(
+            u64::from(common::DEVICE_STATUS),
+            virtio::INIT_STATUS_SEQUENCE[3],
+        )?;
+        nic.rx.publish(2048, true)?;
+        for exchange in 1..=2 {
+            let expected = RX_INTERRUPTS[dev].load(Ordering::Acquire) + 1;
+            nic.transmit(&arp::request(mac, [10, 0, 2, 15], [10, 0, 2, 2]))?;
+            poll(|| Ok(nic.rx.completed()))?;
+            if msix::wait_for_interrupts(&RX_INTERRUPTS[dev], expected) < expected {
+                return Err(Failure::Interrupt);
+            }
+            nic.receive()?;
+            let frame = nic.frames.pop().ok_or(Failure::Packet)?;
+            let peer = arp::reply(frame.bytes(), mac, [10, 0, 2, 15], [10, 0, 2, 2])
+                .ok_or(Failure::Packet)?;
+            let _ = writeln!(console, "virtio-net: received ARP reply from 10.0.2.2, peer {peer:02x?}, exchange {exchange}, descriptor recycled");
         }
-        nic.receive()?;
-        let frame = nic.frames.pop().ok_or(Failure::Packet)?;
-        let peer =
-            arp::reply(frame.bytes(), mac, [10, 0, 2, 15], [10, 0, 2, 2]).ok_or(Failure::Packet)?;
-        let _ = writeln!(console, "virtio-net: received ARP reply from 10.0.2.2, peer {peer:02x?}, exchange {exchange}, descriptor recycled");
-    }
-    let _ = writeln!(
-        console,
-        "virtio-net: MSI-X RX {} TX {} completions, vectors {rx_vector:#x}/{tx_vector:#x}",
-        RX_INTERRUPTS[dev].load(Ordering::Acquire),
-        TX_INTERRUPTS[dev].load(Ordering::Acquire)
-    );
-    Ok(nic)
+        let _ = writeln!(
+            console,
+            "virtio-net: MSI-X RX {} TX {} completions, vectors {rx_vector:#x}/{tx_vector:#x}",
+            RX_INTERRUPTS[dev].load(Ordering::Acquire),
+            TX_INTERRUPTS[dev].load(Ordering::Acquire)
+        );
+        #[cfg(feature = "hal-virtio-net-recovery-test")]
+        if recovery::fail(dev, 3) {
+            return Err(Failure::Timeout);
+        }
+        Ok(())
+    })();
+    *DEVICE[dev].lock() = Some(nic);
+    result
 }
 
 /// Attribute each MSI-X completion and receive FIFO to its exact adapter before APIC EOI.
@@ -464,7 +643,11 @@ pub fn on_interrupt(vector: u8) {
     } else {
         return;
     };
-    if dev >= driver_start::DEVICES {
+    if dev >= driver_start::DEVICES || !LIVE[dev].load(Ordering::Acquire) {
+        return;
+    }
+    let assigned = vectors(dev);
+    if vector != if rx { assigned.0 } else { assigned.1 } {
         return;
     }
     if rx {
@@ -538,10 +721,19 @@ pub fn mac(dev: usize) -> Result<[u8; 6], Failure> {
 }
 
 /// Per-adapter counters used by the hardware isolation fixture.
-#[cfg(feature = "hal-driver-net-multi-test")]
+#[cfg(any(
+    feature = "hal-driver-net-multi-test",
+    feature = "hal-virtio-net-recovery-test"
+))]
 pub(crate) fn interrupt_counts(dev: usize) -> (usize, usize) {
     (
         RX_INTERRUPTS[dev].load(Ordering::Acquire),
         TX_INTERRUPTS[dev].load(Ordering::Acquire),
     )
+}
+
+#[cfg(feature = "hal-virtio-net-recovery-test")]
+/// Verify checked failure recovery with real network peers.
+pub fn recovery_selftest(console: &mut dyn HalConsole) {
+    recovery::run(console);
 }

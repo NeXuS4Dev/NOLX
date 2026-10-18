@@ -135,13 +135,13 @@ pub fn stop(dev: usize) -> Result<(), Error> {
     })
 }
 /// Retry failed-controller quiescence, without restarting it or reopening shutdown admission.
-/// Only xHCI/e1000 have audited partial-start/failed-stop ownership; other native drivers refuse.
+/// Only xHCI/e1000/virtio-net have audited partial-start/failed-stop ownership; other native drivers refuse.
 pub fn recover(dev: usize) -> Result<(), Error> {
     with_registry(|registry| {
         if registry.frozen() {
             return Err(Error::Busy);
         }
-        if !matches!(registry.driver_name(dev)?, "xhci" | "e1000") {
+        if !matches!(registry.driver_name(dev)?, "xhci" | "e1000" | "virtio-net") {
             return Err(Error::BadState);
         }
         registry.recover(dev)?;
@@ -161,6 +161,9 @@ pub fn remove(dev: usize) -> Result<(), Error> {
             return Err(Error::Busy);
         }
         if registry.driver_name(dev) == Ok("e1000") && !super::e1000::removable(dev) {
+            return Err(Error::Busy);
+        }
+        if registry.driver_name(dev) == Ok("virtio-net") && !super::virtio_net::removable(dev) {
             return Err(Error::Busy);
         }
         registry.remove(dev)

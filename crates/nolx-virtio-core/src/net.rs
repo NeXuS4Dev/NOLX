@@ -79,3 +79,39 @@ mod tests {
         assert_eq!(transmit_header(), [0; HEADER_BYTES]);
     }
 }
+
+/// Final readback filter, not a hardware operation: reset, PCI DMA/INTx exclusion and
+/// verified disabled PCI message delivery are all required before exposed pages can be freed.
+pub fn stop_proven(status: u8, command: u32, messages_disabled: bool) -> bool {
+    status == 0 && command & ((1 << 2) | (1 << 10)) == 1 << 10 && messages_disabled
+}
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    #[test]
+    fn every_nonzero_status_and_missing_exclusion_proof_refuses() {
+        for status in 0..=255 {
+            for bm in [false, true] {
+                for intx in [false, true] {
+                    for messages in [false, true] {
+                        assert_eq!(
+                            stop_proven(
+                                status,
+                                (u32::from(bm) << 2) | (u32::from(intx) << 10),
+                                messages
+                            ),
+                            status == 0 && !bm && intx && messages
+                        );
+                    }
+                }
+            }
+        }
+        assert!(!stop_proven(255, u32::MAX, true));
+    }
+    #[test]
+    fn unrelated_pci_bits_do_not_authorize_dma_or_interrupt_delivery() {
+        assert!(stop_proven(0, !4, true));
+        assert!(!stop_proven(0, 0, true));
+        assert!(!stop_proven(0, 1 << 10, false));
+    }
+}
