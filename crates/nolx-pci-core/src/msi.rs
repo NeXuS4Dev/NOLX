@@ -164,6 +164,33 @@ pub fn msix_enable(control: u16) -> u16 {
     (control | MSIX_CTRL_ENABLE) & !MSIX_CTRL_FUNCTION_MASK
 }
 
+/// Message Control to write when the driver wants MSI delivery disabled. The enable bit is
+/// cleared and every other bit is kept as it was, so the capability's encoding survives.
+#[must_use]
+pub fn msi_disable_control(control: u16) -> u16 {
+    control & !MSI_CTRL_ENABLE
+}
+
+/// Whether a Message Control word proves MSI delivery is disabled.
+#[must_use]
+pub fn msi_disabled(control: u16) -> bool {
+    control & MSI_CTRL_ENABLE == 0
+}
+
+/// Message Control to write when the driver wants MSI-X delivery disabled. The enable bit is
+/// cleared and the function mask is set, so no vector of the function delivers a message even
+/// if the device still writes its table.
+#[must_use]
+pub fn msix_disable_control(control: u16) -> u16 {
+    (control & !MSIX_CTRL_ENABLE) | MSIX_CTRL_FUNCTION_MASK
+}
+
+/// Whether a Message Control word proves MSI-X delivery is disabled and the function masked.
+#[must_use]
+pub fn msix_disabled(control: u16) -> bool {
+    control & MSIX_CTRL_ENABLE == 0 && control & MSIX_CTRL_FUNCTION_MASK != 0
+}
+
 /// One MSI-X table entry: the 64-bit message address, the message data, and the vector control
 /// word with its mask bit. Returns `None` when the address is not dword-aligned or the vector
 /// is below [`VECTOR_MIN`].
@@ -341,6 +368,34 @@ mod tests {
     fn msix_enable_sets_enable_and_clears_function_mask() {
         assert_eq!(msix_enable(0x4007), 0x8007);
         assert_eq!(msix_enable(0x0007), 0x8007);
+    }
+
+    #[test]
+    fn disabling_msi_keeps_the_capability_encoding_and_clears_the_enable_bit() {
+        for control in [0u16, 1, 0x0080, 0x0100, 0xffff] {
+            let disabled = msi_disable_control(control);
+            assert!(msi_disabled(disabled));
+            assert_eq!(disabled & !MSI_CTRL_ENABLE, control & !MSI_CTRL_ENABLE);
+        }
+    }
+
+    #[test]
+    fn disabling_msix_masks_the_function_and_clears_the_enable_bit() {
+        for control in [0u16, 1, 0x4000, 0x8000, 0xffff] {
+            let disabled = msix_disable_control(control);
+            assert!(msix_disabled(disabled));
+            assert_eq!(disabled & MSIX_CTRL_ENABLE, 0);
+            assert_ne!(disabled & MSIX_CTRL_FUNCTION_MASK, 0);
+        }
+    }
+
+    #[test]
+    fn an_enabled_message_capability_is_not_a_disabled_one() {
+        assert!(!msi_disabled(MSI_CTRL_ENABLE));
+        assert!(!msix_disabled(MSIX_CTRL_ENABLE));
+        assert!(!msix_disabled(MSIX_CTRL_ENABLE | MSIX_CTRL_FUNCTION_MASK));
+        // A masked but unenabled MSI-X function delivers nothing either.
+        assert!(msix_disabled(MSIX_CTRL_FUNCTION_MASK));
     }
 
     #[test]

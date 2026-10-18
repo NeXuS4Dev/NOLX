@@ -1174,3 +1174,46 @@ media, perform fifteen uniquely tagged public write/flush/read exchanges per boo
 mount persisted files on the host and leave DMA zero. Faults deliberately refuse cleanup/flush or
 withhold proof/completion, not naturally failing QEMU hardware. AHCI/NVMe recovery, dynamic IRQ
 ownership, general PCI/firmware, USB/Executive and device-power/S3 gates remain open. M9 is incomplete.
+
+
+M9 AHCI/NVMe recovery checkpoint (2026-10-18): both native storage transports now retain their
+register mapping, every DMA page and the software command/queue state across every fallible step.
+Bring-up begins by disabling bus mastering and message delivery, so a partially configured
+controller cannot DMA before its owners exist; bus mastering is enabled only once the pages are
+owned. AHCI stops its HBA with the command-list/FIS-engine stop bits and polls their completion
+bits, clears the port's interrupt enable and the HBA's MSI enable, flushes the write cache and
+reads the result back. NVMe writes a zero control register, polls the controller's ready state
+away, issues a namespace flush and disables plus function-masks MSI-X with readback. A missing
+proof keeps every page and mapping pinned; only a fully proven stop releases them, and the
+released MMIO region refuses later access.
+
+A failed command quarantines the transport: no later public read, write or flush reuses the
+outstanding command, descriptor or buffer, and the framework record stays Failed until an
+explicit checked stop. Framework recovery is now audited for
+xHCI/e1000/virtio-net/virtio-blk/AHCI/NVMe; it moves Failed to Stopped without restarting
+hardware, never touches a Started peer and cannot thaw the shutdown freeze.
+
+`hal-ahci-nvme-recovery-test` plus `scripts/check-ahci-nvme-recovery.py` passed four profiles:
+AHCI and NVMe on PC and Q35, each with two real controllers. Every profile boots twice on
+unchanged media and performs fifteen uniquely tagged public write/flush/read exchanges per boot
+with the selected controller's own completion interrupt advancing. The fixtures cover a
+post-filesystem startup quarantine with repeated cleanup refusal, a one-page allocation rollback
+before the port or controller names the buffer, an enabled-port/enabled-controller partial
+startup that keeps all pages, a deliberately withheld PCI exclusion proof although the hardware
+really is excluded, a published-command failure that quarantines without flush or buffer reuse,
+and a refused stop flush that explicit recovery does not retry. The host verifies every written
+and untouched LBA and independently mounts the persisted file after each boot; the second boot
+verifies the old commit before writing again; final DMA is zero.
+
+Faults deliberately refuse cleanup, allocation or flush and withhold otherwise valid proof. This
+is **not** naturally failing QEMU reset/PCI-write hardware or physical-board verification.
+Vector reservations remain static, the transports stay BSP/segment-zero and expose only the
+first SATA port or namespace 1 per controller. Dynamic interrupt ownership, nonzero-segment
+binding, general PCI/firmware routing, USB/Executive bindings and general device-power/S3 gates
+remain open. M9 is not complete.
+
+The full native regression for this checkpoint passed 151 checks with exit zero, including the
+four new AHCI/NVMe profiles; 38 of those checks independently mounted the persisted files on
+the host after QEMU exited. Both overlapping Rust host suites passed 825 tests each, the unsafe
+audit covers 263 blocks with no missing invariant, and the conformance database holds 397
+assertions.

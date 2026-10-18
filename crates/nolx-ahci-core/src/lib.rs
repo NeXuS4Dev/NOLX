@@ -41,6 +41,8 @@ pub const PORT_FB: u64 = 0x08;
 pub const PORT_FBU: u64 = 0x0C;
 /// Port interrupt status.
 pub const PORT_IS: u64 = 0x10;
+/// Port interrupt enable: the per-port interrupt mask.
+pub const PORT_IE: u64 = 0x14;
 /// Port command and status.
 pub const PORT_CMD: u64 = 0x18;
 /// Port task file data: the device's status and error.
@@ -56,6 +58,8 @@ pub const PORT_CI: u64 = 0x38;
 
 /// Global host control: AHCI mode is enabled.
 pub const GHC_AE: u32 = 1 << 31;
+/// Global host control: the MSI enable bit. While it is set the HBA may signal with messages.
+pub const GHC_MSI: u32 = 1 << 1;
 /// Port command: start processing the command list.
 pub const CMD_ST: u32 = 1 << 0;
 /// Port command: the received-FIS area is enabled.
@@ -265,6 +269,60 @@ pub fn identify_sectors(bytes: &[u8]) -> Option<u64> {
     (sectors > 0 && sectors <= (1 << 48)).then_some(sectors)
 }
 
+/// The readback of a stopped AHCI controller: one port's registers and the HBA's global
+/// control. These are decisions over register values, so they can be checked on a host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StopState {
+    /// The port command register: the engine enable and running bits.
+    pub command: u32,
+    /// The port's command list base address, both dwords.
+    pub list_base: u64,
+    /// The port's received-FIS base address, both dwords.
+    pub fis_base: u64,
+    /// The port's interrupt enable register.
+    pub interrupt_enable: u32,
+    /// The HBA's global host control.
+    pub global: u32,
+}
+
+impl StopState {
+    /// Whether both of the port's engines are stopped: the command list engine and the
+    /// received-FIS engine are neither enabled nor running.
+    #[must_use]
+    pub fn engines_stopped(&self) -> bool {
+        self.command & (CMD_ST | CMD_FRE | CMD_CR | CMD_FR) == 0
+    }
+
+    /// Whether the port names no command list and no received-FIS area, so it cannot reach
+    /// a page the driver is about to release.
+    #[must_use]
+    pub fn unmapped(&self) -> bool {
+        self.list_base == 0 && self.fis_base == 0
+    }
+
+    /// Whether the controller no longer signals: the port's interrupts are masked and the
+    /// HBA's MSI enable is clear.
+    #[must_use]
+    pub fn signalling_disabled(&self) -> bool {
+        self.interrupt_enable == 0 && self.global & GHC_MSI == 0
+    }
+
+    /// Whether the controller is quiesced: the engines are stopped, the port names no
+    /// buffer, and the controller no longer signals.
+    #[must_use]
+    pub fn quiesced(&self) -> bool {
+        self.engines_stopped() && self.unmapped() && self.signalling_disabled()
+    }
+}
+
+/// The final readback filter, not a hardware operation: the port must be quiesced and the
+/// function must be excluded from bus mastering, legacy interrupts and message delivery
+/// before an exposed page may be freed.
+#[must_use]
+pub fn stop_proven(state: StopState, command: u16, messages_disabled: bool) -> bool {
+    state.quiesced() && nolx_pci_core::exclusion::excluded(command, messages_disabled)
+}
+
 #[cfg(test)]
 mod cache_tests {
     use super::*;
@@ -287,5 +345,73 @@ mod cache_tests {
         assert_eq!(identify_sectors(&bytes[..511]), None);
         bytes[200..208].copy_from_slice(&u64::MAX.to_le_bytes());
         assert_eq!(identify_sectors(&bytes), None);
+    }
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::*;
+
+    fn stopped() -> StopState {
+        StopState {
+            command: 0,
+            list_base: 0,
+            fis_base: 0,
+            interrupt_enable: 0,
+            global: 0,
+        }
+    }
+
+    #[test]
+    fn a_stopped_port_has_no_engine_enabled_or_running() {
+        let mut state = stopped();
+        assert!(state.engines_stopped());
+        for bit in [CMD_ST, CMD_FRE, CMD_CR, CMD_FR] {
+            state.command = bit;
+            assert!(
+                !state.engines_stopped(),
+                "engine bit {bit:#x} still running"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stopped_port_names_no_buffer() {
+        let mut state = stopped();
+        assert!(state.unmapped());
+        state.list_base = 0x1000;
+        assert!(!state.unmapped());
+        state.list_base = 0;
+        state.fis_base = 0x2000;
+        assert!(!state.unmapped());
+    }
+
+    #[test]
+    fn a_quiet_controller_masks_its_port_and_clears_the_msi_enable() {
+        let mut state = stopped();
+        assert!(state.signalling_disabled());
+        state.interrupt_enable = 1;
+        assert!(!state.signalling_disabled());
+        state.interrupt_enable = 0;
+        state.global = GHC_MSI;
+        assert!(!state.signalling_disabled());
+    }
+
+    #[test]
+    fn the_stop_proof_needs_the_port_and_the_pci_exclusion_together() {
+        let state = stopped();
+        assert!(stop_proven(state, 1 << 10, true));
+        assert!(!stop_proven(state, 1 << 10, false));
+        assert!(!stop_proven(state, 1 << 10 | 4, true));
+        assert!(!stop_proven(state, 0, true));
+        let mut running = state;
+        running.command = CMD_ST;
+        assert!(!stop_proven(running, 1 << 10, true));
+        let mut mapped = state;
+        mapped.fis_base = 0x4000;
+        assert!(!stop_proven(mapped, 1 << 10, true));
+        let mut signalling = state;
+        signalling.global = GHC_MSI;
+        assert!(!stop_proven(signalling, 1 << 10, true));
     }
 }

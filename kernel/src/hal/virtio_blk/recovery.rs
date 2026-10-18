@@ -62,7 +62,7 @@ fn pinned(dev: usize, peer: usize, region: Region, mappings: usize, master: bool
     let command = ConfigAccess.read_u32(STATE[dev].lock().bdf.unwrap(), 4);
     assert_eq!(command & 4 != 0, master);
     assert_ne!(command & (1 << 10), 0);
-    assert!(super::super::virtio_pci::messages_disabled(
+    assert!(super::super::pci_exclusion::messages_disabled(
         STATE[dev].lock().bdf.unwrap()
     ));
     detached(dev);

@@ -40,6 +40,10 @@ M9 to the already implemented boot probes. Check items only with executable evid
       published-request quarantine, independent durable peer I/O and unchanged-media reboot.
 - [ ] Complete failed-start/failed-stop recovery for remaining native drivers and general
       interrupt-resource reclamation;
+      all six native driver kinds (xHCI, e1000, virtio-net, virtio-blk, AHCI, NVMe) now have
+      checked failed-start/failed-stop recovery, but their interrupt vectors are statically
+      reserved rather than dynamically allocated and reclaimed, and the PS/2 and input-object
+      paths have no framework recovery contract at all;
       remaining segment binding and firmware routing are tracked separately above.
 
 ## Storage integration
@@ -1255,3 +1259,74 @@ suites passed **812 tests** each. Host/native Clippy, formatting, boot/Multiboot
 generated files, five IRQ-proof-parser tests, **394 conformance assertions** and the unsafe audit
 (**261 blocks**, zero missing SAFETY comments) passed. Exact-revision CI is required after push;
 these checks do not close the remaining M9 gates.
+
+
+## Audited AHCI and NVMe failed-controller recovery checkpoint (2026-10-18)
+
+This supersedes the earlier statement that the storage transports had no audited recovery path.
+It does not close the remaining M9 gates.
+
+Both native storage transports now retain their register mapping, every DMA page and the
+software command/queue state across every fallible step, in per-handle owners rather than
+locals. Bring-up starts by disabling PCI bus mastering and message delivery for the
+controller, so a partially configured controller cannot DMA before its owners exist. Bus
+mastering is enabled only once the pages are owned, and the transport is marked live only when
+its first command may actually be issued. A failed command quarantines the transport: the
+public read/write/flush path refuses it, and no later request reuses the outstanding command,
+descriptor, buffer or request page.
+
+The checked stop is transport-specific and proven, not assumed. AHCI sets the command-list and
+FIS-engine stop bits, polls their completion bits, clears the port's interrupt enable and the
+HBA's MSI enable, flushes the write cache and reads the result back. NVMe writes a zero
+control register, polls the controller's ready state away, issues a namespace flush and
+disables plus function-masks MSI-X with readback. A missing proof keeps **every** page and
+mapping pinned; only a fully proven stop releases them, and the released MMIO region refuses
+later access. Recovery through the framework runs that same checked stop, moves the record from
+Failed to Stopped without starting hardware, never touches a Started peer and cannot thaw the
+irreversible shutdown freeze.
+
+Framework recovery is now audited for **xHCI/e1000/virtio-net/virtio-blk/AHCI/NVMe**. Failed
+public I/O, removal and ordinary restart refuse while a peer is Started. Recovery only cleans
+to Stopped; an explicit restart is still required.
+
+`hal-ahci-nvme-recovery-test` plus `scripts/check-ahci-nvme-recovery.py` passed four profiles:
+AHCI and NVMe on PC and Q35, each with two real controllers on their own media. Every profile
+boots **twice on unchanged media** and performs **fifteen uniquely tagged public
+write/flush/read exchanges** per boot, each requiring the selected controller's own completion
+interrupt to advance:
+
+- A post-filesystem startup failure with repeated cleanup refusal keeps four total pages and
+  every mapping owned; the peer keeps serving durable I/O, and a duplicate probe cannot rebind
+  a BDF.
+- An injected allocation failure releases the one page that was already taken before the port or
+  controller named the buffer, and the rollback returns to the peer-only baseline.
+- An enabled-port (AHCI) or enabled-controller (NVMe) partial startup keeps all its pages
+  until the checked stop, then reclaims exactly two pages/one window (AHCI) or six pages/two
+  mappings (NVMe).
+- A deliberately withheld PCI exclusion proof retains every page although the hardware really
+  is excluded. This is **not** a naturally failing QEMU PCI write.
+- A published-command failure quarantines the controller without a rollback flush or any
+  descriptor/buffer reuse before the checked stop.
+- A refused stop flush quarantines without reset or free, and explicit recovery does not retry
+  the unsafe barrier.
+- The host independently verifies every written LBA, every untouched peer LBA and each media
+  tag, and mounts the persisted NOLXFS file after each boot; the second boot verifies the old
+  commit before writing again. Final DMA is zero and the frozen registry refuses recovery and
+  public I/O.
+
+Fault hooks refuse cleanup, allocation or flush, and withhold otherwise valid proof. This is
+**not** naturally failing reset/PCI-write hardware or physical-board verification. Interrupt
+vectors remain statically reserved, the transports stay BSP/segment-zero and expose only the
+first SATA port or namespace 1 per controller. General/dynamic interrupt reclamation, USB and
+input-object recovery, nonzero-segment binding, general PCI/firmware routing, Executive/user
+input bindings and general device-power/S3 remain open. **M9 is not complete.**
+
+Local verification passed **109 native fixture profiles**: the 105 preceding USB/input,
+hardware lifecycle/shutdown, multi-adapter/firmware-routing, e1000, virtio-net and virtio-blk
+profiles, plus the four new AHCI/NVMe recovery profiles. **38 further host-side checks**
+independently mounted the persisted files after QEMU exited. Both overlapping Rust host suites
+passed **825 tests** each. Host/native Clippy, formatting, boot/Multiboot, 31 layout tests,
+generated files, five IRQ-proof-parser tests, the unsafe audit (**263 blocks**, zero missing
+SAFETY comments) and the conformance database (**397 assertions**) passed. The full native
+regression log is `build/ahci-nvme-all-native.log` (151 checks, exit zero). Exact-revision CI
+is required after push; these checks do not close the remaining M9 gates.

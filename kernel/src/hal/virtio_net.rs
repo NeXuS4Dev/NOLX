@@ -201,17 +201,17 @@ fn start(dev: usize) -> bool {
     good
 }
 fn pci_access(bdf: Bdf, dma: bool) -> Result<(), Failure> {
-    super::virtio_pci::pci_access(bdf, dma)
+    super::pci_exclusion::pci_access(bdf, dma)
         .then_some(())
         .ok_or(Failure::Configuration)
 }
 fn disable_messages(bdf: Bdf) -> Result<(), Failure> {
-    super::virtio_pci::disable_messages(bdf)
+    super::pci_exclusion::disable_messages(bdf)
         .then_some(())
         .ok_or(Failure::Configuration)
 }
 fn messages_disabled(bdf: Bdf) -> bool {
-    super::virtio_pci::messages_disabled(bdf)
+    super::pci_exclusion::messages_disabled(bdf)
 }
 fn stop(dev: usize) -> bool {
     LIVE[dev].store(false, Ordering::Release);

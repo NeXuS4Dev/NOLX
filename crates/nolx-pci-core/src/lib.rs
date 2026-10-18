@@ -11,9 +11,10 @@
 //! writes dwords through the legacy mechanism (`0xCF8` address, `0xCFC` data). Everything else
 //! is written against that trait, so a test can model a whole machine in a few lines.
 //!
-//! Scope: legacy configuration access, MSI/MSI-X rules in [`msi`], and validated PCIe
-//! ECAM address calculations in [`ecam`]. The kernel still uses legacy configuration
-//! ports as a segment-zero fallback, selecting ECAM for driver reads/writes when mapped.
+//! Scope: legacy configuration access, MSI/MSI-X rules in [`msi`], the checked
+//! exclusion rules in [`exclusion`], and validated PCIe ECAM address calculations in
+//! [`ecam`]. The kernel still uses legacy configuration ports as a segment-zero
+//! fallback, selecting ECAM for driver reads/writes when mapped.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -21,6 +22,7 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 pub mod ecam;
+pub mod exclusion;
 pub mod msi;
 pub mod resources;
 pub mod routing;

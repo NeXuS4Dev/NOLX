@@ -330,7 +330,7 @@ fn stop_device(dev: usize) -> bool {
     let command = ConfigAccess.read_u32(bdf, 4) & 0xffff;
     ConfigAccess.write_u32(bdf, 4, command | (1 << 10));
     if ConfigAccess.read_u32(bdf, 4) & (1 << 10) == 0
-        || !super::virtio_pci::disable_messages(bdf)
+        || !super::pci_exclusion::disable_messages(bdf)
         || !flushed
     {
         return false;
@@ -349,7 +349,7 @@ fn stop_device(dev: usize) -> bool {
         } else if !empty_dma(dev) {
             return Err(Failure::Memory);
         }
-        if !super::virtio_pci::pci_access(bdf, false) {
+        if !super::pci_exclusion::pci_access(bdf, false) {
             return Err(Failure::NoDevice);
         }
         let status = if let Some(common) = common {
@@ -360,7 +360,7 @@ fn stop_device(dev: usize) -> bool {
         if !virtio::transport::stop_proven(
             status,
             ConfigAccess.read_u32(bdf, 4),
-            super::virtio_pci::messages_disabled(bdf),
+            super::pci_exclusion::messages_disabled(bdf),
         ) {
             return Err(Failure::NoDevice);
         }
@@ -431,7 +431,8 @@ fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<(), Failure> {
     let bdf = STATE[dev].lock().bdf.ok_or(Failure::NoDevice)?;
     let device = blockdev::device(dev).ok_or(Failure::NoDevice)?;
     let vector = completion_vector(dev);
-    if !super::virtio_pci::pci_access(bdf, false) || !super::virtio_pci::disable_messages(bdf) {
+    if !super::pci_exclusion::pci_access(bdf, false) || !super::pci_exclusion::disable_messages(bdf)
+    {
         return Err(Failure::NoDevice);
     }
     let bars = nolx_pci_core::read_bars(&mut ConfigAccess, bdf);
@@ -493,7 +494,7 @@ fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<(), Failure> {
     });
     drop(state);
     common.write8(at(common::DEVICE_STATUS), virtio::INIT_STATUS_SEQUENCE[3])?;
-    if !super::virtio_pci::pci_access(bdf, true) {
+    if !super::pci_exclusion::pci_access(bdf, true) {
         return Err(Failure::NoDevice);
     }
     LIVE[dev].store(true, Ordering::Release);

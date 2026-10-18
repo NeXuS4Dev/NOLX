@@ -118,6 +118,10 @@ pub(crate) fn attach_prepared(
 pub fn state(dev: usize) -> Result<nolx_df_core::State, Error> {
     with_registry(|registry| registry.state(dev))
 }
+/// Whether a shutdown has frozen the registry's admission.
+pub fn frozen() -> bool {
+    with_registry(|registry| Ok(registry.frozen())).unwrap_or(false)
+}
 /// Restart a bound/stopped device through its original registered dispatch table.
 pub fn start(dev: usize) -> Result<(), Error> {
     with_registry(|registry| registry.start(dev))
@@ -135,7 +139,8 @@ pub fn stop(dev: usize) -> Result<(), Error> {
     })
 }
 /// Retry failed-controller quiescence, without restarting it or reopening shutdown admission.
-/// Only xHCI/e1000/virtio-net/virtio-blk have audited partial-start/failed-stop ownership; other native drivers refuse.
+/// Only xHCI/e1000/virtio-net/virtio-blk/ahci/nvme have audited partial-start/failed-stop
+/// ownership; other native drivers refuse.
 pub fn recover(dev: usize) -> Result<(), Error> {
     with_registry(|registry| {
         if registry.frozen() {
@@ -143,7 +148,7 @@ pub fn recover(dev: usize) -> Result<(), Error> {
         }
         if !matches!(
             registry.driver_name(dev)?,
-            "xhci" | "e1000" | "virtio-net" | "virtio-blk"
+            "xhci" | "e1000" | "virtio-net" | "virtio-blk" | "ahci" | "nvme"
         ) {
             return Err(Error::BadState);
         }
@@ -170,6 +175,12 @@ pub fn remove(dev: usize) -> Result<(), Error> {
             return Err(Error::Busy);
         }
         if registry.driver_name(dev) == Ok("virtio-blk") && !super::virtio_blk::removable(dev) {
+            return Err(Error::Busy);
+        }
+        if registry.driver_name(dev) == Ok("ahci") && !super::ahci::removable(dev) {
+            return Err(Error::Busy);
+        }
+        if registry.driver_name(dev) == Ok("nvme") && !super::nvme::removable(dev) {
             return Err(Error::Busy);
         }
         registry.remove(dev)

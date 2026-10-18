@@ -103,6 +103,33 @@ pub fn csts_ready(csts: u32) -> bool {
     csts & CSTS_RDY != 0
 }
 
+/// The readback of a stopped NVMe controller. These are decisions over register values, so
+/// they can be checked on a host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StopState {
+    /// The controller configuration register.
+    pub control: u32,
+    /// The controller status register.
+    pub status: u32,
+}
+
+impl StopState {
+    /// Whether the controller is disabled and no longer ready: it processes no command and
+    /// reaches no queue.
+    #[must_use]
+    pub fn disabled(&self) -> bool {
+        self.control & CC_EN == 0 && self.status & CSTS_RDY == 0
+    }
+}
+
+/// The final readback filter, not a hardware operation: the controller must be disabled and
+/// not ready, and the function must be excluded from bus mastering, legacy interrupts and
+/// message delivery, before an exposed page may be freed.
+#[must_use]
+pub fn stop_proven(state: StopState, command: u16, messages_disabled: bool) -> bool {
+    state.disabled() && nolx_pci_core::exclusion::excluded(command, messages_disabled)
+}
+
 /// The AQA value for an admin queue of `submit` submission entries and `complete` completion
 /// entries. Each size is stored one less than the count. Returns `None` for a size outside 1 to
 /// 4096.
@@ -371,5 +398,47 @@ mod publication_tests {
             None
         );
         assert_eq!(calls, 1);
+    }
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::*;
+
+    #[test]
+    fn a_disabled_controller_is_neither_enabled_nor_ready() {
+        assert!(StopState {
+            control: 0,
+            status: 0
+        }
+        .disabled());
+        assert!(!StopState {
+            control: CC_EN,
+            status: 0
+        }
+        .disabled());
+        assert!(!StopState {
+            control: 0,
+            status: CSTS_RDY
+        }
+        .disabled());
+    }
+
+    #[test]
+    fn the_stop_proof_needs_the_controller_and_the_pci_exclusion_together() {
+        let state = StopState {
+            control: 0,
+            status: 0,
+        };
+        assert!(stop_proven(state, 1 << 10, true));
+        assert!(!stop_proven(state, 1 << 10, false));
+        assert!(!stop_proven(state, 1 << 10 | 4, true));
+        assert!(!stop_proven(state, 0, true));
+        let mut enabled = state;
+        enabled.control = CC_EN;
+        assert!(!stop_proven(enabled, 1 << 10, true));
+        let mut ready = state;
+        ready.status = CSTS_RDY;
+        assert!(!stop_proven(ready, 1 << 10, true));
     }
 }
