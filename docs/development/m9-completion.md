@@ -1328,5 +1328,9 @@ independently mounted the persisted files after QEMU exited. Both overlapping Ru
 passed **825 tests** each. Host/native Clippy, formatting, boot/Multiboot, 31 layout tests,
 generated files, five IRQ-proof-parser tests, the unsafe audit (**263 blocks**, zero missing
 SAFETY comments) and the conformance database (**397 assertions**) passed. The full native
-regression log is `build/ahci-nvme-all-native.log` (151 checks, exit zero). Exact-revision CI
-is required after push; these checks do not close the remaining M9 gates.
+regression log is `build/ahci-nvme-all-native.log` (151 checks, exit zero).
+
+CI run [39140774366](https://github.com/NeXuS4Dev/NOLX/actions/runs/39140774366) on
+`f145bcd` passed **all nineteen jobs**, including the new `AHCI and NVMe checked failure
+recovery` job and every preceding storage, network, USB, AML, PCI-resource, S5 and boot
+regression. These checks still do not close the remaining M9 gates.

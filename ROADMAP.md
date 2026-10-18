@@ -1216,4 +1216,6 @@ The full native regression for this checkpoint passed 151 checks with exit zero,
 four new AHCI/NVMe profiles; 38 of those checks independently mounted the persisted files on
 the host after QEMU exited. Both overlapping Rust host suites passed 825 tests each, the unsafe
 audit covers 263 blocks with no missing invariant, and the conformance database holds 397
-assertions.
+assertions. CI run
+[39140774366](https://github.com/NeXuS4Dev/NOLX/actions/runs/39140774366) on `f145bcd`
+passed all nineteen jobs, including the new AHCI/NVMe recovery job.
