@@ -1118,3 +1118,15 @@ PC/Q35 fixtures generate real STALL completions and Halted endpoint contexts, ex
 refusal and successful reclamation, and deliberately withhold an actual Disable Slot completion
 proof to verify pinned DMA and reset-only recovery. Fresh keyboard and peer mouse input gate each
 repair. General endpoint reset/dequeue/clear-halt, hubs, SuperSpeed and remaining M9 gates stay open.
+
+
+M9 USB speed checkpoint: endpoint-zero packet encoding is now speed-specific (USB3 exponent 9
+means 512 bytes, not nine). The native root path accepts default SuperSpeed ID4 and reads real
+USB3 descriptors; repeated unsupported mass-storage class refusals reclaim all five slot pages
+while existing HID input/IRQs remain live. Full-speed and high-speed keyboard/mouse input both
+have PC/Q35 ring-wrap/hotplug checks with actual speed/EP0 evidence. Portable selection requires
+one ordered HID descriptor and, for USB3, an immediate single-burst companion with bounded payload
+and interval. The endpoint context uses that payload rather than guessing it from maximum packet
+size. USB3 HID input and warm reset are NOT hardware-verified: stock QEMU exposes no SS HID model;
+SS HID selection and reset-write rules have host tests only. General USB/hubs/SSP/endpoint recovery,
+Executive input, firmware/PCI and power/S3 gates remain open. M9 is not complete.

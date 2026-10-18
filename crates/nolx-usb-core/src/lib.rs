@@ -66,6 +66,18 @@ pub const PORTSC_POWER: u32 = 1 << 9;
 pub const PORTSC_CONNECT_CHANGE: u32 = 1 << 17;
 /// PORTSC bit 21: port reset completed. Write 1 to clear.
 pub const PORTSC_RESET_CHANGE: u32 = 1 << 21;
+/// PORTSC bit 31: USB3 warm port reset (distinct from USB2 PR).
+pub const PORTSC_WARM_RESET: u32 = 1 << 31;
+/// Start a root-port reset without replaying link-state/write-one action bits.
+/// Only power is preserved. Changes are acknowledged independently after completion.
+pub fn portsc_reset_for_speed(portsc: u32, speed: u8) -> Option<u32> {
+    let reset = match speed {
+        1..=3 => PORTSC_RESET,
+        4 => PORTSC_WARM_RESET,
+        _ => return None,
+    };
+    Some((portsc & PORTSC_POWER) | reset)
+}
 /// The PORTSC bits that clear when a 1 is written to them. Writing back a register that keeps
 /// one of these set would clear it, so these are masked out of a write unless meant.
 pub const PORTSC_WRITE_ONE_TO_CLEAR: u32 =

@@ -733,9 +733,11 @@ jobs:
         run: python3 -m unittest discover -s scripts -p 'test_xhci_irq_checks.py' 2>&1 | tee -a /tmp/job.log
       - name: Build interrupt observer image
         run: make kernel KERNEL_FEATURES=hal-xhci-irq-test 2>&1 | tee -a /tmp/job.log
-      - name: Verify MSI-X and MSI delivery, plus explicit no-capability and PIC-only fallbacks
+      - name: Verify full/high-speed HID, USB3 control, MSI routing and explicit polling fallbacks
         run: |
           python3 scripts/check-usb-input.py --interrupts 2>&1 | tee -a /tmp/job.log
+          python3 scripts/check-usb-input.py --usb-version 1 --interrupts 2>&1 | tee -a /tmp/job.log
+          python3 scripts/check-usb-input.py --superspeed-control --interrupts 2>&1 | tee -a /tmp/job.log
           python3 scripts/check-usb-input.py --interrupts --transport msi 2>&1 | tee -a /tmp/job.log
           python3 scripts/check-usb-input.py --transport polled 2>&1 | tee -a /tmp/job.log
           python3 scripts/check-usb-input.py --no-apic 2>&1 | tee -a /tmp/job.log

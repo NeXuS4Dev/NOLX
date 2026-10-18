@@ -55,7 +55,8 @@ M9 to the already implemented boot probes. Check items only with executable evid
       checked xHCI failed-start/failed-stop recovery is now exercised with repeated refusal;
       MSI/MSI-X input delivery now has IRQ-only idle admission and explicit polling fallbacks;
       failed-transfer retirement, root-slot repair and command-timeout quarantine now have
-      executable checks; hubs, SuperSpeed and general endpoint-level recovery remain open.
+      executable checks; full/high-speed HID and USB3 EP0/class-refusal reclamation are checked below;
+      hubs, hardware-verified SuperSpeed HID and general endpoint-level recovery remain open.
 - [x] Per-controller MSI-X/MSI boot-HID delivery with IRQ-only idle admission, bounded event
       batches, safe stop/re-arm and explicit no-capability/PIC-only polling fallbacks (below).
 - [x] HID boot keyboard/mouse reports delivered to bounded kernel input event objects,
@@ -1029,3 +1030,45 @@ failure fixtures plus all 37 preceding interrupt/input/lifecycle/shutdown regres
 host/native Clippy, formatting, default image validation (21 checks), boot/link/layout/generated
 checks, **374 conformance assertions** and the unsafe audit (**257 blocks, zero missing SAFETY
 comments**) passed. CI is required on the pushed revision; this does not close the remaining M9 gates.
+
+
+## Speed-aware USB descriptors and native USB3 control checkpoint (2026-10-18)
+
+The previous USB2-only early speed refusal is replaced with bounded default speed-ID1..4 handling.
+EP0 starts at 8/64/512 bytes as appropriate; bMaxPacketSize0 is validated against the negotiated
+speed, including USB3's exponent 9 (512 bytes). Unknown/custom/SSP speed IDs refuse before exposing
+a slot. A disabled USB3 root uses a warm-reset write rather than USB2 PR; the write preserves only
+power and does not replay change, link-state or other write-one action bits. **Warm reset has T1
+write-rule tests, not a claim of native recovery testing**; the native USB3 devices arrive enabled.
+
+`hid_at_speed` bounds endpoint packet size and interval, requires exactly one HID descriptor before
+the endpoint, and requires exactly one immediately following USB3 interrupt companion. This profile
+supports only bMaxBurst=0 and reserved bmAttributes=0, and validates nonzero bytes-per-interval against
+packet capacity and boot-report length. Multiburst, streams, alternate/composite interfaces, custom
+speed IDs and malformed/truncated/missing/duplicate/out-of-order descriptors refuse. Max ESIT payload
+comes from that companion rather than maximum packet size. Host tests exercise both the distinct
+payload and packet values. Existing callers of `hid` retain the bounded full-speed convenience API.
+
+Executable hardware checks use `scripts/check-usb-input.py` with `hal-xhci-irq-test`:
+
+- `--usb-version 1 --interrupts`: PC/Q35 must show actual speed 1 and EP0 8, 604 keyboard
+  transitions, mouse reports, two transfer/event-ring wraps, neutral disconnect and reconnection,
+  actual IRQ-admitted reports and exact DMA baselines.
+- The existing default profile now additionally requires actual speed 3 and EP0 64 evidence.
+- `--superspeed-control --interrupts`: PC/Q35 attach two successive real USB3 mass-storage devices.
+  Each must complete Address Device and descriptor requests at actual speed 4/EP0 512, read its
+  44-byte configuration, refuse the unsupported class and return to the 13-page live HID baseline.
+  Fresh keyboard press AND release after each refusal prove the existing peer survives. No storage
+  interface is bound or exposed as HID. The ordinary HID ring-wrap/hotplug workload still runs.
+
+**Evidence boundary:** stock QEMU 8.2 and 11 HID devices support usb_version=1/2, not 3. Consequently
+USB3 EP0/control/class refusal has T2 evidence; USB3 boot-HID companion selection and context payload
+have T1 rules only, with NO claim of hardware-verified SuperSpeed HID reports, bursts, hubs, SSP, link
+power transitions or S3. This does not close the general USB or other remaining M9 gates. No new PR.
+
+Local verification: **43 distinct native fixtures passed**, including the four added speed profiles
+and all 39 previous USB/PS2, interrupt, controller lifecycle, storage/network lifecycle and shutdown
+cases. Both overlapping Rust suites passed **806 tests** each (USB core: 31). Host/native Clippy,
+formatting, boot/Multiboot, 31 layout tests, generated files, five IRQ-proof parser tests and the
+unsafe audit (257 blocks, zero missing SAFETY comments) passed. Assertion database: **379**.
+Exact-revision CI is required after push; these checks do not mark M9 complete.

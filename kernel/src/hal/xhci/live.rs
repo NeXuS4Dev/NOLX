@@ -1,4 +1,5 @@
-//! Bounded direct-root USB2 boot-HID transport with polled control and IRQ-scheduled event drain.
+//! Bounded direct-root boot-HID transport with polled control and IRQ-scheduled event drain.
+//! USB3 EP0 is hardware-checked; single-burst USB3 HID selection has portable tests only.
 use super::*;
 use crate::hal::dma::Dma;
 use crate::sync::IrqMutex;
@@ -332,17 +333,25 @@ impl Host {
         let offset = usb::port_register_offset(self.op as u8, port).unwrap();
         let mut portsc = self.regs.read32(offset)?;
         let speed = ((portsc >> 10) & 15) as u8;
-        if !(1..=3).contains(&speed) {
+        if wire::initial_ep0_packet(speed).is_none() {
             return Err(Failure::Unsupported);
         }
         if portsc & usb::PORTSC_ENABLED == 0 {
-            self.regs.write32(offset, usb::portsc_start_reset(portsc))?;
+            let reset = if speed == 4 {
+                usb::PORTSC_WARM_RESET
+            } else {
+                usb::PORTSC_RESET
+            };
+            self.regs.write32(
+                offset,
+                usb::portsc_reset_for_speed(portsc, speed).ok_or(Failure::Unsupported)?,
+            )?;
             poll(
                 || {
                     portsc = self.regs.read32(offset)?;
-                    Ok(portsc & usb::PORTSC_RESET == 0 && portsc & usb::PORTSC_ENABLED != 0)
+                    Ok(portsc & reset == 0 && portsc & usb::PORTSC_ENABLED != 0)
                 },
-                "USB2 port reset",
+                "root port reset",
             )?;
         }
         self.regs.write32(offset, usb::portsc_acknowledge(portsc))?;
@@ -360,6 +369,7 @@ impl Host {
                 protocol: 0,
                 endpoint: 0x81,
                 packet: 8,
+                payload: 8,
                 interval: 1,
             },
             input,
@@ -382,7 +392,7 @@ impl Host {
                 return Err(error);
             }
         }
-        let result = self.configure(&mut device, speed).and_then(|()| {
+        let result = self.configure(&mut device, speed, console).and_then(|()| {
             let id = super::super::input::register(
                 Source::UsbHid,
                 if device.hid.protocol == 1 {
@@ -429,13 +439,18 @@ impl Host {
             }
         }
     }
-    fn configure(&mut self, d: &mut Device, speed: u8) -> Result<(), Failure> {
+    fn configure(
+        &mut self,
+        d: &mut Device,
+        speed: u8,
+        console: &mut dyn HalConsole,
+    ) -> Result<(), Failure> {
         self.table
             .write(u64::from(d.slot) * 8, &d.output.address(0).to_le_bytes());
         dword(&d.input, 4, 3);
         dword(&d.input, self.context, (u32::from(speed) << 20) | (1 << 27));
         dword(&d.input, self.context + 4, u32::from(d.port) << 16);
-        let packet = if speed == 3 { 64 } else { 8 };
+        let packet = u32::from(wire::initial_ep0_packet(speed).ok_or(Failure::Unsupported)?);
         dword(
             &d.input,
             self.context * 2 + 4,
@@ -452,11 +467,14 @@ impl Host {
         if descriptor[0] != 18
             || descriptor[1] != 1
             || descriptor[17] != 1
-            || ![8, 16, 32, 64].contains(&descriptor[7])
+            || (speed == 4
+                && !(0x0300..=0x0320).contains(&u16::from_le_bytes([descriptor[2], descriptor[3]])))
         {
             return Err(Failure::Unsupported);
         }
-        if u32::from(descriptor[7]) != packet {
+        let declared_packet =
+            u32::from(wire::ep0_packet(speed, descriptor[7]).ok_or(Failure::Unsupported)?);
+        if declared_packet != packet {
             let ctx = d.output.read_array::<64>(self.context);
             d.input
                 .write(self.context * 2, &ctx[..self.context as usize]);
@@ -465,7 +483,7 @@ impl Host {
             dword(
                 &d.input,
                 self.context * 2 + 4,
-                (value & 0xffff) | u32::from(descriptor[7]) << 16,
+                (value & 0xffff) | declared_packet << 16,
             );
             self.command(d.input.address(0), 13, d.slot)?;
         }
@@ -478,7 +496,13 @@ impl Host {
         self.descriptor(d, 2, length)?;
         let mut bytes = [0; 512];
         d.data.read(0, &mut bytes[..usize::from(length)]);
-        d.hid = wire::hid(&bytes[..usize::from(length)]).ok_or(Failure::Unsupported)?;
+        let _ = writeln!(
+            console,
+            "usb: descriptors port={} speed={speed} ep0={declared_packet} config-bytes={length}",
+            d.port
+        );
+        d.hid =
+            wire::hid_at_speed(&bytes[..usize::from(length)], speed).ok_or(Failure::Unsupported)?;
         self.control(d, [0, 9, d.hid.configuration, 0, 0, 0, 0, 0], 0)?;
         self.control(d, [0x21, 11, 0, 0, d.hid.interface, 0, 0, 0], 0)?;
         let dci = wire::dci(d.hid.endpoint).unwrap();
@@ -504,7 +528,7 @@ impl Host {
         dword(
             &d.input,
             ep + 16,
-            u32::from(d.hid.packet) | (u32::from(d.hid.packet) << 16),
+            u32::from(d.hid.packet) | (u32::from(d.hid.payload) << 16),
         );
         self.command(d.input.address(0), 12, d.slot)?;
         d.pending = d.interrupt.put(

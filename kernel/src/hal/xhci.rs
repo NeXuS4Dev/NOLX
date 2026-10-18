@@ -8,7 +8,8 @@
 //! The live transport retains bounded rings and direct-root USB2 boot-HID devices. It drains
 //! completions in IRQ-scheduled idle context; disconnect disables the slot before its DMA pages are freed.
 //! Each framework handle owns its controller/MMIO/DMA; deferred service excludes lifecycle callbacks.
-//! Hubs, SuperSpeed, general HID and S3/Executive power integration remain open.
+//! USB3 EP0/class refusal is hardware-checked; single-burst SS HID has portable rules only.
+//! Hubs, verified SuperSpeed HID input, general HID and S3/Executive integration remain open.
 
 #[cfg(feature = "hal-xhci-transfer-fault-test")]
 mod faults;
