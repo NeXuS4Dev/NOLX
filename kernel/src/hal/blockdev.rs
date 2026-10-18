@@ -108,10 +108,6 @@ pub(crate) fn bind_storage(handle: usize, backend: usize) -> Result<usize, Queue
 pub(crate) fn device(handle: usize) -> Option<usize> {
     BINDINGS.lock().0.find(handle)
 }
-/// First controller's handle, for the compatibility MSI/MSI-X vector.
-pub(crate) fn primary_handle(backend: usize) -> Option<usize> {
-    BINDINGS.lock().0.owner(backend)
-}
 
 fn with_device<T>(
     dev: usize,

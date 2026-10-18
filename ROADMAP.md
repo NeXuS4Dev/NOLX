@@ -1219,3 +1219,32 @@ audit covers 263 blocks with no missing invariant, and the conformance database 
 assertions. CI run
 [39140774366](https://github.com/NeXuS4Dev/NOLX/actions/runs/39140774366) on `f145bcd`
 passed all nineteen jobs, including the new AHCI/NVMe recovery job.
+
+
+M9 dynamic interrupt-vector ownership checkpoint (2026-10-18): the three native storage
+transports now own their completion vectors from a shared table instead of computing one
+from the framework handle. The rules live in `nolx-hal-core::irq_vectors` (preferred vector
+first, then the kind's range from its lowest, the ledger entry, and the pools' disjointness
+and their distance from the firmware and USB ranges); the kernel keeps one atomic entry per
+vector and claims or releases it with a compare-and-swap, without a lock on the interrupt
+path. A driver claims its vector before the controller is told about it and releases it only
+after its own checked stop proved that the controller can no longer raise it; a failed
+controller keeps its vector, and a release that does not match the owner is refused. The
+vector-to-controller mapping is the table's, so an interrupt on a vector nobody owns reaches
+no driver and a released vector is ignored instead of counted for a retired controller.
+
+The AHCI, NVMe and virtio-blk recovery fixtures now prove it on hardware: the failed
+controller keeps its vector, the proven stop frees it, the restart takes the released vector
+again, an unowned vector advances no counter, and the vector another controller released is
+taken by the first one that asks again. All eight PC/Q35 profiles keep their two
+unchanged-media boots, their fifteen tagged durable exchanges and their host-mounted files.
+
+The pool is bounded and the refusal is real: with every vector of a kind taken, a driver
+that starts finds no vector, fails with the missing vector before the controller is told
+about any vector, leaves nothing behind, and starts again once the vectors are free.
+
+Only the storage transports take part: the xHCI's per-handle vectors, the virtio-net's
+receive/transmit pair and the e1000's firmware-routed INTx line are still static, the pools
+are fixed per driver kind, and the reclaim rule trusts each transport's own hardware proof.
+This is a bounded step towards general interrupt-resource reclamation, not a general dynamic
+allocator. M9 is not complete.

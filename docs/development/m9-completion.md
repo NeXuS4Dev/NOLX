@@ -41,9 +41,11 @@ M9 to the already implemented boot probes. Check items only with executable evid
 - [ ] Complete failed-start/failed-stop recovery for remaining native drivers and general
       interrupt-resource reclamation;
       all six native driver kinds (xHCI, e1000, virtio-net, virtio-blk, AHCI, NVMe) now have
-      checked failed-start/failed-stop recovery, but their interrupt vectors are statically
-      reserved rather than dynamically allocated and reclaimed, and the PS/2 and input-object
-      paths have no framework recovery contract at all;
+      checked failed-start/failed-stop recovery, and the three storage transports now own
+      their interrupt vectors dynamically and release them after a proven stop; the xHCI,
+      virtio-net and e1000 vectors are still statically assigned, the pools are bounded per
+      driver kind rather than shared by all of them, and the PS/2 and input-object paths have
+      no framework recovery contract at all;
       remaining segment binding and firmware routing are tracked separately above.
 
 ## Storage integration
@@ -1334,3 +1336,56 @@ CI run [39140774366](https://github.com/NeXuS4Dev/NOLX/actions/runs/39140774366)
 `f145bcd` passed **all nineteen jobs**, including the new `AHCI and NVMe checked failure
 recovery` job and every preceding storage, network, USB, AML, PCI-resource, S5 and boot
 regression. These checks still do not close the remaining M9 gates.
+
+
+## Dynamically owned interrupt vectors checkpoint (2026-10-18)
+
+This supersedes the earlier statement that the storage transports' interrupt vectors were a
+static reservation. It does not close the remaining M9 gates.
+
+The three native storage transports now own their completion vectors from a shared table
+instead of computing one from the framework handle. `nolx-hal-core::irq_vectors` holds the
+rules, host-tested: which vectors a kind of controller may own, the preferred vector the
+first controller of a kind takes, the range the further controllers take from its lowest, and
+the ledger entry that names a controller. `kernel/src/hal/irq_vectors.rs` keeps the table
+itself: one atomic entry per vector, a compare-and-swap for the claim and for the release,
+and no lock on the interrupt path.
+
+A driver claims its vector when it starts, before the controller is told about it, so two
+controllers can never share one. The vector is released only after the transport's own
+checked stop has proved that the controller can no longer raise it: the port's engines
+stopped, the port naming no buffer, the HBA's messages disabled and bus mastering off for
+AHCI; the controller disabled, not ready, its namespace flushed and its MSI-X disabled and
+function-masked for NVMe; the status reset to zero with the messages disabled and bus
+mastering off for virtio-blk. A failed controller keeps its vector, because a controller that
+may still raise an interrupt must keep the resource that names it. The release follows the
+proof, never precedes it, and a release that does not match the owner is refused.
+
+The vector-to-controller mapping is now the table's, not a formula. An interrupt on a vector
+that no controller owns reaches no driver at all, and an interrupt on a released vector is
+ignored rather than counted for a controller that no longer holds it.
+
+`hal-ahci-nvme-recovery-test` and `hal-virtio-blk-recovery-test` prove the behaviour on
+hardware. Each fixture checks that a failed controller still owns its vector, that a proven
+stop frees it, that the restart takes the released vector again, that a vector no controller
+owns advances no counter, and that the vector another controller released is taken by the
+first one that asks again. The eight profiles (AHCI, NVMe and virtio-blk on PC and Q35) keep
+their two unchanged-media boots, their fifteen tagged durable exchanges and their host-mounted
+files.
+
+The pool is bounded, and a driver that finds no free vector refuses to start instead of
+sharing one: the bring-up fails with `NoVector` before the controller is told about any
+vector, and the refusal leaves nothing behind. The three recovery fixtures prove it: with
+every vector of the kind taken by a controller that does not exist, the start of a real
+controller is refused, the refusal is reported as the missing vector rather than as a
+device fault, and the controller starts again as soon as the vectors are free.
+
+**Limits:** only the storage transports take part. The xHCI's per-handle vectors, the
+virtio-net's receive/transmit pair and the e1000's firmware-routed INTx line are still
+assigned statically, so this is a bounded step towards general interrupt-resource
+reclamation, not a general dynamic allocator. The pools are fixed per driver kind and cannot
+grow; the reclaim rule trusts the transport's own hardware proof; the table is BSP-local and
+not SMP-safe against concurrent claims of the same vector beyond the compare-and-swap; and
+the vectors themselves remain local APIC vectors, not an IOAPIC route. General reclamation,
+nonzero-segment binding, USB/Executive bindings and general device-power/S3 remain open.
+**M9 is not complete.**

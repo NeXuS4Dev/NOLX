@@ -44,17 +44,29 @@ fn refused(dev: usize) {
     );
     assert_eq!(blockdev::flush(id), Err(nolxfs::DevError::Io(19)));
 }
-fn detached(dev: usize) {
+/// A vector of this driver's range that no controller owns. The ledger, not the range,
+/// decides who owns a vector, so this one reaches no controller at all.
+const UNOWNED: u8 = 0x6f;
+fn detached(dev: usize, vector: u8) {
     assert!(!LIVE[dev].load(Ordering::Acquire));
+    assert!(super::super::irq_vectors::owner(UNOWNED).is_none());
     let before = COMPLETION_INTERRUPTS[dev].load(Ordering::Acquire);
-    on_completion_interrupt(completion_vector(dev));
-    on_completion_interrupt(0x60 + dev as u8);
+    // The vector this controller used to own, the highest vector of this driver's range
+    // that no controller owns, and a vector of another driver: none of them may count.
+    on_completion_interrupt(vector);
+    on_completion_interrupt(UNOWNED);
     on_completion_interrupt(0x20);
     assert_eq!(COMPLETION_INTERRUPTS[dev].load(Ordering::Acquire), before);
 }
 fn pinned(dev: usize, peer: usize, region: Region, mappings: usize, master: bool) {
     assert_eq!(driver_start::state(dev), Ok(FrameworkState::Failed));
     assert_eq!(driver_start::state(peer), Ok(FrameworkState::Started));
+    // A failed controller may still raise its interrupt, so it keeps its vector.
+    let vector = STATE[dev].lock().vector.unwrap();
+    assert_eq!(
+        super::super::irq_vectors::owner(vector),
+        Some((super::super::irq_vectors::VectorKind::VirtioBlk, dev))
+    );
     assert_eq!(super::super::dma::live_pages(), 4);
     assert_eq!(mmio::live_mappings(), mappings);
     assert!(!empty_dma(dev));
@@ -65,19 +77,24 @@ fn pinned(dev: usize, peer: usize, region: Region, mappings: usize, master: bool
     assert!(super::super::pci_exclusion::messages_disabled(
         STATE[dev].lock().bdf.unwrap()
     ));
-    detached(dev);
+    detached(dev, vector);
     refused(dev);
     assert_eq!(driver_start::start(dev), Err(Error::BadState));
     assert_eq!(driver_start::remove(dev), Err(Error::Busy));
 }
 fn recovered(dev: usize, region: Region, mappings: usize) {
+    let vector = STATE[dev].lock().vector.unwrap();
     driver_start::recover(dev).unwrap();
     assert_eq!(driver_start::state(dev), Ok(FrameworkState::Stopped));
     assert!(removable(dev));
     assert_eq!(super::super::dma::live_pages(), 2);
     assert_eq!(mmio::live_mappings() + 4, mappings);
     assert!(region.read32(0).is_err());
-    detached(dev);
+    // The controller can no longer raise its vector, so the vector is free again and the
+    // next controller of this kind may take it.
+    assert_eq!(STATE[dev].lock().vector, None);
+    assert_eq!(super::super::irq_vectors::owner(vector), None);
+    detached(dev, vector);
     refused(dev);
 }
 fn exchange(dev: usize, other: usize, sequence: u8, tag: u8, console: &mut dyn HalConsole) {
@@ -141,15 +158,18 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     probe(console);
     pinned(dev, peer, region, mappings, true);
     exchange(peer, dev, 0, 0x32, console);
+    let reclaimed = STATE[dev].lock().vector.unwrap();
     recovered(dev, region, mappings);
     driver_start::start(dev).unwrap();
-    let alias = 0x60 + dev as u8;
-    assert_ne!(alias, completion_vector(dev));
+    // The reclaimed vector is taken again: a stop and restart does not consume a new one.
+    assert_eq!(STATE[dev].lock().vector, Some(reclaimed));
+    // A vector that no controller owns reaches no controller at all.
     let before = COMPLETION_INTERRUPTS[dev].load(Ordering::Acquire);
-    on_completion_interrupt(alias);
+    on_completion_interrupt(UNOWNED);
     assert_eq!(COMPLETION_INTERRUPTS[dev].load(Ordering::Acquire), before);
     exchange(dev, peer, 1, 0x31, console);
     exchange(peer, dev, 2, 0x32, console);
+    let _ = writeln!(console, "virtio-blk-recovery: interrupt vector {reclaimed:#x} released by the checked stop and taken again on restart");
     let _ = writeln!(console, "virtio-blk-recovery: post-filesystem startup quarantine recovered; DMA 4 -> 2 -> 4, independent MSI-X live");
 
     region = STATE[dev].lock().common.unwrap();
@@ -231,11 +251,57 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     driver_start::start(dev).unwrap();
     exchange(dev, peer, 14, 0x31, console);
     let _ = writeln!(console, "virtio-blk-recovery: refused flush quarantined without reset/free; explicit recovery avoided unsafe flush retry");
+    let target_vector = STATE[dev].lock().vector.unwrap();
+    let peer_vector = STATE[peer].lock().vector.unwrap();
     driver_start::stop(dev).unwrap();
     driver_start::stop(peer).unwrap();
-    detached(dev);
-    detached(peer);
+    // Both controllers are stopped, so both vectors are free again.
+    let vectors = [STATE[dev].lock().vector, STATE[peer].lock().vector];
+    assert_eq!(vectors, [None, None]);
+    assert_eq!(super::super::irq_vectors::outstanding(), 0);
+    detached(dev, target_vector);
+    detached(peer, peer_vector);
     assert_eq!(super::super::dma::live_pages(), 0);
+    // The released vectors are taken again, by the other controller: the table hands out
+    // the free vector that is lowest, not a fixed one per controller.
+    driver_start::start(peer).unwrap();
+    assert_eq!(STATE[peer].lock().vector, Some(target_vector));
+    driver_start::start(dev).unwrap();
+    assert_eq!(STATE[dev].lock().vector, Some(peer_vector));
+    driver_start::stop(dev).unwrap();
+    driver_start::stop(peer).unwrap();
+    assert_eq!(super::super::irq_vectors::outstanding(), 0);
+    let _ = writeln!(
+        console,
+        "virtio-blk-recovery: released vectors {target_vector:#x} and {peer_vector:#x} were taken again by the other controller"
+    );
+    // The pool of this kind is bounded: when every vector of it is taken, the start is
+    // refused instead of sharing a vector with a live controller.
+    let kind = super::super::irq_vectors::VectorKind::VirtioBlk;
+    let held = super::super::irq_vectors::occupy(kind, 0xfe);
+    assert_eq!(
+        held.len(),
+        super::super::irq_vectors::pool(kind).candidates().count()
+    );
+    assert!(super::super::irq_vectors::claim(kind, 0xfe).is_none());
+    assert_eq!(driver_start::start(dev), Err(Error::OpFailed));
+    assert!(last_failure_was_no_vector(dev));
+    assert_eq!(STATE[dev].lock().vector, None);
+    let _ = writeln!(
+        console,
+        "virtio-blk-recovery: the vector pool of {} vectors is exhausted and the start is refused",
+        held.len()
+    );
+    for vector in held {
+        assert!(super::super::irq_vectors::release(vector, kind, 0xfe));
+    }
+    assert_eq!(super::super::irq_vectors::outstanding(), 0);
+    // With the vectors free again the controller starts and owns one again.
+    driver_start::recover(dev).unwrap();
+    driver_start::start(dev).unwrap();
+    assert!(STATE[dev].lock().vector.is_some());
+    driver_start::stop(dev).unwrap();
+    assert_eq!(super::super::irq_vectors::outstanding(), 0);
     assert_eq!(mmio::live_mappings() + 8, mappings);
     driver_start::remove(dev).unwrap();
     driver_start::remove(peer).unwrap();

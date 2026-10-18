@@ -20,6 +20,7 @@
 
 use super::blockdev;
 use super::driver_start::{self, Log};
+use super::irq_vectors;
 use super::msix;
 use nolx_block_core::devices::QueueError;
 use nolx_block_core::queue::{Direction, Request};
@@ -126,6 +127,8 @@ pub enum Failure {
     RoundTrip,
     /// MSI-X could not be set up for the controller.
     Msix(msix::Error),
+    /// Every interrupt vector this driver may own is taken by another controller.
+    NoVector,
     /// Fewer completion interrupts arrived than I/O commands were submitted.
     Interrupts {
         /// Completion interrupts that arrived.
@@ -168,6 +171,10 @@ struct State {
     io: Option<Queue>,
     /// The data buffer a partial start still owns.
     data: Option<Dma>,
+    /// The interrupt vector this controller owns. It is claimed from the shared table
+    /// when the controller starts and released only after a checked stop has proved
+    /// that the controller can no longer raise it.
+    vector: Option<u8>,
 }
 
 static STATE: [IrqMutex<State>; driver_start::DEVICES] = [const {
@@ -181,6 +188,7 @@ static STATE: [IrqMutex<State>; driver_start::DEVICES] = [const {
         identify: None,
         io: None,
         data: None,
+        vector: None,
     })
 }; driver_start::DEVICES];
 
@@ -194,6 +202,8 @@ struct Owners {
     io: Option<Queue>,
     data: Option<Dma>,
     disk: Option<Disk>,
+    /// The interrupt vector this controller owns, claimed from the shared table.
+    vector: Option<u8>,
 }
 
 /// The match rule: the controller's class, subclass, and programming interface.
@@ -259,7 +269,7 @@ pub fn probe(console: &mut dyn HalConsole) {
                     console,
                     "nvme: instance {dev}, block {}, vector {:#x}, PCI {:02x}:{:02x}.{}",
                     blockdev::device(dev).unwrap(),
-                    completion_vector(dev),
+                    state.vector.unwrap_or(0),
                     info.bdf.bus,
                     info.bdf.device,
                     info.bdf.function
@@ -317,6 +327,12 @@ fn start_device(dev: usize) -> bool {
 
 /// Complete and partial owners survive every refusal. A failed flush quarantines the
 /// controller; explicit recovery stops it without retrying potentially unsafe I/O.
+/// Whether the last bring-up of this controller was refused because every interrupt
+/// vector this driver may own was taken by another controller.
+pub fn last_failure_was_no_vector(dev: usize) -> bool {
+    let state = STATE[dev].lock();
+    matches!(&state.outcome, Some(Err(Failure::NoVector)))
+}
 fn stop_device(dev: usize) -> bool {
     let flushed = if LIVE[dev].load(Ordering::Acquire) {
         let disk = STATE[dev].lock().disk.take();
@@ -440,6 +456,11 @@ fn stop_device(dev: usize) -> bool {
         }
     }
     state.regs = None;
+    // The controller can no longer raise this vector, so it belongs to nobody again and
+    // the next controller of this kind may take it.
+    if let Some(vector) = state.vector.take() {
+        irq_vectors::release(vector, KIND, dev);
+    }
     true
 }
 
@@ -529,13 +550,21 @@ fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<(), Failure> {
     state.io = owners.io;
     state.data = owners.data;
     state.disk = owners.disk;
+    if owners.vector.is_some() {
+        // A build that failed before the claim leaves the previous claim alone: the
+        // controller still owns the vector it had.
+        state.vector = owners.vector;
+    }
     drop(state);
     result
 }
 
 fn build(dev: usize, console: &mut dyn HalConsole, owners: &mut Owners) -> Result<(), Failure> {
     let bdf = STATE[dev].lock().bdf.ok_or(Failure::NoController)?;
-    let vector = completion_vector(dev);
+    // The vector is owned before the controller is told about it, so two controllers can
+    // never share one.
+    let vector = irq_vectors::claim(KIND, dev).ok_or(Failure::NoVector)?;
+    owners.vector = Some(vector);
     COMPLETION_INTERRUPTS[dev].store(0, Ordering::Release);
     IO_SUBMITTED[dev].store(0, Ordering::Release);
     // Memory decoding on, bus mastering off and no message delivery: the controller may
@@ -798,33 +827,23 @@ fn io_execute(
     execute_io(regs, io, command, request)
 }
 
-/// Count one completion interrupt. Called from the interrupt handler on [`COMPLETION_VECTOR`].
-fn completion_vector(dev: usize) -> u8 {
-    if blockdev::device(dev) == Some(blockdev::NVME) {
-        COMPLETION_VECTOR
-    } else {
-        0xa0 + dev as u8
-    }
-}
-/// Whether the vector belongs to this driver's bounded per-controller reservation.
+/// The kind of controller that owns the NVMe driver's vectors.
+const KIND: irq_vectors::VectorKind = irq_vectors::VectorKind::Nvme;
+/// Whether the vector belongs to an NVMe controller.
 pub fn handles_vector(vector: u8) -> bool {
-    vector == COMPLETION_VECTOR || (0xa0..0xb0).contains(&vector)
+    matches!(irq_vectors::owner(vector), Some((KIND, _)))
 }
 /// Attribute a vector to exactly one controller before acknowledging its completion.
 pub fn on_completion_interrupt(vector: u8) {
-    let dev = if vector == COMPLETION_VECTOR {
-        blockdev::primary_handle(blockdev::NVME)
-    } else if (0xa0..0xb0).contains(&vector) {
-        Some(usize::from(vector - 0xa0))
-    } else {
-        None
-    };
-    let Some(dev) = dev.filter(|&dev| dev < driver_start::DEVICES) else {
+    let Some((kind, dev)) = irq_vectors::owner(vector) else {
         return;
     };
+    if kind != KIND || dev >= driver_start::DEVICES {
+        return;
+    }
     // Only a live controller that owns this vector may be counted. A stopped or quarantined
     // one has no window to read and no command to count.
-    if !LIVE[dev].load(Ordering::Acquire) || vector != completion_vector(dev) {
+    if !LIVE[dev].load(Ordering::Acquire) {
         return;
     }
     COMPLETION_INTERRUPTS[dev].fetch_add(1, Ordering::Release);

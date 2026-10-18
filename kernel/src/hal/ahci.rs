@@ -23,6 +23,7 @@
 
 use super::blockdev;
 use super::driver_start::{self, Log};
+use super::irq_vectors;
 use nolx_ahci_core::{self as ahci, CommandHeader};
 use nolx_block_core::devices::QueueError;
 use nolx_block_core::queue::{Direction, Request};
@@ -63,33 +64,23 @@ static STOPPED_COMMAND: [AtomicU32; driver_start::DEVICES] =
 static LIVE: [AtomicBool; driver_start::DEVICES] =
     [const { AtomicBool::new(false) }; driver_start::DEVICES];
 
-/// Keep the compatibility vector for the first HBA; reserve one for each further controller.
-fn completion_vector(dev: usize) -> u8 {
-    if blockdev::device(dev) == Some(blockdev::AHCI) {
-        COMPLETION_VECTOR
-    } else {
-        0x90 + dev as u8
-    }
-}
-/// Whether the vector belongs to this driver's bounded per-controller reservation.
+/// The kind of controller that owns the AHCI's vectors.
+const KIND: irq_vectors::VectorKind = irq_vectors::VectorKind::Ahci;
+/// Whether the vector belongs to an AHCI controller.
 pub fn handles_vector(vector: u8) -> bool {
-    vector == COMPLETION_VECTOR || (0x90..0xa0).contains(&vector)
+    matches!(irq_vectors::owner(vector), Some((KIND, _)))
 }
 /// Attribute a vector to exactly one controller before acknowledging its completion.
 pub fn on_completion_interrupt(vector: u8) {
-    let dev = if vector == COMPLETION_VECTOR {
-        blockdev::primary_handle(blockdev::AHCI)
-    } else if (0x90..0xa0).contains(&vector) {
-        Some(usize::from(vector - 0x90))
-    } else {
-        None
-    };
-    let Some(dev) = dev.filter(|&dev| dev < driver_start::DEVICES) else {
+    let Some((kind, dev)) = irq_vectors::owner(vector) else {
         return;
     };
+    if kind != KIND || dev >= driver_start::DEVICES {
+        return;
+    }
     // Only a live controller that owns this vector may be acknowledged. A stopped or
     // quarantined one has no window to read and no command to count.
-    if !LIVE[dev].load(Ordering::Acquire) || vector != completion_vector(dev) {
+    if !LIVE[dev].load(Ordering::Acquire) {
         return;
     }
     let registers = INTERRUPT_REGISTERS[dev].lock();
@@ -147,6 +138,8 @@ pub enum Failure {
     Encoding,
     /// No frame was available for the command memory.
     Memory,
+    /// Every interrupt vector this driver may own is taken by another controller.
+    NoVector,
     /// The MMIO window refused a mapping.
     Window(mmio::Failure),
     /// A register access was refused.
@@ -194,6 +187,10 @@ struct State {
     pages: [Option<Dma>; 2],
     /// The port the controller was brought up on.
     port: Option<u8>,
+    /// The interrupt vector this controller owns. It is claimed from the shared table
+    /// when the controller starts and released only after a checked stop has proved
+    /// that the controller can no longer raise it.
+    vector: Option<u8>,
 }
 
 static STATE: [IrqMutex<State>; driver_start::DEVICES] = [const {
@@ -205,6 +202,7 @@ static STATE: [IrqMutex<State>; driver_start::DEVICES] = [const {
         common: None,
         pages: [const { None }; 2],
         port: None,
+        vector: None,
     })
 }; driver_start::DEVICES];
 
@@ -216,6 +214,8 @@ struct Owners {
     disk: Option<Disk>,
     pages: [Option<Dma>; 2],
     port: Option<u8>,
+    /// The interrupt vector this controller owns, claimed from the shared table.
+    vector: Option<u8>,
 }
 
 /// The match rule: the controller's class, subclass, and programming interface.
@@ -281,7 +281,7 @@ pub fn probe(console: &mut dyn HalConsole) {
                     console,
                     "ahci: instance {dev}, block {}, vector {:#x}, PCI {:02x}:{:02x}.{}",
                     blockdev::device(dev).unwrap(),
-                    completion_vector(dev),
+                    state.vector.unwrap_or(0),
                     info.bdf.bus,
                     info.bdf.device,
                     info.bdf.function
@@ -339,6 +339,12 @@ fn start_device(dev: usize) -> bool {
 
 /// Complete and partial owners survive every refusal. A failed flush quarantines the port;
 /// explicit recovery stops it without retrying potentially unsafe or timed-out I/O.
+/// Whether the last bring-up of this controller was refused because every interrupt
+/// vector this driver may own was taken by another controller.
+pub fn last_failure_was_no_vector(dev: usize) -> bool {
+    let state = STATE[dev].lock();
+    matches!(&state.outcome, Some(Err(Failure::NoVector)))
+}
 fn stop_device(dev: usize) -> bool {
     let flushed = if LIVE[dev].load(Ordering::Acquire) {
         let disk = STATE[dev].lock().disk.take();
@@ -458,6 +464,11 @@ fn stop_device(dev: usize) -> bool {
     }
     state.common = None;
     state.port = None;
+    // The controller can no longer raise this vector, so it belongs to nobody again and
+    // the next controller of this kind may take it.
+    if let Some(vector) = state.vector.take() {
+        irq_vectors::release(vector, KIND, dev);
+    }
     true
 }
 
@@ -500,13 +511,21 @@ fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<(), Failure> {
     state.disk = owners.disk;
     state.pages = owners.pages;
     state.port = owners.port;
+    if owners.vector.is_some() {
+        // A build that failed before the claim leaves the previous claim alone: the
+        // controller still owns the vector it had.
+        state.vector = owners.vector;
+    }
     drop(state);
     result
 }
 
 fn build(dev: usize, console: &mut dyn HalConsole, owners: &mut Owners) -> Result<(), Failure> {
     let bdf = STATE[dev].lock().bdf.ok_or(Failure::NoController)?;
-    let vector = completion_vector(dev);
+    // The vector is owned before the controller is told about it, so a controller that
+    // starts can never share one with another controller.
+    let vector = irq_vectors::claim(KIND, dev).ok_or(Failure::NoVector)?;
+    owners.vector = Some(vector);
     let initial_completions = COMPLETIONS[dev].load(Ordering::Acquire);
     COMMANDS[dev].store(0, Ordering::Release);
     // Memory decoding on, bus mastering off and no message delivery: the controller may

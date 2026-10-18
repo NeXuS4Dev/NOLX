@@ -20,6 +20,7 @@
 
 use super::blockdev;
 use super::driver_start::{self, Log};
+use super::irq_vectors;
 use super::msix;
 use alloc::vec;
 use nolx_block_core::devices::QueueError;
@@ -68,7 +69,8 @@ pub enum Failure {
     Queue(QueueError),
     /// MSI-X could not be set up for the device.
     Msix(msix::Error),
-    /// The device did not accept the MSI-X vector for the queue.
+    /// The device did not accept the MSI-X vector for the queue, or every interrupt
+    /// vector this driver may own is taken by another controller.
     NoVector,
     /// Fewer completion interrupts arrived than requests were submitted.
     Interrupts {
@@ -154,6 +156,10 @@ struct State {
     common: Option<Region>,
     pages: [Option<Dma>; 2],
     queue: Option<Queue>,
+    /// The interrupt vector this controller owns. It is claimed from the shared table
+    /// when the controller starts and released only after a checked stop has proved
+    /// that the controller can no longer raise it.
+    vector: Option<u8>,
 }
 
 static STATE: [IrqMutex<State>; driver_start::DEVICES] = [const {
@@ -165,12 +171,12 @@ static STATE: [IrqMutex<State>; driver_start::DEVICES] = [const {
         common: None,
         pages: [const { None }; 2],
         queue: None,
+        vector: None,
     })
 }; driver_start::DEVICES];
 
 static LIVE: [AtomicBool; driver_start::DEVICES] =
     [const { AtomicBool::new(false) }; driver_start::DEVICES];
-static PRIMARY: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 /// The match rules: the transitional and the modern virtio block device IDs.
 static MATCHES: &[Match] = &[
@@ -223,9 +229,6 @@ pub fn probe(console: &mut dyn HalConsole) {
             }
             STATE[dev].lock().bdf = Some(info.bdf);
             blockdev::bind_storage(dev, blockdev::VIRTIO).map_err(|_| nolx_df_core::Error::Full)?;
-            if blockdev::device(dev) == Some(blockdev::VIRTIO) {
-                PRIMARY.store(dev, Ordering::Release);
-            }
             #[cfg(feature = "hal-virtio-blk-recovery-test")]
             recovery::claim(dev);
             Ok(())
@@ -239,7 +242,7 @@ pub fn probe(console: &mut dyn HalConsole) {
                     console,
                     "virtio-blk: instance {dev}, block {}, vector {:#x}, PCI {:02x}:{:02x}.{}",
                     blockdev::device(dev).unwrap(),
-                    completion_vector(dev),
+                    state.vector.unwrap_or(0),
                     info.bdf.bus,
                     info.bdf.device,
                     info.bdf.function
@@ -302,6 +305,12 @@ fn start_device(dev: usize) -> bool {
 
 /// Complete/partial owners survive every refusal. A failed flush quarantines the source;
 /// explicit recovery resets it without retrying potentially unsafe or timed-out I/O.
+/// Whether the last bring-up of this controller was refused because every interrupt
+/// vector this driver may own was taken by another controller.
+pub fn last_failure_was_no_vector(dev: usize) -> bool {
+    let state = STATE[dev].lock();
+    matches!(&state.outcome, Some(Err(Failure::NoVector)))
+}
 fn stop_device(dev: usize) -> bool {
     let flushed = if LIVE[dev].load(Ordering::Acquire) {
         let disk = STATE[dev].lock().disk.take();
@@ -399,6 +408,11 @@ fn stop_device(dev: usize) -> bool {
         }
     }
     state.common = None;
+    // The controller can no longer raise this vector, so it belongs to nobody again and
+    // the next controller of this kind may take it.
+    if let Some(vector) = state.vector.take() {
+        irq_vectors::release(vector, KIND, dev);
+    }
     true
 }
 fn empty_dma(dev: usize) -> bool {
@@ -430,7 +444,10 @@ pub(crate) fn with_disk<T>(
 fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<(), Failure> {
     let bdf = STATE[dev].lock().bdf.ok_or(Failure::NoDevice)?;
     let device = blockdev::device(dev).ok_or(Failure::NoDevice)?;
-    let vector = completion_vector(dev);
+    // The vector is owned before the device is told about it, so two controllers can
+    // never share one.
+    let vector = irq_vectors::claim(KIND, dev).ok_or(Failure::NoVector)?;
+    STATE[dev].lock().vector = Some(vector);
     if !super::pci_exclusion::pci_access(bdf, false) || !super::pci_exclusion::disable_messages(bdf)
     {
         return Err(Failure::NoDevice);
@@ -968,31 +985,21 @@ static COMPLETION_INTERRUPTS: [AtomicUsize; driver_start::DEVICES] =
 static REQUESTS_SUBMITTED: [AtomicUsize; driver_start::DEVICES] =
     [const { AtomicUsize::new(0) }; driver_start::DEVICES];
 
-/// Dedicated vectors for the first instance (legacy 0x51) and additional framework handles.
-fn completion_vector(dev: usize) -> u8 {
-    if PRIMARY.load(Ordering::Acquire) == dev {
-        COMPLETION_VECTOR
-    } else {
-        0x60 + dev as u8
-    }
-}
-/// Whether the vector belongs to this driver's bounded per-controller reservation.
+/// The kind of controller that owns the virtio block driver's vectors.
+const KIND: irq_vectors::VectorKind = irq_vectors::VectorKind::VirtioBlk;
+/// Whether the vector belongs to a virtio block controller.
 pub fn handles_vector(vector: u8) -> bool {
-    vector == COMPLETION_VECTOR || (0x60..0x70).contains(&vector)
+    matches!(irq_vectors::owner(vector), Some((KIND, _)))
 }
 /// Attribute a vector to exactly one controller before acknowledging its completion.
 pub fn on_completion_interrupt(vector: u8) {
-    let dev = if vector == COMPLETION_VECTOR {
-        Some(PRIMARY.load(Ordering::Acquire))
-    } else if (0x60..0x70).contains(&vector) {
-        Some(usize::from(vector - 0x60))
-    } else {
-        None
-    };
-    let Some(dev) = dev.filter(|&dev| dev < driver_start::DEVICES) else {
+    let Some((kind, dev)) = irq_vectors::owner(vector) else {
         return;
     };
-    if !LIVE[dev].load(Ordering::Acquire) || vector != completion_vector(dev) {
+    if kind != KIND || dev >= driver_start::DEVICES {
+        return;
+    }
+    if !LIVE[dev].load(Ordering::Acquire) {
         return;
     }
     COMPLETION_INTERRUPTS[dev].fetch_add(1, Ordering::Release);

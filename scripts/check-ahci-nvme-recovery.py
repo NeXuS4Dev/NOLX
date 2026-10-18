@@ -97,6 +97,22 @@ def run_boot(qemu, kernel, machine, backend, disks, label, boot):
         rf'{backend}-recovery: exchange=(\d+) handle=(\d+) block=(\d+) tag=(\d+) lba=(\d+) '
         r'write/flush/read selected IRQ progressed', text)
     assert len(rows) == 15 and [int(r[0]) for r in rows] == list(range(15)), (label, rows)
+    # The checked stop released the controller's interrupt vector and the restart took
+    # it again: a stop and restart does not consume a new vector for ever.
+    reclaimed = re.findall(
+        rf'{backend}-recovery: interrupt vector (0x[0-9a-f]+) released by the checked stop '
+        r'and taken again on restart', text)
+    assert len(reclaimed) == 1, (label, reclaimed)
+    # The pool of the kind is bounded: with every vector of it taken, the start is refused.
+    exhausted = re.findall(
+        rf'{backend}-recovery: the vector pool of (\d+) vectors is exhausted and the start '
+        r'is refused', text)
+    assert len(exhausted) == 1 and int(exhausted[0]) > 1, (label, exhausted)
+    # The vector another controller released is taken by the first one that asks again.
+    swapped = re.findall(
+        rf'{backend}-recovery: released vectors (0x[0-9a-f]+) and (0x[0-9a-f]+) were taken '
+        r'again by the other controller', text)
+    assert len(swapped) == 1 and swapped[0][0] != swapped[0][1], (label, swapped)
     writers = {}
     for sequence, handle, block, tag, lba in rows:
         sequence, tag, lba = int(sequence), int(tag), int(lba)
