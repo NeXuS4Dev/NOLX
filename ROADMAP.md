@@ -1243,6 +1243,12 @@ The pool is bounded and the refusal is real: with every vector of a kind taken, 
 that starts finds no vector, fails with the missing vector before the controller is told
 about any vector, leaves nothing behind, and starts again once the vectors are free.
 
+Local verification passed 128 native fixture profiles and 44 further host-side mounts, both
+host suites passed 832 tests each, the unsafe audit found 263 blocks without a missing
+SAFETY comment, the conformance database holds 400 assertions, and CI run
+[39163258921](https://github.com/NeXuS4Dev/NOLX/actions/runs/39163258921) on `68bab9d`
+passed all nineteen jobs.
+
 Only the storage transports take part: the xHCI's per-handle vectors, the virtio-net's
 receive/transmit pair and the e1000's firmware-routed INTx line are still static, the pools
 are fixed per driver kind, and the reclaim rule trusts each transport's own hardware proof.

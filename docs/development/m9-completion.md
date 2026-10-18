@@ -1380,6 +1380,21 @@ every vector of the kind taken by a controller that does not exist, the start of
 controller is refused, the refusal is reported as the missing vector rather than as a
 device fault, and the controller starts again as soon as the vectors are free.
 
+Local verification passed **128 native fixture profiles**: the 105 preceding USB/input,
+hardware lifecycle/shutdown, multi-adapter/firmware-routing, e1000, virtio-net and virtio-blk
+profiles, the four AHCI/NVMe recovery profiles, and the storage-file, driver-lifecycle and
+storage-multi profiles of this checkpoint. **44 further host-side checks** independently
+mounted the persisted files after QEMU exited. Both overlapping Rust host suites passed
+**832 tests** each. Host/native Clippy, formatting, boot/Multiboot, 31 layout tests,
+generated files, five IRQ-proof-parser tests, the unsafe audit (**263 blocks**, zero missing
+SAFETY comments) and the conformance database (**400 assertions**) passed. The full native
+regression log is `build/vectors-all-native.log` (172 checks, exit zero).
+
+CI run [39163258921](https://github.com/NeXuS4Dev/NOLX/actions/runs/39163258921) on
+`68bab9d` passed **all nineteen jobs**, including the `AHCI and NVMe checked failure
+recovery` and `Virtio-blk checked failure recovery` jobs that now assert the reclamation and
+the refusal of an exhausted pool. These checks still do not close the remaining M9 gates.
+
 **Limits:** only the storage transports take part. The xHCI's per-handle vectors, the
 virtio-net's receive/transmit pair and the e1000's firmware-routed INTx line are still
 assigned statically, so this is a bounded step towards general interrupt-resource
