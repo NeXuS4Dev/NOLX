@@ -211,6 +211,7 @@ pub(crate) unsafe fn release_owned(owner: usize) {
     feature = "hal-driver-lifecycle-test",
     feature = "hal-e1000-recovery-test",
     feature = "hal-virtio-net-recovery-test",
+    feature = "hal-virtio-blk-recovery-test",
     feature = "hal-xhci-lifecycle-test",
     feature = "hal-xhci-recovery-test",
     feature = "hal-xhci-transfer-fault-test"

@@ -1160,3 +1160,17 @@ wire exchanges, independent RX/TX IRQ progress, stale mapping refusal and final 
 are deliberate proof refusals, not naturally failing emulated hardware. The recovery allowlist is
 xHCI/e1000/virtio-net only; storage failure recovery, dynamic IRQ allocation, runtime TX-timeout
 policy, general USB/Executive/PCI/firmware and S3 gates remain open. M9 is not complete.
+
+
+M9 virtio-blk recovery checkpoint (2026-10-18): retain the common mapping, both loose pages,
+partially programmed queue and complete disk before fallible register/I/O work. A failed request
+poisons transport admission rather than flushing/reusing its outstanding descriptor; failed starts
+reset without additional I/O. Healthy stops flush first. All release paths require detached IRQs,
+reset status zero, PCI bus mastering off/INTx blocked and disabled MSI/MSI-X readback before freeing
+owners and MMIO. Shared virtio PCI/proof helpers preserve the virtio-net checks. Recovery is now
+audited for xHCI/e1000/virtio-net/virtio-blk only, and moves Failed to Stopped without restart or
+thawing shutdown. Four PC/Q35 modern/transitional target/peer profiles each boot twice on unchanged
+media, perform fifteen uniquely tagged public write/flush/read exchanges per boot, independently
+mount persisted files on the host and leave DMA zero. Faults deliberately refuse cleanup/flush or
+withhold proof/completion, not naturally failing QEMU hardware. AHCI/NVMe recovery, dynamic IRQ
+ownership, general PCI/firmware, USB/Executive and device-power/S3 gates remain open. M9 is incomplete.

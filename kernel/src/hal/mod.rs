@@ -529,3 +529,5 @@ pub unsafe fn cpuid(leaf: u32) -> (u32, u32, u32, u32) {
     };
     (eax, ebx, ecx, edx)
 }
+
+mod virtio_pci;

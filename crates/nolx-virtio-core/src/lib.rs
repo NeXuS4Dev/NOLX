@@ -17,6 +17,8 @@
 
 /// Modern virtio-net negotiation and frame layout.
 pub mod net;
+/// Modern transport queue admission and shutdown readback rules.
+pub mod transport;
 
 use nolx_pci_core::{capabilities, Bdf, ConfigSpace};
 

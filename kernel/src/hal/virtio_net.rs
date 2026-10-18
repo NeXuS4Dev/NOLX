@@ -201,46 +201,17 @@ fn start(dev: usize) -> bool {
     good
 }
 fn pci_access(bdf: Bdf, dma: bool) -> Result<(), Failure> {
-    let command = ConfigAccess.read_u32(bdf, 4) & 0xffff;
-    let wanted = (command | 2 | (1 << 10)) & !4 | if dma { 4 } else { 0 };
-    ConfigAccess.write_u32(bdf, 4, wanted);
-    if ConfigAccess.read_u32(bdf, 4) & (6 | (1 << 10)) != wanted & (6 | (1 << 10)) {
-        return Err(Failure::Configuration);
-    }
-    Ok(())
+    super::virtio_pci::pci_access(bdf, dma)
+        .then_some(())
+        .ok_or(Failure::Configuration)
 }
 fn disable_messages(bdf: Bdf) -> Result<(), Failure> {
-    use nolx_pci_core::msi;
-    let caps = nolx_pci_core::capabilities(&mut ConfigAccess, bdf);
-    if caps.truncated {
-        return Err(Failure::Configuration);
-    }
-    for cap in caps.as_slice() {
-        let (clear, set) = match cap.id {
-            msi::CAP_MSI => (1u32 << 16, 0),
-            msi::CAP_MSI_X => (1u32 << 31, 1u32 << 30),
-            _ => continue,
-        };
-        let old = ConfigAccess.read_u32(bdf, cap.offset);
-        ConfigAccess.write_u32(bdf, cap.offset, (old & !clear) | set);
-        if ConfigAccess.read_u32(bdf, cap.offset) & (clear | set) != set {
-            return Err(Failure::Configuration);
-        }
-    }
-    Ok(())
+    super::virtio_pci::disable_messages(bdf)
+        .then_some(())
+        .ok_or(Failure::Configuration)
 }
 fn messages_disabled(bdf: Bdf) -> bool {
-    use nolx_pci_core::msi;
-    let caps = nolx_pci_core::capabilities(&mut ConfigAccess, bdf);
-    !caps.truncated
-        && caps.as_slice().iter().all(|cap| {
-            let control = ConfigAccess.read_u32(bdf, cap.offset) >> 16;
-            match cap.id {
-                msi::CAP_MSI => control & 1 == 0,
-                msi::CAP_MSI_X => control & 0xc000 == 0x4000,
-                _ => true,
-            }
-        })
+    super::virtio_pci::messages_disabled(bdf)
 }
 fn stop(dev: usize) -> bool {
     LIVE[dev].store(false, Ordering::Release);

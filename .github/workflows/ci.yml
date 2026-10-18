@@ -823,6 +823,37 @@ jobs:
           done
       - uses: ./.github/actions/report-failure
         if: failure()
+  # The virtio block path retains its queue/DMA owners across every failure. These fixtures
+  # inject refusals and withheld proof -- they do not claim naturally failing hardware -- and
+  # then require durable writes, an unchanged-media reboot and exact DMA reclamation.
+  virtio-blk-recovery:
+    name: Virtio-blk checked failure recovery
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.88.0
+          targets: x86_64-unknown-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install QEMU
+        run: |
+          sudo apt-get update 2>&1 | tail -1
+          sudo apt-get install -y qemu-system-x86 2>&1 | tail -3
+      - name: Build the recovery fixture and an independent filesystem reader
+        run: |
+          cargo build -p nolxfs-dump 2>&1 | tee /tmp/job.log
+          make kernel KERNEL_FEATURES=hal-virtio-blk-recovery-test 2>&1 | tee -a /tmp/job.log
+      - name: Verify partial and failed-stop recovery, durable media and unchanged-media reboot
+        run: python3 scripts/check-virtio-blk-recovery.py 2>&1 | tee -a /tmp/job.log
+      - name: Annotate serial logs on failure
+        if: failure()
+        run: |
+          for log in build/virtio-blk-recovery-*.log; do
+            tr -cd '\11\12\40-\176' < "$log" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
+          done
+      - uses: ./.github/actions/report-failure
+        if: failure()
 
   driver-lifecycle:
     name: Persistent five-driver hardware lifecycle

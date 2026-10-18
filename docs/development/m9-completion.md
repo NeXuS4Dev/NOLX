@@ -36,6 +36,8 @@ M9 to the already implemented boot probes. Check items only with executable evid
       per-source shared-INTx detachment, explicit reset/PCI proof and fresh captured peer traffic.
 - [x] Checked modern/transitional virtio-net partial-start/failed-stop recovery, with
       retained queue/MMIO ownership, MSI-X detachment/readback and captured peer traffic.
+- [x] Checked modern/transitional virtio-blk partial-start/failed-stop recovery, including
+      published-request quarantine, independent durable peer I/O and unchanged-media reboot.
 - [ ] Complete failed-start/failed-stop recovery for remaining native drivers and general
       interrupt-resource reclamation;
       remaining segment binding and firmware routing are tracked separately above.
@@ -1177,7 +1179,7 @@ PC/Q35, each with modern-only/transitional target/peer roles swapped. They cover
 Two portable tests cover every status byte and combination of PCI DMA, INTx and message-exclusion
 proof, plus unrelated PCI bits. Scope remains BSP/segment-zero modern virtio transport, including
 transitional PCI devices exposing it. Legacy-only virtio, multiqueue/offload, runtime timeout policy,
-storage failed-start recovery, general USB/Executive/firmware/PCI and device-power/S3 remain open.
+AHCI/NVMe failed-start recovery, general USB/Executive/firmware/PCI and device-power/S3 remain open.
 M9 is not complete; no PR is created.
 
 Local verification passed **78 distinct native fixtures**: all 68 preceding USB/input, hardware
@@ -1186,4 +1188,70 @@ virtio-net wire/absent/no-APIC profiles, and four new recovery profiles. Both ov
 suites passed **810 tests** each. Host/native Clippy, formatting, boot/Multiboot, 31 layout tests,
 generated files, five IRQ-proof-parser tests, **389 conformance assertions** and the unsafe audit
 (**260 blocks**, zero missing SAFETY comments) passed. Exact-revision CI is required after push;
+these checks do not close the remaining M9 gates.
+
+
+## Audited virtio-blk failed-controller recovery checkpoint (2026-10-18)
+
+The block path now independently retains the common mapping, two loose pages, partially
+programmed ring and complete disk across every fallible register/validation/I/O step. Shape
+admission precedes ownership transfer/address publication: a header/data/status chain requires
+at least four ring entries, the bounded ring must fit one owner page, and the notification register
+must be aligned and contained in its mapping. QUEUE_ENABLE is read back. PCI bus mastering remains
+off through partial queue setup; all complete owners are retained before DRIVER_OK/DMA admission.
+Fallible filesystem validation restores the local disk to retained state even on error.
+
+Healthy stop flushes first. Failed startup does **not** issue another command. Any `issue` error
+closes the transport and IRQ source immediately; no later public read/write/flush or ordinary stop
+flush can overwrite descriptor zero or its request buffer while a command may still be active.
+The framework record is not automatically transitioned by runtime I/O failure: the caller sees an
+error, and explicit stop/reset is required. There is no transparent retry or promise of preserving
+an unacknowledged write. A refused stop flush detaches/masks its source and retains ownership;
+explicit Failed recovery resets it without retrying that unsafe barrier.
+
+Before release, stop/recovery detaches the source, blocks INTx, disables MSI/MSI-X and function-masks
+MSI-X with readback, acknowledges virtio reset at status zero, disables/read-backs PCI bus mastering,
+revalidates message controls and detaches the software block queue. Any missing proof retains all
+DMA/MMIO, including loose or partially configured owners. The checked PCI/proof operations are now
+shared with virtio-net; its public proof alias remains compatible. The IRQ handler uses atomic
+primary identity, rejects detached/unknown vectors and unused primary aliases, and never locks the
+framework/block binding tables or touches retired mappings.
+
+Framework recovery is now audited for **xHCI/e1000/virtio-net/virtio-blk** only. Failed public I/O,
+removal and ordinary restart refuse with an independent Started peer. Recovery only cleans to
+Stopped; restart is explicit, stale Regions refuse, and irreversible shutdown freeze cannot thaw.
+
+`hal-virtio-blk-recovery-test` plus `scripts/check-virtio-blk-recovery.py` passed four profiles:
+PC/Q35 with modern-only and transitional target/peer roles swapped and checked against actual
+PCI device IDs. Each profile boots **twice on the same unchanged disks**:
+
+- Post-filesystem startup failure and repeated cleanup refusals retain four total pages/eight
+  mappings while peer queued I/O and interrupts remain live. Duplicate probe cannot rebind a BDF.
+- An actual first allocated page is reclaimed on injected second-page allocation failure before
+  descriptor exposure. Recovery/restart does not leak pages or windows.
+- A read-back enabled queue with DRIVER_OK clear and PCI bus mastering off retains both pages
+  across repeated refusal, then checked reset reclaims exactly two target pages/four mappings.
+- Deliberately withheld final PCI proof retains ownership despite actual bus-master disable.
+- A deliberately withheld completion after real request publication retains owners and submits
+  exactly one request: no rollback flush or descriptor/buffer reuse occurs before checked reset.
+- Refused stop flush quarantines without reset/free; explicit recovery does not retry the flush.
+- Each boot performs **fifteen uniquely tagged public write/flush/read exchanges** with selected
+  controller IRQ progress. Media tags, separate block IDs, untouched peer LBAs and host image checks
+  prove isolation. The host independently mounts each persisted NOLXFS checksum file after exit;
+  both controllers verify the old file before writing on the second boot.
+- Final stop/removal leaves DMA zero, rejects detached vectors and stale mappings, passes allocator
+  audit, and refuses recovery/transport after freeze.
+
+Fault hooks refuse cleanup/flush or withhold otherwise valid completion/PCI evidence. This is
+**not** naturally failing reset/PCI-write hardware or physical-board verification. Static vector
+reservations and BSP-only lifecycle remain; AHCI/NVMe recovery, general PCI/firmware routing,
+USB/Executive and general device-power/S3 acceptance remain open. **M9 is not complete.**
+
+Local verification passed **105 native fixture profiles**: the 99 preceding USB/input, hardware
+lifecycle/shutdown, multi-adapter/firmware-routing, e1000 and virtio-net profiles, the four new
+virtio-blk recovery profiles, and the added unowned-quiesce profiles. **22 further host-side
+checks** independently mounted the persisted files after QEMU exited. Both overlapping Rust host
+suites passed **812 tests** each. Host/native Clippy, formatting, boot/Multiboot, 31 layout tests,
+generated files, five IRQ-proof-parser tests, **394 conformance assertions** and the unsafe audit
+(**261 blocks**, zero missing SAFETY comments) passed. Exact-revision CI is required after push;
 these checks do not close the remaining M9 gates.
