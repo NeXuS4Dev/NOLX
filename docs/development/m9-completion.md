@@ -32,7 +32,10 @@ M9 to the already implemented boot probes. Check items only with executable evid
       healthy stop/restart/removal with hardware quiescence and exact DMA reclamation.
 - [x] Serialized, reusable, generation-checked MMIO windows with partial-map rollback
       and shared-root-preserving unmap on healthy stop (BSP only).
-- [ ] Complete failed-start/failed-stop recovery and interrupt-resource reclamation;
+- [x] Checked e1000 partial-start/failed-stop recovery with independently retained MMIO/DMA,
+      per-source shared-INTx detachment, explicit reset/PCI proof and fresh captured peer traffic.
+- [ ] Complete failed-start/failed-stop recovery for remaining native drivers and general
+      interrupt-resource reclamation;
       remaining segment binding and firmware routing are tracked separately above.
 
 ## Storage integration
@@ -1072,3 +1075,59 @@ cases. Both overlapping Rust suites passed **806 tests** each (USB core: 31). Ho
 formatting, boot/Multiboot, 31 layout tests, generated files, five IRQ-proof parser tests and the
 unsafe audit (257 blocks, zero missing SAFETY comments) passed. Assertion database: **379**.
 Exact-revision CI is required after push; these checks do not mark M9 complete.
+
+
+## Audited e1000 failed-controller recovery checkpoint (2026-10-18)
+
+The native e1000 path now retains `Region` before any register operation can fail, independently
+of its successful `Report`. All eleven pages (RX ring/eight buffers/TX ring/frame) are allocated
+before any new DMA address is exposed. An incomplete batch is uniquely owned and safely released
+before publication; complete RX/TX owners move to retained slots before register programming.
+Consequently failures during RX-only startup, TX completion waits or ARP/IRQ validation cannot lose
+DMA ownership on stack unwinding. PCI memory access is enabled with bus mastering/INTx disabled
+until addresses and the local IRQ source are ready. Readbacks guard PCI programming.
+
+Failed start attempts checked cleanup automatically. Stop first detaches this adapter's software
+IRQ source and blocks NIC/PCI INTx, **never globally masking a shared IOAPIC route**. Then it disables
+both engines, observes reset completion, drains ICR and validates final controller/engine/mask and
+PCI bus-master/INTx readbacks before releasing anything. Failed cleanup retains Region, RX and TX
+owners and mappings; failed records refuse public MAC/TX/RX, ordinary restart and removal. The
+framework's explicit recovery allowlist now includes e1000 alongside xHCI, not arbitrary drivers.
+A successful retry moves Failed to Stopped, reclaims DMA and unmaps MMIO; restart remains explicit.
+
+`hal-e1000-recovery-test` plus `scripts/check-e1000-recovery.py` passed PC/Q35 with two separate
+user-network backends and a deliberately shared INTx route:
+
+- Real boot ARP/IRQ validation completes before the first injected startup failure. Automatic
+  rollback and a repeated explicit cleanup refuse; 22 pages/two mappings remain, failed I/O and
+  removal refuse, duplicate probing cannot bind another owner, and the peer exchanges fresh data.
+- Recovery reads back reset/PCI exclusion, reclaims exactly eleven target pages and its mapping,
+  rejects the old Region and detaches late software-dispatched vectors. Explicit restart restores
+  the same BDF/MAC/shared vector with fresh network exchanges.
+- A failed stop and repeated recovery refusal exercise the same quarantine with bus mastering
+  still active; the peer's shared INTx/RX/TX remain live.
+- An injected allocation refusal after three actual pages releases that unexposed batch; safe
+  rollback returns to the peer-only eleven-page/one-mapping baseline. Another injection after RX
+  enables but before TX programming retains **all eleven** pages until checked recovery.
+- Deliberately withholding an otherwise valid PCI exclusion proof retains every page even though
+  real bus mastering already reads disabled. This is NOT a naturally failing QEMU PCI write/reset.
+- Eleven nonce-tagged public ARP requests and matching gateway replies are checked byte-for-byte
+  in independent host pcaps. Every exchange must advance the selected adapter's acknowledged RX
+  interrupt counter; other adapters cannot authorize it or carry its request. Final checked
+  stop/removal yields DMA zero, allocator audit passes, and permanent shutdown freeze rejects
+  recovery and transport entry.
+
+Portable tests cover every combination of six required stop-proof conditions, all nonzero IRQ
+masks, absent-device all-ones reads and unrelated control bits. Evidence is BSP/segment-zero 82540EM
+on PC/Q35, not physical-board fault injection. IOAPIC routes remain firmware-owned/static/shared;
+this is per-source reclamation, not a general dynamic interrupt allocator. Runtime TX-timeout
+recovery, storage/virtio-net partial-start recovery, general PCI/firmware, USB/Executive and S3/power
+gates remain open. No PR is created and M9 is not marked complete.
+
+Local verification passed **68 distinct native fixtures**: all 43 preceding USB/PS2, IRQ,
+lifecycle and shutdown fixtures; eight multi-adapter fixtures; fourteen poisoned-line/firmware
+routing/refusal fixtures; the combined six-storage/four-NIC fixture; and two new PC/Q35 failure
+recovery fixtures. Both overlapping Rust host suites passed **808 tests** each. Host/native Clippy,
+formatting, boot/Multiboot, 31 layout tests, generated files, five IRQ-proof-parser tests, **384
+conformance assertions** and the unsafe audit (**259 blocks**, zero missing SAFETY comments) passed.
+CI is still required on the pushed revision. This checkpoint does not close the remaining M9 gates.

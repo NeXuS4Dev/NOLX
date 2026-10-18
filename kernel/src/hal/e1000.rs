@@ -12,11 +12,15 @@
 //!
 //! Framework callbacks select a retained controller by handle; each handle owns separate
 //! IRQ-visible receive state, TX state, identity and diagnostics. Receive buffers remain owned until
-//! engine disable/reset succeeds; stop detaches IRQ-visible state before reclaiming them.
+//! checked engine reset and PCI DMA/INTx exclusion succeed. Partial startup retains every owner;
+//! stop detaches only this IRQ source, never masks a peer's shared IOAPIC route.
 //! RX buffers are retained in a fixed array,
 //! with no heap allocation in initialization or interrupt delivery.
 //!
 //! CI runs QEMU with an e1000 on a user-mode network backend.
+
+#[cfg(feature = "hal-e1000-recovery-test")]
+mod recovery;
 
 use core::sync::atomic::{fence, AtomicU8, AtomicUsize, Ordering};
 use nolx_net_core::{arp, queue::FrameQueue};
@@ -181,6 +185,7 @@ struct Report {
 /// State shared between the driver's dispatch calls and the probe that reports them.
 struct State {
     bdf: Option<Bdf>,
+    region: Option<Region>,
     rings: Option<Rings>,
     report: Option<Report>,
     error: Option<Failure>,
@@ -189,6 +194,7 @@ struct State {
 static STATE: [IrqMutex<State>; driver_start::DEVICES] = [const {
     IrqMutex::new(State {
         bdf: None,
+        region: None,
         rings: None,
         report: None,
         error: None,
@@ -307,59 +313,114 @@ fn accept(_: &DeviceId) -> bool {
 
 /// The framework's start operation: the whole bring-up. The result goes to [`STATE`].
 fn start_device(dev: usize) -> bool {
-    let result = bring_up(dev);
-    let mut state = STATE[dev].lock();
-    match result {
-        Ok((rings, report)) => {
-            state.rings = Some(rings);
+    #[cfg(feature = "hal-e1000-recovery-test")]
+    recovery::claim(dev);
+    match bring_up(dev) {
+        Ok(report) => {
+            let mut state = STATE[dev].lock();
             state.report = Some(report);
             state.error = None;
             true
         }
         Err(failure) => {
-            state.error = Some(failure);
+            STATE[dev].lock().error = Some(failure);
+            if stop_device(dev) {
+                // SAFETY: checked rollback detached this IRQ source, reset engines and
+                // verified PCI DMA exclusion; the framework callback still excludes I/O.
+                unsafe {
+                    mmio::release_owned(dev);
+                }
+            }
             false
         }
     }
 }
 
-/// Reset both engines and retire IRQ-visible state before reclaiming RX/TX DMA pages.
+/// Mask only this adapter, never the shared IOAPIC line. Retain every owner on failure.
 fn stop_device(dev: usize) -> bool {
-    let Some((regs, bdf)) = STATE[dev].lock().report.as_ref().map(|r| (r.region, r.bdf)) else {
+    let (bdf, regs) = {
+        let s = STATE[dev].lock();
+        (s.bdf, s.region)
+    };
+    let Some(bdf) = bdf else {
         return false;
     };
+    RX_VECTOR[dev].store(0, Ordering::Release);
     let reset = (|| -> Result<(), Failure> {
-        regs.write32(0x00d8, u32::MAX)?;
-        regs.write32(e1000::REG_RCTL, 0)?;
-        regs.write32(e1000::REG_TCTL, 0)?;
-        poll(
-            || Ok(regs.read32(e1000::REG_RCTL)? & 2 == 0 && regs.read32(e1000::REG_TCTL)? & 2 == 0),
-            "engine disable",
-        )?;
-        regs.write32(
-            e1000::REG_CTRL,
-            regs.read32(e1000::REG_CTRL)? | e1000::CTRL_RST,
-        )?;
-        poll(
-            || Ok(regs.read32(e1000::REG_CTRL)? & e1000::CTRL_RST == 0),
-            "stop reset",
-        )?;
+        let command = ConfigAccess.read_u32(bdf, PCI_COMMAND) & 0xffff;
+        ConfigAccess.write_u32(bdf, PCI_COMMAND, command | (1 << 10));
+        if ConfigAccess.read_u32(bdf, PCI_COMMAND) & (1 << 10) == 0 {
+            return Err(Failure::Interrupt);
+        }
+        if let Some(regs) = regs {
+            regs.write32(0x00d8, u32::MAX)?;
+            if regs.read32(e1000::REG_IMS)? != 0 {
+                return Err(Failure::Interrupt);
+            }
+            #[cfg(feature = "hal-e1000-recovery-test")]
+            if recovery::refuse_stop(dev) {
+                return Err(Failure::Timeout("injected quiescence refusal"));
+            }
+            regs.write32(e1000::REG_RCTL, 0)?;
+            regs.write32(e1000::REG_TCTL, 0)?;
+            poll(
+                || {
+                    Ok(regs.read32(e1000::REG_RCTL)? & 2 == 0
+                        && regs.read32(e1000::REG_TCTL)? & 2 == 0)
+                },
+                "engine disable",
+            )?;
+            regs.write32(
+                e1000::REG_CTRL,
+                regs.read32(e1000::REG_CTRL)? | e1000::CTRL_RST,
+            )?;
+            poll(
+                || Ok(regs.read32(e1000::REG_CTRL)? & e1000::CTRL_RST == 0),
+                "stop reset",
+            )?;
+            regs.write32(0x00d8, u32::MAX)?;
+            let _ = regs.read32(e1000::REG_ICR)?;
+        } else if STATE[dev].lock().rings.is_some() || RECEIVE[dev].lock().is_some() {
+            return Err(Failure::Busy);
+        }
+        let command = ConfigAccess.read_u32(bdf, PCI_COMMAND) & 0xffff;
+        ConfigAccess.write_u32(
+            bdf,
+            PCI_COMMAND,
+            (command & !COMMAND_BUS_MASTER) | (1 << 10),
+        );
+        let command = ConfigAccess.read_u32(bdf, PCI_COMMAND);
+        if let Some(regs) = regs {
+            if !e1000::stop_proven(
+                regs.read32(e1000::REG_CTRL)?,
+                regs.read32(e1000::REG_RCTL)?,
+                regs.read32(e1000::REG_TCTL)?,
+                regs.read32(e1000::REG_IMS)?,
+                command,
+            ) {
+                return Err(Failure::Busy);
+            }
+            #[cfg(feature = "hal-e1000-recovery-test")]
+            if recovery::withhold_pci_proof(dev) {
+                return Err(Failure::Busy);
+            }
+        } else if command & (COMMAND_BUS_MASTER | (1 << 10)) != 1 << 10 {
+            return Err(Failure::Busy);
+        }
         Ok(())
     })();
     if reset.is_err() {
         return false;
     }
-    RX_VECTOR[dev].store(0, Ordering::Release);
-    let command = ConfigAccess.read_u32(bdf, 4) & 0xffff;
-    ConfigAccess.write_u32(bdf, 4, command & !4);
     let receive = RECEIVE[dev].lock().take();
     let rings = {
-        let mut state = STATE[dev].lock();
-        state.report = None;
-        state.rings.take()
+        let mut s = STATE[dev].lock();
+        s.report = None;
+        s.region = None;
+        s.rings.take()
     };
-    // SAFETY: controller reset acknowledged, PCI bus mastering is disabled, and the ISR can no
-    // longer reach receive state. Every page is uniquely moved out of its owning driver slot.
+    // SAFETY: engine disable/reset acknowledged, masks read disabled, PCI bus mastering
+    // reads disabled and INTx blocked; detached ISR source plus framework checkout exclude users.
     unsafe {
         if let Some(receive) = receive {
             receive.descriptors.release();
@@ -375,14 +436,48 @@ fn stop_device(dev: usize) -> bool {
     true
 }
 
-fn bring_up(dev: usize) -> Result<(Rings, Report), Failure> {
+// No address from this batch is exposed before all eleven pages have an owner.
+fn allocate_pages(dev: usize) -> Result<[Dma; 11], Failure> {
+    let mut pages: [Option<Dma>; 11] = core::array::from_fn(|_| None);
+    for i in 0..pages.len() {
+        #[cfg(feature = "hal-e1000-recovery-test")]
+        let injected = i == 3 && recovery::fail(dev, 1);
+        #[cfg(not(feature = "hal-e1000-recovery-test"))]
+        let injected = {
+            let _ = dev;
+            false
+        };
+        pages[i] = if injected { None } else { Dma::new() };
+        if pages[i].is_none() {
+            // SAFETY: this batch has not been published to registers, software ring owners,
+            // or the ISR. Only this local array can reference the uniquely allocated pages.
+            unsafe {
+                for page in pages.into_iter().flatten() {
+                    page.release();
+                }
+            }
+            return Err(Failure::Memory);
+        }
+    }
+    Ok(pages.map(Option::unwrap))
+}
+
+fn bring_up(dev: usize) -> Result<Report, Failure> {
     let initial_interrupts = RX_INTERRUPTS[dev].load(Ordering::Acquire);
     let bdf = STATE[dev].lock().bdf.ok_or(Failure::NoController)?;
-    enable_device(bdf);
+    let owned = {
+        let state = STATE[dev].lock();
+        state.region.is_some() || state.rings.is_some()
+    };
+    if owned || RECEIVE[dev].lock().is_some() {
+        return Err(Failure::Busy);
+    }
+    pci_access(bdf, false, false)?;
     let bars = nolx_pci_core::read_bars(&mut ConfigAccess, bdf);
     let base =
         nolx_pci_core::assigned_memory_base(bars.slots[BAR0_SLOT]).ok_or(Failure::BarNotMemory)?;
     let regs = mmio::map_owned(dev, base, REGISTERS_BYTES)?;
+    STATE[dev].lock().region = Some(regs);
 
     // Reset, then set the link up. The reset bit clears itself when the reset is done.
     regs.write32(
@@ -414,18 +509,27 @@ fn bring_up(dev: usize) -> Result<(Rings, Report), Failure> {
     // Receive ring: each descriptor names its own buffer, and the tail gives the device all of
     // them but the one behind the head.
     let ring_bytes = e1000::ring_bytes(RING).ok_or(Failure::Frame)?;
-    let rx = Dma::new().ok_or(Failure::Memory)?;
-    let mut buffers = [const { None }; RING as usize];
-    for slot in 0..RING {
-        let buffer = Dma::new().ok_or(Failure::Memory)?;
+    let [rx, b0, b1, b2, b3, b4, b5, b6, b7, tx, frame] = allocate_pages(dev)?;
+    let buffers = [b0, b1, b2, b3, b4, b5, b6, b7].map(Some);
+    for (slot, buffer) in buffers.iter().enumerate() {
         rx.write(
-            u64::from(slot) * e1000::DESCRIPTOR_BYTES as u64,
-            &e1000::rx_descriptor(buffer.address(0)),
+            slot as u64 * e1000::DESCRIPTOR_BYTES as u64,
+            &e1000::rx_descriptor(buffer.as_ref().unwrap().address(0)),
         );
-        buffers[slot as usize] = Some(buffer);
     }
+    let rx_address = rx.address(0);
+    let tx_address = tx.address(0);
+    let frame_address = frame.address(0);
+    *RECEIVE[dev].lock() = Some(Receive {
+        regs,
+        descriptors: rx,
+        buffers,
+        next: 0,
+        frames: FrameQueue::new(),
+    });
+    STATE[dev].lock().rings = Some(Rings { tx, frame, next: 2 });
     fence(Ordering::SeqCst);
-    write_address(&regs, e1000::REG_RDBAL, rx.address(0))?;
+    write_address(&regs, e1000::REG_RDBAL, rx_address)?;
     regs.write32(e1000::REG_RDLEN, ring_bytes)?;
     regs.write32(e1000::REG_RDH, 0)?;
     regs.write32(e1000::REG_RDT, RING - 1)?;
@@ -442,13 +546,6 @@ fn bring_up(dev: usize) -> Result<(Rings, Report), Failure> {
     if !super::apic::is_enabled() || irq.gsi >= 24 {
         return Err(Failure::Interrupt);
     }
-    *RECEIVE[dev].lock() = Some(Receive {
-        regs,
-        descriptors: rx,
-        buffers,
-        next: 0,
-        frames: FrameQueue::new(),
-    });
     RX_VECTOR[dev].store(32 + irq.gsi as u8, Ordering::Release);
     // Clear stale causes, enable receive timer interrupts, then unmask the level route.
     let _ = regs.read32(e1000::REG_ICR)?;
@@ -456,11 +553,15 @@ fn bring_up(dev: usize) -> Result<(Rings, Report), Failure> {
     if super::ioapic::unmask_pci_route(irq) != Some(32 + irq.gsi as u8) {
         return Err(Failure::Interrupt);
     }
+    pci_access(bdf, true, true)?;
     regs.write32(e1000::REG_RCTL, e1000::rctl_enable(true))?;
+    #[cfg(feature = "hal-e1000-recovery-test")]
+    if recovery::fail(dev, 2) {
+        return Err(Failure::Timeout("injected RX-only start failure"));
+    }
 
     // Transmit ring, empty to begin with.
-    let tx = Dma::new().ok_or(Failure::Memory)?;
-    write_address(&regs, e1000::REG_TDBAL, tx.address(0))?;
+    write_address(&regs, e1000::REG_TDBAL, tx_address)?;
     regs.write32(e1000::REG_TDLEN, ring_bytes)?;
     regs.write32(e1000::REG_TDH, 0)?;
     regs.write32(e1000::REG_TDT, 0)?;
@@ -468,22 +569,39 @@ fn bring_up(dev: usize) -> Result<(Rings, Report), Failure> {
 
     // One frame: broadcast destination, this MAC as the source, the test EtherType, the payload,
     // zero padding to the minimum length.
-    let frame = Dma::new().ok_or(Failure::Memory)?;
     let mut bytes = [0u8; FRAME_BYTES];
     bytes[0..6].fill(0xFF);
     bytes[6..12].copy_from_slice(&mac);
     bytes[12..14].copy_from_slice(&FRAME_TYPE);
     bytes[14..14 + FRAME_PAYLOAD.len()].copy_from_slice(FRAME_PAYLOAD);
-    frame.write(0, &bytes);
+    STATE[dev]
+        .lock()
+        .rings
+        .as_ref()
+        .unwrap()
+        .frame
+        .write(0, &bytes);
     let descriptor =
-        e1000::tx_descriptor(frame.address(0), FRAME_BYTES as u16, true).ok_or(Failure::Frame)?;
-    tx.write(0, &descriptor);
+        e1000::tx_descriptor(frame_address, FRAME_BYTES as u16, true).ok_or(Failure::Frame)?;
+    STATE[dev]
+        .lock()
+        .rings
+        .as_ref()
+        .unwrap()
+        .tx
+        .write(0, &descriptor);
     fence(Ordering::SeqCst);
     regs.write32(e1000::REG_TDT, 1)?;
     poll(
         || {
             let mut status = [0u8; 1];
-            tx.read(12, &mut status);
+            STATE[dev]
+                .lock()
+                .rings
+                .as_ref()
+                .unwrap()
+                .tx
+                .read(12, &mut status);
             Ok(e1000::tx_done(status[0]))
         },
         "transmit",
@@ -493,8 +611,12 @@ fn bring_up(dev: usize) -> Result<(Rings, Report), Failure> {
     // This fixed peer belongs to the boot self-test, not an inferred network configuration.
     let local_ip = [10, 0, 2, 15];
     let peer_ip = [10, 0, 2, 2];
-    frame.write(0, &arp::request(mac, local_ip, peer_ip));
-    tx.write(16, &descriptor);
+    {
+        let s = STATE[dev].lock();
+        let rings = s.rings.as_ref().unwrap();
+        rings.frame.write(0, &arp::request(mac, local_ip, peer_ip));
+        rings.tx.write(16, &descriptor);
+    }
     fence(Ordering::SeqCst);
     regs.write32(e1000::REG_TDT, 2)?;
     // At boot IF is masked, so the descriptor signals readiness. On restart IF may already
@@ -529,18 +651,19 @@ fn bring_up(dev: usize) -> Result<(Rings, Report), Failure> {
         peer.ok_or(Failure::Receive)?
     };
     let link_up = regs.read32(e1000::REG_STATUS)? & e1000::STATUS_LINK_UP != 0;
-    Ok((
-        Rings { tx, frame, next: 2 },
-        Report {
-            bdf,
-            base,
-            mac,
-            link_up,
-            peer_mac,
-            region: regs,
-            interrupts: RX_INTERRUPTS[dev].load(Ordering::Acquire) - initial_interrupts,
-        },
-    ))
+    #[cfg(feature = "hal-e1000-recovery-test")]
+    if recovery::fail(dev, 3) {
+        return Err(Failure::Timeout("injected post-ARP start failure"));
+    }
+    Ok(Report {
+        bdf,
+        base,
+        mac,
+        link_up,
+        peer_mac,
+        region: regs,
+        interrupts: RX_INTERRUPTS[dev].load(Ordering::Acquire) - initial_interrupts,
+    })
 }
 
 /// Read one EEPROM word through EERD, waiting for the controller to report the read done.
@@ -562,14 +685,19 @@ fn write_address(regs: &Region, low: u64, address: u64) -> Result<(), Failure> {
     Ok(())
 }
 
-fn enable_device(bdf: Bdf) {
-    let mut cfg = ConfigAccess;
-    let command = cfg.read_u32(bdf, PCI_COMMAND) & 0xFFFF;
-    cfg.write_u32(
-        bdf,
-        PCI_COMMAND,
-        (command | COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER) & !(1 << 10),
-    );
+fn pci_access(bdf: Bdf, dma: bool, interrupts: bool) -> Result<(), Failure> {
+    let command = ConfigAccess.read_u32(bdf, PCI_COMMAND) & 0xffff;
+    let wanted = (command | COMMAND_MEMORY_SPACE) & !(COMMAND_BUS_MASTER | (1 << 10))
+        | if dma { COMMAND_BUS_MASTER } else { 0 }
+        | if interrupts { 0 } else { 1 << 10 };
+    ConfigAccess.write_u32(bdf, PCI_COMMAND, wanted);
+    if ConfigAccess.read_u32(bdf, PCI_COMMAND)
+        & (COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER | (1 << 10))
+        != wanted & (COMMAND_MEMORY_SPACE | COMMAND_BUS_MASTER | (1 << 10))
+    {
+        return Err(Failure::Interrupt);
+    }
+    Ok(())
 }
 
 /// Poll with a two-second HPET budget and hard iteration bound, or a bounded clockless fallback.
@@ -683,7 +811,25 @@ pub fn receive_frame_on(dev: usize) -> Result<Option<nolx_net_core::queue::Frame
 }
 
 /// Count only this controller's acknowledged receive interrupt causes.
-#[cfg(feature = "hal-driver-net-multi-test")]
+#[cfg(any(
+    feature = "hal-driver-net-multi-test",
+    feature = "hal-e1000-recovery-test"
+))]
 pub(crate) fn interrupt_count(dev: usize) -> usize {
     RX_INTERRUPTS[dev].load(Ordering::Acquire)
+}
+
+/// Whether every native software/DMA owner has been safely retired (diagnostic BDF remains).
+pub(crate) fn removable(dev: usize) -> bool {
+    let s = STATE[dev].lock();
+    s.region.is_none()
+        && s.rings.is_none()
+        && s.report.is_none()
+        && RECEIVE[dev].lock().is_none()
+        && RX_VECTOR[dev].load(Ordering::Acquire) == 0
+}
+#[cfg(feature = "hal-e1000-recovery-test")]
+/// Exercise checked native recovery with captured public network traffic.
+pub fn recovery_selftest(console: &mut dyn HalConsole) {
+    recovery::run(console);
 }

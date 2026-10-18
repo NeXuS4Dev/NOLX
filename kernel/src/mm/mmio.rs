@@ -209,6 +209,7 @@ pub(crate) unsafe fn release_owned(owner: usize) {
 /// Live mappings, rather than cumulative restart allocations.
 #[cfg(any(
     feature = "hal-driver-lifecycle-test",
+    feature = "hal-e1000-recovery-test",
     feature = "hal-xhci-lifecycle-test",
     feature = "hal-xhci-recovery-test",
     feature = "hal-xhci-transfer-fault-test"

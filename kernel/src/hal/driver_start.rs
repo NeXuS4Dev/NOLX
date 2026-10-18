@@ -135,18 +135,18 @@ pub fn stop(dev: usize) -> Result<(), Error> {
     })
 }
 /// Retry failed-controller quiescence, without restarting it or reopening shutdown admission.
-/// Only xHCI has audited partial-start/failed-stop ownership; other native drivers refuse.
+/// Only xHCI/e1000 have audited partial-start/failed-stop ownership; other native drivers refuse.
 pub fn recover(dev: usize) -> Result<(), Error> {
     with_registry(|registry| {
         if registry.frozen() {
             return Err(Error::Busy);
         }
-        if registry.driver_name(dev)? != "xhci" {
+        if !matches!(registry.driver_name(dev)?, "xhci" | "e1000") {
             return Err(Error::BadState);
         }
         registry.recover(dev)?;
-        // SAFETY: the original xHCI stop callback proved halt/reset and disabled PCI DMA,
-        // detached all host/input state and released owned DMA; registry checkout excludes I/O.
+        // SAFETY: the audited native stop callback proved reset and disabled PCI DMA,
+        // detached all driver/IRQ state and released owned DMA; registry checkout excludes I/O.
         unsafe {
             crate::mm::mmio::release_owned(dev);
         }
@@ -158,6 +158,9 @@ pub fn recover(dev: usize) -> Result<(), Error> {
 pub fn remove(dev: usize) -> Result<(), Error> {
     with_registry(|registry| {
         if registry.driver_name(dev) == Ok("xhci") && !super::xhci::removable(dev) {
+            return Err(Error::Busy);
+        }
+        if registry.driver_name(dev) == Ok("e1000") && !super::e1000::removable(dev) {
             return Err(Error::Busy);
         }
         registry.remove(dev)

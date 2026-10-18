@@ -1130,3 +1130,19 @@ and interval. The endpoint context uses that payload rather than guessing it fro
 size. USB3 HID input and warm reset are NOT hardware-verified: stock QEMU exposes no SS HID model;
 SS HID selection and reset-write rules have host tests only. General USB/hubs/SSP/endpoint recovery,
 Executive input, firmware/PCI and power/S3 gates remain open. M9 is not complete.
+
+
+M9 e1000 recovery checkpoint: retain the mapped register owner independently of a successful boot
+report; allocate all eleven pages before DMA exposure, roll back incomplete unexposed batches, and
+publish RX/TX owners before programming addresses. Failed startup attempts checked rollback; failed
+reset or missing PCI exclusion proof pins all owners and refuses removal/I/O. Stop detaches only this
+adapter's software source, masks its NIC/PCI INTx (not the shared IOAPIC line), resets both engines,
+and reads back disabled engine/IRQ/DMA state before release. Framework recovery is audited for
+xHCI and e1000 only. PC/Q35 two-adapter fixtures exercise partial allocation, RX-only and post-ARP
+startup failures, repeated failed cleanup, failed stop and withheld PCI proof; independent pcaps
+verify eleven fresh public ARP exchanges, selected IRQ progress and live shared-route peer traffic.
+Checked recovery releases stale MMIO and exactly eleven pages, explicit restart restores identity,
+and final stop/removal leaves DMA zero; shutdown freeze still refuses recovery. Faults deliberately
+withhold/refuse proof, not claims of naturally failing QEMU reset/config writes. Storage/virtio-net
+failed-start recovery, dynamic interrupt ownership, runtime TX-timeout policy and other M9 gates
+remain open. M9 is not complete.
