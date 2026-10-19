@@ -4,9 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Host-testable NVMe rules for NOLX: controller registers, queue entry encodings, completion status, and namespace block size"
+description = "Host-testable NVMe rules for NOLX: controller registers, queue entry encodings, completion status, namespace block size, and the checked stop proof"
 readme = "../../README.md"
 publish = false
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+nolx-pci-core = { path = "../nolx-pci-core" }

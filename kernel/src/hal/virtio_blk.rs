@@ -16,10 +16,11 @@
 //! use. Then it writes a 2 KiB pattern to sectors 1600 to 1603, in the gap after the last
 //! partition, reads it back, and compares CRC-32 checksums. CI computes the same checksum over the
 //! image file after QEMU exits, so the write has to have reached the disk and not only the device's
-//! cache. Last, it puts a NOLXFS volume on the first partition in use; see [`super::virtio_volume`].
+//! cache. Last, it puts a NOLXFS volume on the first partition in use; see [`super::storage_volume`].
 
 use super::blockdev;
 use super::driver_start::{self, Log};
+use super::irq_vectors;
 use super::msix;
 use alloc::vec;
 use nolx_block_core::devices::QueueError;
@@ -31,15 +32,16 @@ use super::dma::Dma;
 use crate::hal::pci::ConfigAccess;
 use crate::mm::mmio::{self, Region};
 use crate::sync::IrqMutex;
-use core::sync::atomic::{fence, AtomicUsize, Ordering};
-use nolx_df_core::{DeviceId, Dispatch, Driver, Match, Registry};
+use core::sync::atomic::{fence, AtomicBool, AtomicUsize, Ordering};
+
+#[cfg(feature = "hal-virtio-blk-recovery-test")]
+mod recovery;
+use nolx_df_core::{DeviceId, Dispatch, Driver, Match};
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
-use nolx_pci_core::{Bar, BarSet, Bdf};
+use nolx_pci_core::{BarSet, Bdf, ConfigSpace};
 use nolx_virtio_core::{self as virtio, common, VirtioCap, VirtioError};
 
-/// The queue size the driver asks for, or the device's maximum if that is smaller.
-const QUEUE_SIZE_WANTED: u16 = 8;
 /// Fallback polling ceiling without HPET; the clocked path has a 100x hard ceiling.
 const POLL_LIMIT: u32 = 1_000_000;
 /// Where the request header, status byte, and data buffer sit in the request page.
@@ -67,7 +69,8 @@ pub enum Failure {
     Queue(QueueError),
     /// MSI-X could not be set up for the device.
     Msix(msix::Error),
-    /// The device did not accept the MSI-X vector for the queue.
+    /// The device did not accept the MSI-X vector for the queue, or every interrupt
+    /// vector this driver may own is taken by another controller.
     NoVector,
     /// Fewer completion interrupts arrived than requests were submitted.
     Interrupts {
@@ -106,6 +109,8 @@ pub enum Failure {
     Unaligned,
     /// The volume layer refused the partition or the file.
     Volume(FsError),
+    /// Backend-neutral filesystem verification failed.
+    Filesystem(super::storage_volume::Failure),
     /// The file read back is not the bytes that were written.
     FileMismatch,
 }
@@ -146,12 +151,32 @@ impl From<FsError> for Failure {
 struct State {
     log: Log,
     outcome: Option<Result<(), Failure>>,
+    disk: Option<Disk>,
+    bdf: Option<Bdf>,
+    common: Option<Region>,
+    pages: [Option<Dma>; 2],
+    queue: Option<Queue>,
+    /// The interrupt vector this controller owns. It is claimed from the shared table
+    /// when the controller starts and released only after a checked stop has proved
+    /// that the controller can no longer raise it.
+    vector: Option<u8>,
 }
 
-static STATE: IrqMutex<State> = IrqMutex::new(State {
-    log: Log::new(),
-    outcome: None,
-});
+static STATE: [IrqMutex<State>; driver_start::DEVICES] = [const {
+    IrqMutex::new(State {
+        log: Log::new(),
+        outcome: None,
+        disk: None,
+        bdf: None,
+        common: None,
+        pages: [const { None }; 2],
+        queue: None,
+        vector: None,
+    })
+}; driver_start::DEVICES];
+
+static LIVE: [AtomicBool; driver_start::DEVICES] =
+    [const { AtomicBool::new(false) }; driver_start::DEVICES];
 
 /// The match rules: the transitional and the modern virtio block device IDs.
 static MATCHES: &[Match] = &[
@@ -169,38 +194,84 @@ const DISPATCH: Dispatch = Dispatch {
 /// Probe for a virtio block device, register the driver with the framework, and bind and start
 /// it. The bring-up's output is replayed on the console. Failure is reported and does not stop boot.
 pub fn probe(console: &mut dyn HalConsole) {
-    let Some((_, id)) = find_device() else {
+    let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
+    let mut found = false;
+    for info in inventory
+        .as_slice()
+        .iter()
+        .filter(|info| virtio::is_block_device(info.vendor_id, info.device_id))
+    {
+        found = true;
+        if STATE.iter().any(|state| state.lock().bdf == Some(info.bdf)) {
+            let _ = writeln!(
+                console,
+                "virtio-blk: PCI {:02x}:{:02x}.{} already registered, duplicate attach refused",
+                info.bdf.bus, info.bdf.device, info.bdf.function
+            );
+            continue;
+        }
+        let id = DeviceId {
+            vendor: info.vendor_id,
+            device: info.device_id,
+            class: info.class,
+            subclass: info.subclass,
+            prog_if: info.prog_if,
+        };
+        let driver = Driver {
+            name: "virtio-blk",
+            matches: MATCHES,
+            ops: DISPATCH,
+        };
+        let attached = driver_start::attach_prepared(driver, id, |dev| {
+            // Recheck under framework exclusion: the outer enumeration check is only a fast path.
+            if STATE.iter().any(|state| state.lock().bdf == Some(info.bdf)) {
+                return Err(nolx_df_core::Error::Busy);
+            }
+            STATE[dev].lock().bdf = Some(info.bdf);
+            blockdev::bind_storage(dev, blockdev::VIRTIO).map_err(|_| nolx_df_core::Error::Full)?;
+            #[cfg(feature = "hal-virtio-blk-recovery-test")]
+            recovery::claim(dev);
+            Ok(())
+        });
+        match attached {
+            Ok(dev) => {
+                let state = STATE[dev].lock();
+                state.log.replay(console);
+                let _ = writeln!(console, "virtio-blk: bound and started through nolx-df");
+                let _ = writeln!(
+                    console,
+                    "virtio-blk: instance {dev}, block {}, vector {:#x}, PCI {:02x}:{:02x}.{}",
+                    blockdev::device(dev).unwrap(),
+                    state.vector.unwrap_or(0),
+                    info.bdf.bus,
+                    info.bdf.device,
+                    info.bdf.function
+                );
+            }
+            Err(error) => {
+                let _ = writeln!(
+                    console,
+                    "virtio-blk: framework refused the device: {error:?}"
+                );
+                // Rejected starts retain diagnostic state and pinned resources. Identify by BDF.
+                for state in &STATE {
+                    let state = state.lock();
+                    if state.bdf == Some(info.bdf) {
+                        state.log.replay(console);
+                        if let Some(Err(failure)) = &state.outcome {
+                            let _ = writeln!(console, "virtio-blk: not brought up: {failure:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if !found {
         let _ = writeln!(
             console,
             "virtio-blk: not brought up: {:?}",
             Failure::NoDevice
         );
-        return;
-    };
-    let mut registry: Registry<1, 1> = Registry::new();
-    let driver = Driver {
-        name: "virtio-blk",
-        matches: MATCHES,
-        ops: DISPATCH,
-    };
-    if let Err(error) = driver_start::attach(&mut registry, driver, id) {
-        let _ = writeln!(
-            console,
-            "virtio-blk: framework refused the device: {error:?}"
-        );
-    }
-    let state = STATE.lock();
-    state.log.replay(console);
-    match &state.outcome {
-        Some(Ok(())) => {
-            let _ = writeln!(console, "virtio-blk: bound and started through nolx-df");
-        }
-        Some(Err(failure)) => {
-            let _ = writeln!(console, "virtio-blk: not brought up: {failure:?}");
-        }
-        None => {
-            let _ = writeln!(console, "virtio-blk: not started");
-        }
     }
 }
 
@@ -208,32 +279,188 @@ fn accept(_: &DeviceId) -> bool {
     true
 }
 
-/// The framework's start operation: the whole bring-up. Its output and result go to [`STATE`].
-fn start_device(_dev: usize) -> bool {
+/// Start the selected controller; BDF, diagnostics and transport ownership stay per handle.
+fn start_device(dev: usize) -> bool {
+    if !removable(dev) {
+        return false;
+    }
     let mut log = Log::new();
-    let result = bring_up(&mut log);
+    let result = bring_up(dev, &mut log);
     let started = result.is_ok();
-    let mut state = STATE.lock();
+    if !started {
+        LIVE[dev].store(false, Ordering::Release);
+    }
+    if !started && stop_device(dev) {
+        // SAFETY: rollback reset acknowledged, PCI DMA/messages disabled, source detached
+        // and all complete/partial DMA owners released; registry checkout excludes users.
+        unsafe {
+            mmio::release_owned(dev);
+        }
+    }
+    let mut state = STATE[dev].lock();
     state.log = log;
     state.outcome = Some(result);
     started
 }
 
-/// Nothing to undo: the queue stays registered for the rest of boot.
-fn stop_device(_dev: usize) -> bool {
+/// Complete/partial owners survive every refusal. A failed flush quarantines the source;
+/// explicit recovery resets it without retrying potentially unsafe or timed-out I/O.
+/// Whether the last bring-up of this controller was refused because every interrupt
+/// vector this driver may own was taken by another controller.
+pub fn last_failure_was_no_vector(dev: usize) -> bool {
+    let state = STATE[dev].lock();
+    matches!(&state.outcome, Some(Err(Failure::NoVector)))
+}
+fn stop_device(dev: usize) -> bool {
+    let flushed = if LIVE[dev].load(Ordering::Acquire) {
+        let disk = STATE[dev].lock().disk.take();
+        if let Some(mut disk) = disk {
+            #[cfg(feature = "hal-virtio-blk-recovery-test")]
+            let refused = recovery::fail(dev, 4);
+            #[cfg(not(feature = "hal-virtio-blk-recovery-test"))]
+            let refused = false;
+            let result = !refused && nolxfs::sector::SectorDevice::flush(&mut disk).is_ok();
+            STATE[dev].lock().disk = Some(disk);
+            result
+        } else {
+            false
+        }
+    } else {
+        true
+    };
+    LIVE[dev].store(false, Ordering::Release);
+    let (bdf, common) = {
+        let state = STATE[dev].lock();
+        (state.bdf, state.common)
+    };
+    let Some(bdf) = bdf else {
+        return false;
+    };
+    let command = ConfigAccess.read_u32(bdf, 4) & 0xffff;
+    ConfigAccess.write_u32(bdf, 4, command | (1 << 10));
+    if ConfigAccess.read_u32(bdf, 4) & (1 << 10) == 0
+        || !super::pci_exclusion::disable_messages(bdf)
+        || !flushed
+    {
+        return false;
+    }
+    #[cfg(feature = "hal-virtio-blk-recovery-test")]
+    if recovery::refuse_stop(dev) {
+        return false;
+    }
+    let reset = (|| -> Result<(), Failure> {
+        if let Some(common) = common {
+            common.write8(at(common::DEVICE_STATUS), 0)?;
+            poll(
+                || Ok(common.read8(at(common::DEVICE_STATUS))? == 0),
+                "stop reset",
+            )?;
+        } else if !empty_dma(dev) {
+            return Err(Failure::Memory);
+        }
+        if !super::pci_exclusion::pci_access(bdf, false) {
+            return Err(Failure::NoDevice);
+        }
+        let status = if let Some(common) = common {
+            common.read8(at(common::DEVICE_STATUS))?
+        } else {
+            0
+        };
+        if !virtio::transport::stop_proven(
+            status,
+            ConfigAccess.read_u32(bdf, 4),
+            super::pci_exclusion::messages_disabled(bdf),
+        ) {
+            return Err(Failure::NoDevice);
+        }
+        #[cfg(feature = "hal-virtio-blk-recovery-test")]
+        if recovery::withhold_pci_proof(dev) {
+            return Err(Failure::NoDevice);
+        }
+        if let Some(device) = blockdev::device(dev) {
+            match blockdev::detach(device) {
+                Ok(()) | Err(QueueError::UnknownDevice) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    })();
+    if reset.is_err() {
+        return false;
+    }
+    let mut state = STATE[dev].lock();
+    let pages = core::mem::replace(&mut state.pages, [const { None }; 2]);
+    let queue = state.queue.take();
+    let disk = state.disk.take();
+    // SAFETY: reset reads zero, PCI bus mastering/INTx/messages read disabled, LIVE
+    // is false, the software queue is detached, and callback checkout excludes users.
+    // Every unique loose/partial/complete owner is released only after the final proof.
+    unsafe {
+        for page in pages.into_iter().flatten() {
+            page.release();
+        }
+        if let Some(queue) = queue {
+            queue.ring.release();
+        }
+        if let Some(disk) = disk {
+            disk.queue.ring.release();
+            disk.request.release();
+        }
+    }
+    state.common = None;
+    // The controller can no longer raise this vector, so it belongs to nobody again and
+    // the next controller of this kind may take it.
+    if let Some(vector) = state.vector.take() {
+        irq_vectors::release(vector, KIND, dev);
+    }
     true
 }
+fn empty_dma(dev: usize) -> bool {
+    let state = STATE[dev].lock();
+    state.disk.is_none() && state.queue.is_none() && state.pages.iter().all(Option::is_none)
+}
+pub(crate) fn removable(dev: usize) -> bool {
+    let unmapped = STATE[dev].lock().common.is_none();
+    unmapped && !LIVE[dev].load(Ordering::Acquire) && empty_dma(dev)
+}
 
-fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
-    let (bdf, _) = find_device().ok_or(Failure::NoDevice)?;
+pub(crate) fn with_disk<T>(
+    dev: usize,
+    op: impl FnOnce(&mut dyn nolxfs::sector::SectorDevice) -> Result<T, nolxfs::DevError>,
+) -> Result<T, nolxfs::DevError> {
+    if !LIVE[dev].load(Ordering::Acquire) {
+        return Err(nolxfs::DevError::Io(19));
+    }
+    let mut disk = STATE[dev]
+        .lock()
+        .disk
+        .take()
+        .ok_or(nolxfs::DevError::Io(19))?;
+    let result = op(&mut disk);
+    STATE[dev].lock().disk = Some(disk);
+    result
+}
+
+fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<(), Failure> {
+    let bdf = STATE[dev].lock().bdf.ok_or(Failure::NoDevice)?;
+    let device = blockdev::device(dev).ok_or(Failure::NoDevice)?;
+    // The vector is owned before the device is told about it, so two controllers can
+    // never share one.
+    let vector = irq_vectors::claim(KIND, dev).ok_or(Failure::NoVector)?;
+    STATE[dev].lock().vector = Some(vector);
+    if !super::pci_exclusion::pci_access(bdf, false) || !super::pci_exclusion::disable_messages(bdf)
+    {
+        return Err(Failure::NoDevice);
+    }
     let bars = nolx_pci_core::read_bars(&mut ConfigAccess, bdf);
     let caps = virtio::discover(&mut ConfigAccess, bdf);
     let common_cap = caps.common.ok_or(Failure::NoCapability("common"))?;
     let notify_cap = caps.notify.ok_or(Failure::NoCapability("notify"))?;
     let device_cap = caps.device.ok_or(Failure::NoCapability("device"))?;
-    let common = map_cap(&bars, common_cap)?;
-    let notify = map_cap(&bars, notify_cap)?;
-    let config = map_cap(&bars, device_cap)?;
+    let common = map_cap(dev, &bars, common_cap)?;
+    STATE[dev].lock().common = Some(common);
+    let notify = map_cap(dev, &bars, notify_cap)?;
+    let config = map_cap(dev, &bars, device_cap)?;
 
     // Reset, then the status steps in the order the rules give.
     common.write8(at(common::DEVICE_STATUS), 0)?;
@@ -243,33 +470,73 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
     )?;
     common.write8(at(common::DEVICE_STATUS), virtio::INIT_STATUS_SEQUENCE[0])?;
     common.write8(at(common::DEVICE_STATUS), virtio::INIT_STATUS_SEQUENCE[1])?;
-    let accepted = virtio::negotiate(read_features(&common)?)?;
+    let offered = read_features(&common)?;
+    let accepted = virtio::negotiate_block(offered)?;
     write_driver_features(&common, accepted)?;
     common.write8(at(common::DEVICE_STATUS), virtio::INIT_STATUS_SEQUENCE[2])?;
     virtio::check_features_ok(common.read8(at(common::DEVICE_STATUS))?)?;
 
-    msix::enable(bdf, &bars, MSIX_ENTRY, COMPLETION_VECTOR)?;
-    let queue = setup_queue(&common, MSIX_ENTRY)?;
-    common.write8(at(common::DEVICE_STATUS), virtio::INIT_STATUS_SEQUENCE[3])?;
+    COMPLETION_INTERRUPTS[dev].store(0, Ordering::Release);
+    REQUESTS_SUBMITTED[dev].store(0, Ordering::Release);
+    msix::enable(dev, bdf, &bars, MSIX_ENTRY, vector)?;
+    for index in 0..2 {
+        #[cfg(feature = "hal-virtio-blk-recovery-test")]
+        if index == 1 && recovery::fail(dev, 1) {
+            return Err(Failure::Memory);
+        }
+        STATE[dev].lock().pages[index] = Some(Dma::new().ok_or(Failure::Memory)?);
+    }
+    setup_queue(dev, &common, &notify, notify_cap, MSIX_ENTRY)?;
+    #[cfg(feature = "hal-virtio-blk-recovery-test")]
+    if recovery::fail(dev, 2) {
+        return Err(Failure::Timeout("partial queue"));
+    }
 
     let sectors = virtio::capacity_sectors(config.read32(0)?, config.read32(4)?);
     let bytes = virtio::capacity_bytes(sectors).ok_or(Failure::Capacity)?;
+
+    let mut state = STATE[dev].lock();
+    let queue = state.queue.take().unwrap();
+    let notify_offset =
+        virtio::notify_address(&notify_cap, queue.notify_offset) - u64::from(notify_cap.offset);
+    state.disk = Some(Disk {
+        owner: dev,
+        device,
+        capacity: sectors,
+        queue,
+        notify,
+        notify_offset,
+        request: state.pages[1].take().unwrap(),
+        flush_supported: accepted & virtio::FEATURE_BLK_FLUSH != 0,
+    });
+    drop(state);
+    common.write8(at(common::DEVICE_STATUS), virtio::INIT_STATUS_SEQUENCE[3])?;
+    if !super::pci_exclusion::pci_access(bdf, true) {
+        return Err(Failure::NoDevice);
+    }
+    LIVE[dev].store(true, Ordering::Release);
     let _ = writeln!(
         console,
         "virtio-blk: {:02x}:{:02x}.{} capacity {sectors} sectors ({bytes} bytes), \
          queue size {}, driver ok",
-        bdf.bus, bdf.device, bdf.function, queue.size
+        bdf.bus,
+        bdf.device,
+        bdf.function,
+        STATE[dev].lock().disk.as_ref().unwrap().queue.size
     );
+    let mut disk = STATE[dev].lock().disk.take().unwrap();
+    let result = validate(&mut disk, sectors, vector, dev, console);
+    STATE[dev].lock().disk = Some(disk);
+    result
+}
 
-    let notify_offset =
-        virtio::notify_address(&notify_cap, queue.notify_offset) - u64::from(notify_cap.offset);
-    let mut disk = Disk {
-        queue,
-        notify,
-        notify_offset,
-        request: Dma::new().ok_or(Failure::Memory)?,
-    };
-
+fn validate(
+    disk: &mut Disk,
+    sectors: u64,
+    vector: u8,
+    dev: usize,
+    console: &mut dyn HalConsole,
+) -> Result<(), Failure> {
     disk.transfer(virtio::BLK_T_IN, 0, virtio::SECTOR_BYTES as u32)?;
     let first: [u8; 16] = disk.request.read_array(REQUEST_DATA);
     if first[..SECTOR_PATTERN.len()] != *SECTOR_PATTERN {
@@ -281,14 +548,14 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
         SECTOR_PATTERN.len()
     );
 
-    let volume = read_partitions(&mut disk, sectors, console)?;
-    round_trip(&mut disk, console)?;
+    let volume = read_partitions(disk, sectors, console)?;
+    round_trip(disk, console)?;
     // Every request's completion interrupt was taken before the next request, so the counts match.
-    let expected = REQUESTS_SUBMITTED.load(Ordering::Relaxed);
-    let delivered = COMPLETION_INTERRUPTS.load(Ordering::Acquire);
+    let expected = REQUESTS_SUBMITTED[dev].load(Ordering::Relaxed);
+    let delivered = COMPLETION_INTERRUPTS[dev].load(Ordering::Acquire);
     let _ = writeln!(
         console,
-        "virtio-blk: msi-x completion interrupts: {delivered} of {expected} requests, vector {COMPLETION_VECTOR:#x}"
+        "virtio-blk: msi-x completion interrupts: {delivered} of {expected} requests, vector {vector:#x}"
     );
     if delivered != expected {
         return Err(Failure::Interrupts {
@@ -297,15 +564,22 @@ fn bring_up(console: &mut dyn HalConsole) -> Result<(), Failure> {
         });
     }
     match volume {
-        Some((first, last)) => super::virtio_volume::run(disk, first, last - first + 1, console),
+        Some((first, last)) => {
+            super::storage_volume::run(disk, first, last - first + 1, console, "virtio-blk")
+                .map_err(Failure::Filesystem)?;
+        }
         None => {
             let _ = writeln!(
                 console,
                 "virtio-blk: gpt has no partitions in use; no volume"
             );
-            Ok(())
         }
     }
+    #[cfg(feature = "hal-virtio-blk-recovery-test")]
+    if recovery::fail(dev, 3) {
+        return Err(Failure::Timeout("validated disk"));
+    }
+    Ok(())
 }
 
 /// Read the primary GPT header from LBA 1 and the table it names, check both against the
@@ -403,35 +677,18 @@ pub(crate) fn fill_pattern(out: &mut [u8]) {
     }
 }
 
-/// The first virtio block device on the bus, if there is one.
-fn find_device() -> Option<(Bdf, DeviceId)> {
-    let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
-    inventory
-        .as_slice()
-        .iter()
-        .find(|info| virtio::is_block_device(info.vendor_id, info.device_id))
-        .map(|info| {
-            (
-                info.bdf,
-                DeviceId {
-                    vendor: info.vendor_id,
-                    device: info.device_id,
-                    class: info.class,
-                    subclass: info.subclass,
-                    prog_if: info.prog_if,
-                },
-            )
-        })
-}
-
 /// Map the region a capability describes: `bar` plus the capability's offset, for its length.
-fn map_cap(bars: &BarSet, cap: VirtioCap) -> Result<Region, Failure> {
-    let base = match bars.slots[usize::from(cap.bar)] {
-        Bar::Memory32 { base, .. } => u64::from(base),
-        Bar::Memory64 { base, .. } => base,
-        _ => return Err(Failure::BarNotMemory(cap.bar)),
-    };
-    mmio::map(base + u64::from(cap.offset), u64::from(cap.length)).map_err(Failure::Window)
+fn map_cap(dev: usize, bars: &BarSet, cap: VirtioCap) -> Result<Region, Failure> {
+    let base = bars
+        .slots
+        .get(usize::from(cap.bar))
+        .copied()
+        .and_then(nolx_pci_core::assigned_memory_base)
+        .ok_or(Failure::BarNotMemory(cap.bar))?;
+    let address = base
+        .checked_add(u64::from(cap.offset))
+        .ok_or(Failure::BarNotMemory(cap.bar))?;
+    mmio::map_owned(dev, address, u64::from(cap.length)).map_err(Failure::Window)
 }
 
 /// The byte offset of a common-configuration field, widened for the register accessors.
@@ -501,10 +758,14 @@ struct Queue {
 
 /// The disk once it is running: its queue, the notify register, and the request page.
 pub(crate) struct Disk {
+    owner: usize,
+    device: usize,
+    capacity: u64,
     queue: Queue,
     notify: Region,
     notify_offset: u64,
     request: Dma,
+    flush_supported: bool,
 }
 
 impl Disk {
@@ -555,13 +816,25 @@ impl Disk {
             lba: sector,
             sectors: len / virtio::SECTOR_BYTES as u32,
         };
-        blockdev::run(blockdev::VIRTIO, request, || self.issue(kind, sector, len))
+        blockdev::run(self.device, request, || self.issue(kind, sector, len))
     }
 
     /// Issue one request on the virtio queue and wait for the device. Called through
     /// [`Disk::transfer`], which routes it through the block queue.
     fn issue(&mut self, kind: u32, sector: u64, len: u32) -> Result<(), Failure> {
-        let submitted = REQUESTS_SUBMITTED.fetch_add(1, Ordering::Relaxed) + 1;
+        if !LIVE[self.owner].load(Ordering::Acquire) {
+            return Err(Failure::NoDevice);
+        }
+        let result = self.issue_inner(kind, sector, len);
+        if result.is_err() {
+            // A published command may still own descriptor zero. Do not submit a flush or
+            // reuse its buffer after failure: only checked reset can re-open this transport.
+            LIVE[self.owner].store(false, Ordering::Release);
+        }
+        result
+    }
+    fn issue_inner(&mut self, kind: u32, sector: u64, len: u32) -> Result<(), Failure> {
+        let submitted = REQUESTS_SUBMITTED[self.owner].fetch_add(1, Ordering::Relaxed) + 1;
         let request = &self.request;
         request.write(REQUEST_HEADER, &virtio::block_request_header(kind, sector));
         // A status byte the device never writes stays at this value, which is not `BLK_S_OK`.
@@ -571,10 +844,16 @@ impl Disk {
             request.address(REQUEST_DATA),
             request.address(REQUEST_STATUS),
         );
-        let chain = if kind == virtio::BLK_T_OUT {
+        let data_chain = if kind == virtio::BLK_T_OUT {
             virtio::block_write_chain(header, data, status, len)
         } else {
             virtio::block_read_chain(header, data, status, len)
+        };
+        let flush_chain = virtio::block_flush_chain(header, status);
+        let chain = if kind == virtio::BLK_T_FLUSH {
+            &flush_chain[..]
+        } else {
+            &data_chain[..]
         };
         for (index, descriptor) in chain.iter().enumerate() {
             self.queue
@@ -593,6 +872,10 @@ impl Disk {
         self.queue.ring.write16(avail + 2, self.queue.submitted);
         fence(Ordering::SeqCst);
         self.notify.write16(self.notify_offset, 0)?;
+        #[cfg(feature = "hal-virtio-blk-recovery-test")]
+        if recovery::fail(self.owner, 5) {
+            return Err(Failure::Timeout("published request"));
+        }
 
         // The used index must have moved past the count before this request.
         let used = self.queue.layout.used_offset;
@@ -604,7 +887,7 @@ impl Disk {
         )?;
 
         // The request's completion interrupt must be taken before the next request is submitted.
-        let delivered = msix::wait_for_interrupts(&COMPLETION_INTERRUPTS, submitted);
+        let delivered = msix::wait_for_interrupts(&COMPLETION_INTERRUPTS[self.owner], submitted);
         if delivered < submitted {
             return Err(Failure::Interrupts {
                 delivered,
@@ -620,41 +903,61 @@ impl Disk {
 }
 
 /// Select queue 0, size it, give the device its three ring addresses, and enable it.
-fn setup_queue(common: &Region, vector: u16) -> Result<Queue, Failure> {
+fn setup_queue(
+    dev: usize,
+    common: &Region,
+    notify: &Region,
+    cap: VirtioCap,
+    vector: u16,
+) -> Result<(), Failure> {
     common.write16(at(common::QUEUE_SELECT), 0)?;
     let max = common.read16(at(common::QUEUE_SIZE))?;
     if max == 0 {
         return Err(Failure::NoQueue);
     }
-    let size = max.min(QUEUE_SIZE_WANTED);
-    let layout = virtio::split_layout(size)?;
+    let layout = virtio::transport::block_queue_layout(max)?;
+    let size = layout.size;
+    let notify_offset = common.read16(at(common::QUEUE_NOTIFY_OFF))?;
+    let notify_at = virtio::notify_address(&cap, notify_offset)
+        .checked_sub(u64::from(cap.offset))
+        .ok_or(Failure::NoQueue)?;
+    if notify_at & 1 != 0
+        || notify_at
+            .checked_add(2)
+            .is_none_or(|end| end > notify.bytes())
+    {
+        return Err(Failure::NoQueue);
+    }
+    let mut state = STATE[dev].lock();
+    state.queue = Some(Queue {
+        size,
+        notify_offset,
+        ring: state.pages[0].take().unwrap(),
+        layout,
+        submitted: 0,
+    });
+    let queue = state.queue.as_ref().unwrap();
     common.write16(at(common::QUEUE_SIZE), size)?;
-    let ring = Dma::new().ok_or(Failure::Memory)?;
-    write_u64(common, common::QUEUE_DESC, ring.address(0))?;
+    write_u64(common, common::QUEUE_DESC, queue.ring.address(0))?;
     write_u64(
         common,
         common::QUEUE_DRIVER,
-        ring.address(layout.avail_offset),
+        queue.ring.address(layout.avail_offset),
     )?;
     write_u64(
         common,
         common::QUEUE_DEVICE,
-        ring.address(layout.used_offset),
+        queue.ring.address(layout.used_offset),
     )?;
-    let notify_offset = common.read16(at(common::QUEUE_NOTIFY_OFF))?;
-    // The vector is set before the queue is enabled. The device answers with the vector it took.
     common.write16(at(common::QUEUE_MSIX_VECTOR), vector)?;
     if common.read16(at(common::QUEUE_MSIX_VECTOR))? != vector {
         return Err(Failure::NoVector);
     }
     common.write16(at(common::QUEUE_ENABLE), 1)?;
-    Ok(Queue {
-        size,
-        notify_offset,
-        ring,
-        layout,
-        submitted: 0,
-    })
+    if common.read16(at(common::QUEUE_ENABLE))? != 1 {
+        return Err(Failure::NoQueue);
+    }
+    Ok(())
 }
 
 impl From<QueueError> for Failure {
@@ -676,12 +979,56 @@ pub const COMPLETION_VECTOR: u8 = 0x51;
 /// driver does not use.
 const MSIX_ENTRY: u16 = 1;
 
-/// Completion interrupts received since boot. Written by the interrupt handler.
-static COMPLETION_INTERRUPTS: AtomicUsize = AtomicUsize::new(0);
-/// Requests submitted. Each one should raise one completion interrupt.
-static REQUESTS_SUBMITTED: AtomicUsize = AtomicUsize::new(0);
+/// Completion interrupts for this startup epoch. Written by the interrupt handler.
+static COMPLETION_INTERRUPTS: [AtomicUsize; driver_start::DEVICES] =
+    [const { AtomicUsize::new(0) }; driver_start::DEVICES];
+static REQUESTS_SUBMITTED: [AtomicUsize; driver_start::DEVICES] =
+    [const { AtomicUsize::new(0) }; driver_start::DEVICES];
 
-/// Count one completion interrupt. Called from the interrupt handler on [`COMPLETION_VECTOR`].
-pub fn on_completion_interrupt() {
-    COMPLETION_INTERRUPTS.fetch_add(1, Ordering::Release);
+/// The kind of controller that owns the virtio block driver's vectors.
+const KIND: irq_vectors::VectorKind = irq_vectors::VectorKind::VirtioBlk;
+/// Whether the vector belongs to a virtio block controller.
+pub fn handles_vector(vector: u8) -> bool {
+    matches!(irq_vectors::owner(vector), Some((KIND, _)))
+}
+/// Attribute a vector to exactly one controller before acknowledging its completion.
+pub fn on_completion_interrupt(vector: u8) {
+    let Some((kind, dev)) = irq_vectors::owner(vector) else {
+        return;
+    };
+    if kind != KIND || dev >= driver_start::DEVICES {
+        return;
+    }
+    if !LIVE[dev].load(Ordering::Acquire) {
+        return;
+    }
+    COMPLETION_INTERRUPTS[dev].fetch_add(1, Ordering::Release);
+}
+
+impl super::storage_volume::SectorDisk for Disk {
+    fn sector_count(&self) -> u64 {
+        self.capacity
+    }
+    fn flush(&mut self) -> Result<(), nolxfs::DevError> {
+        if !self.flush_supported {
+            return Err(nolxfs::DevError::Io(5));
+        }
+        // Requests are synchronous, so no data command can cross this barrier.
+        self.issue(virtio::BLK_T_FLUSH, 0, 0)
+            .map_err(|_| nolxfs::DevError::Io(5))
+    }
+    fn read_sectors(&mut self, first: u64, out: &mut [u8]) -> Result<(), nolxfs::DevError> {
+        nolxfs::sector::check_sector_io(self.capacity, first, out.len())?;
+        Disk::read_sectors(self, first, out).map_err(|_| nolxfs::DevError::Io(5))
+    }
+    fn write_sectors(&mut self, first: u64, data: &[u8]) -> Result<(), nolxfs::DevError> {
+        nolxfs::sector::check_sector_io(self.capacity, first, data.len())?;
+        Disk::write_sectors(self, first, data).map_err(|_| nolxfs::DevError::Io(5))
+    }
+}
+
+/// Exercise checked partial-start/failed-stop recovery against two real disks.
+#[cfg(feature = "hal-virtio-blk-recovery-test")]
+pub fn recovery_selftest(console: &mut dyn HalConsole) {
+    recovery::run(console);
 }

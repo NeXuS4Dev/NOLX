@@ -6,14 +6,17 @@
 //! [`nolx_input_core::KeyEvent`], so a USB keyboard and a PS/2 keyboard produce the same events.
 //!
 //! Scope: the xHCI operations this crate names (run/stop, reset, port reset, enable slot), the
-//! link, normal, and event TRBs, and the boot protocol keyboard report. Hubs, isochronous and
-//! interrupt transfers, and class drivers other than the keyboard are not here.
+//! link, normal, and event TRBs, primary interrupt/dequeue rules, and direct-root boot keyboard/
+//! mouse descriptors and interrupt-IN reports. Hubs, isochronous transfers and general HID are open.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 use nolx_input_core::KeyEvent;
+pub mod device;
+pub mod interrupt;
+pub mod transfer;
 
 // Capability registers, from the controller's base.
 
@@ -63,6 +66,18 @@ pub const PORTSC_POWER: u32 = 1 << 9;
 pub const PORTSC_CONNECT_CHANGE: u32 = 1 << 17;
 /// PORTSC bit 21: port reset completed. Write 1 to clear.
 pub const PORTSC_RESET_CHANGE: u32 = 1 << 21;
+/// PORTSC bit 31: USB3 warm port reset (distinct from USB2 PR).
+pub const PORTSC_WARM_RESET: u32 = 1 << 31;
+/// Start a root-port reset without replaying link-state/write-one action bits.
+/// Only power is preserved. Changes are acknowledged independently after completion.
+pub fn portsc_reset_for_speed(portsc: u32, speed: u8) -> Option<u32> {
+    let reset = match speed {
+        1..=3 => PORTSC_RESET,
+        4 => PORTSC_WARM_RESET,
+        _ => return None,
+    };
+    Some((portsc & PORTSC_POWER) | reset)
+}
 /// The PORTSC bits that clear when a 1 is written to them. Writing back a register that keeps
 /// one of these set would clear it, so these are masked out of a write unless meant.
 pub const PORTSC_WRITE_ONE_TO_CLEAR: u32 =

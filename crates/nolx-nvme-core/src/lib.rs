@@ -103,6 +103,33 @@ pub fn csts_ready(csts: u32) -> bool {
     csts & CSTS_RDY != 0
 }
 
+/// The readback of a stopped NVMe controller. These are decisions over register values, so
+/// they can be checked on a host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StopState {
+    /// The controller configuration register.
+    pub control: u32,
+    /// The controller status register.
+    pub status: u32,
+}
+
+impl StopState {
+    /// Whether the controller is disabled and no longer ready: it processes no command and
+    /// reaches no queue.
+    #[must_use]
+    pub fn disabled(&self) -> bool {
+        self.control & CC_EN == 0 && self.status & CSTS_RDY == 0
+    }
+}
+
+/// The final readback filter, not a hardware operation: the controller must be disabled and
+/// not ready, and the function must be excluded from bus mastering, legacy interrupts and
+/// message delivery, before an exposed page may be freed.
+#[must_use]
+pub fn stop_proven(state: StopState, command: u16, messages_disabled: bool) -> bool {
+    state.disabled() && nolx_pci_core::exclusion::excluded(command, messages_disabled)
+}
+
 /// The AQA value for an admin queue of `submit` submission entries and `complete` completion
 /// entries. Each size is stored one less than the count. Returns `None` for a size outside 1 to
 /// 4096.
@@ -293,3 +320,125 @@ pub fn namespace_block_bytes(identify: &[u8]) -> Option<u32> {
 
 #[cfg(test)]
 mod tests;
+
+/// Flush all prior writes to one namespace; no PRP data buffer is supplied.
+#[must_use]
+pub fn flush(cid: u16, nsid: u32) -> Sqe {
+    sqe(0, cid, nsid, 0, 0, [0; 6])
+}
+
+#[cfg(test)]
+mod flush_tests {
+    use super::*;
+    #[test]
+    fn flush_names_namespace_and_cid_but_has_no_data_or_command_dwords() {
+        let command = flush(7, 3);
+        assert_eq!(command[0], 0);
+        assert_eq!(&command[2..4], &7u16.to_le_bytes());
+        assert_eq!(&command[4..8], &3u32.to_le_bytes());
+        assert!(command[8..].iter().all(|&b| b == 0));
+    }
+}
+
+/// Read a published completion, checking its phase byte before copying any payload.
+///
+/// The controller publishes the status/phase after the other completion fields. Copying the
+/// whole entry first can mix an old CID with a newly published phase. `read` must perform
+/// volatile/coherent device-memory reads; the queue entry must not be released to the device
+/// until the returned snapshot has been consumed.
+pub fn read_completion(
+    expected_phase: bool,
+    mut read: impl FnMut(usize, &mut [u8]),
+) -> Option<[u8; CQE_BYTES]> {
+    let mut phase = [0; 1];
+    read(14, &mut phase);
+    if (phase[0] & 1 != 0) != expected_phase {
+        return None;
+    }
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    let mut entry = [0; CQE_BYTES];
+    read(0, &mut entry);
+    Some(entry)
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    #[test]
+    fn phase_is_observed_before_copying_the_published_cid() {
+        let mut calls = 0;
+        let entry = read_completion(true, |offset, out| {
+            calls += 1;
+            if calls == 1 {
+                assert_eq!((offset, out.len()), (14, 1));
+                out[0] = 1;
+            } else {
+                assert_eq!((offset, out.len()), (0, CQE_BYTES));
+                // The device's payload became visible with its phase publication.
+                out[12..14].copy_from_slice(&71u16.to_le_bytes());
+                out[14] = 1;
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(
+            completion_cid(u32::from_le_bytes(entry[12..16].try_into().unwrap())),
+            71
+        );
+    }
+    #[test]
+    fn an_unpublished_entry_never_reads_stale_payload() {
+        let mut calls = 0;
+        assert_eq!(
+            read_completion(false, |offset, out| {
+                calls += 1;
+                assert_eq!((offset, out.len()), (14, 1));
+                out[0] = 1;
+            }),
+            None
+        );
+        assert_eq!(calls, 1);
+    }
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::*;
+
+    #[test]
+    fn a_disabled_controller_is_neither_enabled_nor_ready() {
+        assert!(StopState {
+            control: 0,
+            status: 0
+        }
+        .disabled());
+        assert!(!StopState {
+            control: CC_EN,
+            status: 0
+        }
+        .disabled());
+        assert!(!StopState {
+            control: 0,
+            status: CSTS_RDY
+        }
+        .disabled());
+    }
+
+    #[test]
+    fn the_stop_proof_needs_the_controller_and_the_pci_exclusion_together() {
+        let state = StopState {
+            control: 0,
+            status: 0,
+        };
+        assert!(stop_proven(state, 1 << 10, true));
+        assert!(!stop_proven(state, 1 << 10, false));
+        assert!(!stop_proven(state, 1 << 10 | 4, true));
+        assert!(!stop_proven(state, 0, true));
+        let mut enabled = state;
+        enabled.control = CC_EN;
+        assert!(!stop_proven(enabled, 1 << 10, true));
+        let mut ready = state;
+        ready.status = CSTS_RDY;
+        assert!(!stop_proven(ready, 1 << 10, true));
+    }
+}

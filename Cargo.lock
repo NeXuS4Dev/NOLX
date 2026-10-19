@@ -20,6 +20,9 @@ dependencies = [
 [[package]]
 name = "nolx-ahci-core"
 version = "0.1.0"
+dependencies = [
+ "nolx-pci-core",
+]
 
 [[package]]
 name = "nolx-block-core"
@@ -85,6 +88,9 @@ version = "0.1.0"
 [[package]]
 name = "nolx-nvme-core"
 version = "0.1.0"
+dependencies = [
+ "nolx-pci-core",
+]
 
 [[package]]
 name = "nolx-obj-core"

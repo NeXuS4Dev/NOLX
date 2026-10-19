@@ -15,6 +15,11 @@
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+/// Modern virtio-net negotiation and frame layout.
+pub mod net;
+/// Modern transport queue admission and shutdown readback rules.
+pub mod transport;
+
 use nolx_pci_core::{capabilities, Bdf, ConfigSpace};
 
 /// The PCI vendor ID every virtio device carries.
@@ -109,6 +114,8 @@ pub const INIT_STATUS_SEQUENCE: [u8; 4] = [
 /// Failure in the virtio rules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VirtioError {
+    /// The network device does not offer its MAC address.
+    NoMacAddress,
     /// The device does not offer `VIRTIO_F_VERSION_1`, so it is not a modern device.
     NoVersion1,
     /// The device cleared `FEATURES_OK` after the driver set it: the feature set was rejected.
@@ -438,3 +445,56 @@ pub fn capacity_bytes(capacity_sectors: u64) -> Option<u64> {
 
 #[cfg(test)]
 mod tests;
+
+/// Block feature bit: the device supports explicit durable cache flush requests.
+pub const FEATURE_BLK_FLUSH: u64 = 1 << 9;
+
+/// Negotiate modern block transport and the optional explicit-flush feature.
+pub fn negotiate_block(features: u64) -> Result<u64, VirtioError> {
+    Ok(negotiate(features)? | (features & FEATURE_BLK_FLUSH))
+}
+
+/// A no-data cache-flush request consists of a readable header followed by writable status.
+#[must_use]
+pub fn block_flush_chain(header: u64, status: u64) -> [Descriptor; 2] {
+    [
+        Descriptor {
+            addr: header,
+            len: 16,
+            flags: DESC_NEXT,
+            next: 1,
+        },
+        Descriptor {
+            addr: status,
+            len: 1,
+            flags: DESC_WRITE,
+            next: 0,
+        },
+    ]
+}
+
+#[cfg(test)]
+mod flush_tests {
+    use super::*;
+    #[test]
+    fn block_negotiation_accepts_only_modern_and_optional_flush() {
+        assert_eq!(
+            negotiate_block(u64::MAX),
+            Ok(FEATURE_VERSION_1 | FEATURE_BLK_FLUSH)
+        );
+        assert_eq!(negotiate_block(FEATURE_VERSION_1), Ok(FEATURE_VERSION_1));
+        assert!(negotiate_block(FEATURE_BLK_FLUSH).is_err());
+    }
+    #[test]
+    fn flush_has_no_data_descriptor_and_device_writes_only_status() {
+        let chain = block_flush_chain(0x1000, 0x2000);
+        assert_eq!(chain[0].addr, 0x1000);
+        assert_eq!(chain[0].len, 16);
+        assert_eq!(chain[0].flags, DESC_NEXT);
+        assert_eq!(chain[0].next, 1);
+        assert_eq!(chain[1].addr, 0x2000);
+        assert_eq!(chain[1].len, 1);
+        assert_eq!(chain[1].flags, DESC_WRITE);
+        assert_eq!(chain[1].next, 0);
+    }
+}

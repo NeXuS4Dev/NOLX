@@ -680,6 +680,26 @@ impl PageTables {
     /// 4 KiB page unmapped from inside a large page used [`PageTables::map_page`], which
     /// splits it, rather than this.
     pub fn unmap(&mut self, store: &mut impl TableStore, virt: u64) -> Result<Mapping, MapError> {
+        self.unmap_inner(store, virt, false)
+    }
+
+    /// Remove a leaf while retaining the PML4 child shared by other address spaces.
+    /// Empty lower tables are reclaimed, including an empty path left by failed mapping.
+    /// Even NotMapped may prune empty lower tables, but never clears the shared root entry.
+    pub fn unmap_shared(
+        &mut self,
+        store: &mut impl TableStore,
+        virt: u64,
+    ) -> Result<Mapping, MapError> {
+        self.unmap_inner(store, virt, true)
+    }
+
+    fn unmap_inner(
+        &mut self,
+        store: &mut impl TableStore,
+        virt: u64,
+        shared: bool,
+    ) -> Result<Mapping, MapError> {
         if !is_canonical(virt) || virt & PAGE_MASK != 0 {
             self.stats.failures += 1;
             return Err(MapError::Misaligned);
@@ -699,7 +719,9 @@ impl PageTables {
         }
         if pdpt_entry.is_huge() {
             store.set_entry(pdpt_frame, i3, 0);
-            self.release_if_empty(store, self.root, i4, pdpt_frame);
+            if !shared {
+                self.release_if_empty(store, self.root, i4, pdpt_frame);
+            }
             self.stats.unmapped += 1;
             return Ok(huge_mapping(virt, pdpt_entry, PAGE_1G));
         }
@@ -707,12 +729,15 @@ impl PageTables {
         let pd_frame = pdpt_entry.frame();
         let pd_entry = Entry::from_raw(store.entry(pd_frame, i2));
         if !pd_entry.is_present() {
+            if shared {
+                self.release_if_empty(store, pdpt_frame, i3, pd_frame);
+            }
             self.stats.failures += 1;
             return Err(MapError::NotMapped);
         }
         if pd_entry.is_huge() {
             store.set_entry(pd_frame, i2, 0);
-            if self.release_if_empty(store, pdpt_frame, i3, pd_frame) {
+            if self.release_if_empty(store, pdpt_frame, i3, pd_frame) && !shared {
                 self.release_if_empty(store, self.root, i4, pdpt_frame);
             }
             self.stats.unmapped += 1;
@@ -722,6 +747,9 @@ impl PageTables {
         let pt_frame = pd_entry.frame();
         let pt_entry = Entry::from_raw(store.entry(pt_frame, i1));
         if !pt_entry.is_present() {
+            if shared && self.release_if_empty(store, pd_frame, i2, pt_frame) {
+                self.release_if_empty(store, pdpt_frame, i3, pd_frame);
+            }
             self.stats.failures += 1;
             return Err(MapError::NotMapped);
         }
@@ -729,6 +757,7 @@ impl PageTables {
         // The page table can go if that was its last mapping, and so can its parents.
         if self.release_if_empty(store, pd_frame, i2, pt_frame)
             && self.release_if_empty(store, pdpt_frame, i3, pd_frame)
+            && !shared
         {
             self.release_if_empty(store, self.root, i4, pdpt_frame);
         }
@@ -1245,6 +1274,62 @@ mod tests {
             3,
             "the directory pointer table, the page directory, and the page table holding 511 live pages"
         );
+    }
+
+    #[test]
+    fn shared_unmap_retains_root_child_seen_by_another_address_space() {
+        let mut store = MemStore::new(1, 100, 64);
+        let mut tables = PageTables::new(1);
+        let at = crate::mmio::MMIO_BASE;
+        let flags = crate::mmio::mmio_flags();
+        for huge in [false, true] {
+            if huge {
+                tables.map_huge(&mut store, at, 0xc0000000, flags).unwrap();
+            } else {
+                tables.map_page(&mut store, at, 0xc0000000, flags).unwrap();
+            }
+            let shared = store.entry(1, pml4_index(at));
+            store.set_entry(2, pml4_index(at), shared);
+            let other = PageTables::new(2);
+            tables.unmap_shared(&mut store, at).unwrap();
+            assert_eq!(store.entry(1, pml4_index(at)), shared);
+            assert_eq!(store.entry(2, pml4_index(at)), shared);
+            assert!(other.translate(&store, at).is_none());
+            tables.map_page(&mut store, at, 0xd0000000, flags).unwrap();
+            assert_eq!(other.translate(&store, at).unwrap().physical, 0xd0000000);
+            tables.unmap_shared(&mut store, at).unwrap();
+        }
+        assert_eq!(
+            store.allocated - store.released,
+            1,
+            "only the shared PDPT remains"
+        );
+    }
+
+    #[test]
+    fn shared_unmap_prunes_empty_paths_left_by_failed_first_leaf() {
+        let at = crate::mmio::MMIO_BASE;
+        let flags = crate::mmio::mmio_flags();
+        for spare in 0..2 {
+            let mut store = MemStore::new(1, 100, spare + 1);
+            let pdpt = store.allocate_table().unwrap();
+            let root_entry = Entry::new(pdpt * 4096, EntryFlags::intermediate(flags))
+                .unwrap()
+                .bits();
+            store.set_entry(1, pml4_index(at), root_entry);
+            let mut tables = PageTables::new(1);
+            assert_eq!(
+                tables.map_page(&mut store, at, 0xc0000000, flags),
+                Err(MapError::OutOfMemory)
+            );
+            assert_eq!(
+                tables.unmap_shared(&mut store, at),
+                Err(MapError::NotMapped)
+            );
+            assert_eq!(store.entry(1, pml4_index(at)), root_entry);
+            assert_eq!(store.allocated - store.released, 1);
+            assert!(store.is_empty_table(pdpt));
+        }
     }
 
     #[test]

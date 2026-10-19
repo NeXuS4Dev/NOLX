@@ -616,7 +616,7 @@ jobs:
       - name: Assert e1000 receive and interrupt delivery
         run: |
           grep -F 'e1000: received ARP reply from 10.0.2.2' build/serial.log
-          grep -E 'descriptor recycled, INTx vector 0x2[3-9a-f], interrupts [1-9][0-9]*' build/serial.log
+          grep -E 'descriptor recycled, INTx vector 0x(2[3-9a-f]|3[0-7]), interrupts [1-9][0-9]*' build/serial.log
 
       - name: Assert AHCI MSI completions
         run: |
@@ -676,11 +676,344 @@ jobs:
 
   # ---------------------------------------------------------------- T2 with each storage backend
   #
+  network-multi:
+    name: Multi-adapter network wire identity and lifecycle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.88.0
+          targets: x86_64-unknown-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install QEMU
+        run: |
+          sudo apt-get update 2>&1 | tail -1
+          sudo apt-get install -y qemu-system-x86 2>&1 | tail -3
+      - name: Build multi-adapter network test
+        run: make kernel KERNEL_FEATURES=hal-driver-net-multi-test 2>&1 | tee /tmp/job.log
+      - name: Verify independent adapters, shared INTx and captured public RX/TX
+        run: python3 scripts/check-network-multi.py 2>&1 | tee -a /tmp/job.log
+      - name: Build poisoned-line firmware INTx proof
+        run: make kernel KERNEL_FEATURES=hal-driver-net-multi-test,hal-pci-intx-poison-test 2>&1 | tee -a /tmp/job.log
+      - name: Verify ACPI routes without valid Interrupt Line bytes
+        run: python3 scripts/check-network-multi.py --intx-routing-only 2>&1 | tee -a /tmp/job.log
+      - name: Build combined six-storage four-NIC fixture
+        run: make kernel KERNEL_FEATURES=hal-driver-multi-test,hal-driver-net-multi-test 2>&1 | tee -a /tmp/job.log
+      - name: Verify all ten devices together on Q35
+        run: python3 scripts/check-network-multi.py --storage-fixture-only 2>&1 | tee -a /tmp/job.log
+      - name: Build checked e1000 failed-controller recovery fixture
+        run: make kernel KERNEL_FEATURES=hal-e1000-recovery-test 2>&1 | tee -a /tmp/job.log
+      - name: Verify partial startup, failed-stop quarantine and fresh captured peer traffic
+        run: python3 scripts/check-e1000-recovery.py 2>&1 | tee -a /tmp/job.log
+      - name: Build checked virtio-net failed-controller recovery fixture
+        run: make kernel KERNEL_FEATURES=hal-virtio-net-recovery-test 2>&1 | tee -a /tmp/job.log
+      - name: Verify modern/transitional partial startup and MSI-X recovery with captured traffic
+        run: python3 scripts/check-virtio-net-recovery.py 2>&1 | tee -a /tmp/job.log
+      - name: Annotate serial logs on failure
+        if: failure()
+        run: |
+          for log in build/net-multi-*.log build/e1000-recovery-*.log build/virtio-net-recovery-*.log; do
+            tr -cd '\11\12\40-\176' < "$log" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
+          done
+      - uses: ./.github/actions/report-failure
+        if: failure()
+
+  usb-hid:
+    name: Native USB HID interrupts, lifecycle and DMA safety
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.88.0
+          targets: x86_64-unknown-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install QEMU
+        run: |
+          sudo apt-get update 2>&1 | tail -1
+          sudo apt-get install -y qemu-system-x86 2>&1 | tail -3
+      - name: Build default kernel
+        run: make kernel 2>&1 | tee /tmp/job.log
+      - name: Verify PC and Q35 boot-HID input, ring wrap and disconnect reclamation
+        run: python3 scripts/check-usb-input.py 2>&1 | tee -a /tmp/job.log
+      - name: Reject misleading interrupt proof logs
+        run: python3 -m unittest discover -s scripts -p 'test_xhci_irq_checks.py' 2>&1 | tee -a /tmp/job.log
+      - name: Build interrupt observer image
+        run: make kernel KERNEL_FEATURES=hal-xhci-irq-test 2>&1 | tee -a /tmp/job.log
+      - name: Verify full/high-speed HID, USB3 control, MSI routing and explicit polling fallbacks
+        run: |
+          python3 scripts/check-usb-input.py --interrupts 2>&1 | tee -a /tmp/job.log
+          python3 scripts/check-usb-input.py --usb-version 1 --interrupts 2>&1 | tee -a /tmp/job.log
+          python3 scripts/check-usb-input.py --superspeed-control --interrupts 2>&1 | tee -a /tmp/job.log
+          python3 scripts/check-usb-input.py --interrupts --transport msi 2>&1 | tee -a /tmp/job.log
+          python3 scripts/check-usb-input.py --transport polled 2>&1 | tee -a /tmp/job.log
+          python3 scripts/check-usb-input.py --no-apic 2>&1 | tee -a /tmp/job.log
+      - name: Build independent input-object observer image
+        run: make kernel KERNEL_FEATURES=hal-input-object-test,hal-xhci-irq-test 2>&1 | tee -a /tmp/job.log
+      - name: Verify independent readers, overflow resync and stale USB identities
+        run: python3 scripts/check-usb-input.py --objects --interrupts 2>&1 | tee -a /tmp/job.log
+      - name: Verify PS/2 through the same input-object API
+        run: python3 scripts/check-ps2-input.py --objects 2>&1 | tee -a /tmp/job.log
+      - name: Verify controller lifecycle, actual transfer STALL and fail-closed slot repair
+        run: |
+          for mode in lifecycle start-fault stop-fault recovery irq-start-fault transfer-fault; do
+            make kernel KERNEL_FEATURES=hal-xhci-${mode}-test,hal-xhci-irq-test 2>&1 | tee -a /tmp/job.log
+            python3 scripts/check-xhci-lifecycle.py --mode "$mode" --interrupts 2>&1 | tee -a /tmp/job.log
+          done
+      - name: Annotate USB serial logs on failure
+        if: failure()
+        run: |
+          for log in build/input-usb-*.log build/input-xhci-lifecycle-*.log; do
+            tr -cd '\11\12\40-\176' < "$log" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
+          done
+      - uses: ./.github/actions/report-failure
+        if: failure()
+
+  pci-resources:
+    name: Native PCI BAR and nested bridge resource recovery
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.88.0
+          targets: x86_64-unknown-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install QEMU
+        run: |
+          sudo apt-get update 2>&1 | tail -1
+          sudo apt-get install -y qemu-system-x86 2>&1 | tail -3
+      - name: Build explicit cleared-resource hardware test
+        run: make kernel KERNEL_FEATURES=hal-pci-resource-test,hal-driver-multi-test,hal-driver-net-multi-test 2>&1 | tee /tmp/job.log
+      - name: Clear firmware assignments, rebuild resources, verify ten devices
+        run: python3 scripts/check-pci-resources.py 2>&1 | tee -a /tmp/job.log
+      - name: Annotate serial logs on failure
+        if: failure()
+        run: |
+          for log in build/net-multi-*.log; do
+            tr -cd '\11\12\40-\176' < "$log" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
+          done
+      - uses: ./.github/actions/report-failure
+        if: failure()
+
+  storage-multi:
+    name: Multi-controller storage identity and lifecycle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.88.0
+          targets: x86_64-unknown-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install QEMU
+        run: |
+          sudo apt-get update 2>&1 | tail -1
+          sudo apt-get install -y qemu-system-x86 2>&1 | tail -3
+      - name: Build multi-controller hardware test
+        run: make kernel KERNEL_FEATURES=hal-driver-multi-test 2>&1 | tee /tmp/job.log
+      - name: Verify distinct media, per-controller IRQs and independent lifecycle
+        run: python3 scripts/check-storage-multi.py 2>&1 | tee -a /tmp/job.log
+      - name: Annotate serial logs on failure
+        if: failure()
+        run: |
+          for log in build/multi-*.log; do
+            tr -cd '\11\12\40-\176' < "$log" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
+          done
+      - uses: ./.github/actions/report-failure
+        if: failure()
+  # The virtio block path retains its queue/DMA owners across every failure. These fixtures
+  # inject refusals and withheld proof -- they do not claim naturally failing hardware -- and
+  # then require durable writes, an unchanged-media reboot and exact DMA reclamation.
+  virtio-blk-recovery:
+    name: Virtio-blk checked failure recovery
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.88.0
+          targets: x86_64-unknown-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install QEMU
+        run: |
+          sudo apt-get update 2>&1 | tail -1
+          sudo apt-get install -y qemu-system-x86 2>&1 | tail -3
+      - name: Build the recovery fixture and an independent filesystem reader
+        run: |
+          cargo build -p nolxfs-dump 2>&1 | tee /tmp/job.log
+          make kernel KERNEL_FEATURES=hal-virtio-blk-recovery-test 2>&1 | tee -a /tmp/job.log
+      - name: Verify partial and failed-stop recovery, durable media and unchanged-media reboot
+        run: python3 scripts/check-virtio-blk-recovery.py 2>&1 | tee -a /tmp/job.log
+      - name: Annotate serial logs on failure
+        if: failure()
+        run: |
+          for log in build/virtio-blk-recovery-*.log; do
+            tr -cd '\11\12\40-\176' < "$log" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
+          done
+      - uses: ./.github/actions/report-failure
+        if: failure()
+
+  # The AHCI and NVMe paths retain their command/FIS, queue and DMA owners across every
+  # failure. These fixtures inject refusals and withheld proof -- they do not claim naturally
+  # failing hardware -- and then require durable writes, an unchanged-media reboot and exact
+  # DMA reclamation on both transports.
+  ahci-nvme-recovery:
+    name: AHCI and NVMe checked failure recovery
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.88.0
+          targets: x86_64-unknown-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install QEMU
+        run: |
+          sudo apt-get update 2>&1 | tail -1
+          sudo apt-get install -y qemu-system-x86 2>&1 | tail -3
+      - name: Build the recovery fixture and an independent filesystem reader
+        run: |
+          cargo build -p nolxfs-dump 2>&1 | tee /tmp/job.log
+          make kernel KERNEL_FEATURES=hal-ahci-nvme-recovery-test 2>&1 | tee -a /tmp/job.log
+      - name: Verify partial and failed-stop recovery, durable media and unchanged-media reboot
+        run: python3 scripts/check-ahci-nvme-recovery.py 2>&1 | tee -a /tmp/job.log
+      - name: Annotate serial logs on failure
+        if: failure()
+        run: |
+          for log in build/*-nvme-recovery-*.log; do
+            tr -cd '\11\12\40-\176' < "$log" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
+          done
+      - uses: ./.github/actions/report-failure
+        if: failure()
+
+  driver-lifecycle:
+    name: Persistent five-driver hardware lifecycle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.88.0
+          targets: x86_64-unknown-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install QEMU
+        run: |
+          sudo apt-get update 2>&1 | tail -1
+          sudo apt-get install -y qemu-system-x86 2>&1 | tail -3
+      - name: Build explicit lifecycle hardware test
+        run: make kernel KERNEL_FEATURES=hal-driver-lifecycle-test 2>&1 | tee /tmp/job.log
+      - name: Stop, reclaim DMA, restart, exercise I/O, remove, refuse restart
+        run: python3 scripts/check-driver-lifecycle.py 2>&1 | tee -a /tmp/job.log
+      - name: Annotate serial logs on failure
+        if: failure()
+        run: |
+          for log in build/lifecycle-*.log; do
+            tr -cd '\11\12\40-\176' < "$log" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
+          done
+      - uses: ./.github/actions/report-failure
+        if: failure()
+
+  acpi-aml:
+    name: ACPI firmware AML methods and bounded refusals
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.88.0
+          targets: x86_64-unknown-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install QEMU
+        run: |
+          sudo apt-get update 2>&1 | tail -1
+          sudo apt-get install -y qemu-system-x86 2>&1 | tail -3
+      - name: Build fixture-asserting and ordinary kernels
+        run: |
+          make kernel KERNEL_FEATURES=hal-aml-test 2>&1 | tee /tmp/job.log
+          cp build/nolx.elf build/nolx-aml.elf
+          make kernel 2>&1 | tee -a /tmp/job.log
+      - name: Evaluate SeaBIOS DSDT and SSDT methods, malformed tables and no-ACPI fallback
+        run: python3 scripts/check-aml.py 2>&1 | tee -a /tmp/job.log
+      - name: Annotate serial logs on failure
+        if: failure()
+        run: |
+          for log in build/aml-*.log; do
+            tr -cd '\11\12\40-\176' < "$log" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
+          done
+      - uses: ./.github/actions/report-failure
+        if: failure()
+
+  acpi-s5:
+    name: ACPI S5, six-driver shutdown and fail-closed DMA refusal
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.88.0
+          targets: x86_64-unknown-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install QEMU
+        run: |
+          sudo apt-get update 2>&1 | tail -1
+          sudo apt-get install -y qemu-system-x86 2>&1 | tail -3
+      - name: Build explicit S5 hardware test
+        run: make kernel KERNEL_FEATURES=hal-power-test-s5 2>&1 | tee /tmp/job.log
+      - name: Observe guest shutdown through QMP
+        run: python3 scripts/check-power-s5.py 2>&1 | tee -a /tmp/job.log
+      - name: Build independent filesystem reader
+        run: cargo build -p nolxfs-dump 2>&1 | tee -a /tmp/job.log
+      - name: Verify six-driver quiescence and flush, stop and foreign-DMA refusals
+        run: |
+          for mode in normal flush-fault stop-fault unowned; do
+            feature=hal-power-quiesce-test
+            if [ "$mode" != normal ]; then feature=hal-power-quiesce-${mode}-test; fi
+            make kernel KERNEL_FEATURES="$feature" 2>&1 | tee -a /tmp/job.log
+            python3 scripts/check-power-quiesce.py --mode "$mode" 2>&1 | tee -a /tmp/job.log
+          done
+      - name: Annotate serial logs on failure
+        if: failure()
+        run: |
+          for log in build/power-s5-*.log build/power-quiesce-*.log; do
+            tr -cd '\11\12\40-\176' < "$log" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
+          done
+      - uses: ./.github/actions/report-failure
+        if: failure()
+
+  virtio-network:
+    name: Virtio-net wire RX/TX and MSI-X
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.88.0
+          targets: x86_64-unknown-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install QEMU
+        run: |
+          sudo apt-get update 2>&1 | tail -1
+          sudo apt-get install -y qemu-system-x86 2>&1 | tail -3
+      - name: Build
+        run: make kernel 2>&1 | tee /tmp/job.log
+      - name: Native receive and transmit match captured Ethernet bytes
+        run: python3 scripts/check-virtio-net.py 2>&1 | tee -a /tmp/job.log
+      - name: Annotate serial logs on failure
+        if: failure()
+        run: |
+          for log in build/virtio-net-*.log; do
+            tr -cd '\11\12\40-\176' < "$log" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
+          done
+      - uses: ./.github/actions/report-failure
+        if: failure()
+
   # The boot runs once per storage backend, with that backend's disk as the only one the kernel can
   # find. Each run must bind its driver through nolx-df, write a checksummed pattern, read it back,
   # reach the end of boot, and find the other two controllers absent. The disk image is checksummed
-  # after QEMU exits, so a match means the write reached the disk. The NOLXFS file check runs only on
-  # the virtio backend, the one the volume code is on.
+  # after QEMU exits, so a match means the write reached the disk. Each backend must also commit,
+  # remount and read a real NOLXFS file through its own queued transport.
   storage-backends:
     name: Boot with ${{ matrix.backend }} storage only
     runs-on: ubuntu-latest
@@ -773,8 +1106,7 @@ jobs:
             echo "the disk image does not hold the data the kernel wrote"
             exit 1
           fi
-      - name: The NOLXFS file holds the pattern (virtio only)
-        if: matrix.backend == 'virtio'
+      - name: The NOLXFS file holds the pattern
         run: |
           set -e
           line=$(grep -Eo 'nolxfs file checksum.bin: 8192 bytes written, committed, mounted again, read back, crc32 0x[0-9a-f]{8} matches' build/serial.log | head -1 || true)
@@ -788,6 +1120,10 @@ jobs:
             echo "the file read back is not the pattern the kernel wrote"
             exit 1
           fi
+      - name: Independently mount the persisted file and boot from it again
+        run: |
+          cargo build -p nolxfs-dump
+          python3 scripts/check-storage-files.py "${{ matrix.backend }}" build/disk.img
       - name: Annotate the serial log on failure
         if: failure()
         run: |

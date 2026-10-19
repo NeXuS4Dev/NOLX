@@ -126,6 +126,7 @@ pub fn init(console: &mut dyn HalConsole, info: &BootInfo) {
     // SAFETY: `info` was produced by the boot hand-off, which validated the Multiboot
     // magic. `memory_map` bounds-checks every read against the map's own length.
     let map = unsafe { info.memory_map() };
+    crate::hal::pci::record_boot_memory(&map);
 
     if map.regions().is_empty() {
         init_without_firmware(console);

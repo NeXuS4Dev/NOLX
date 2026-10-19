@@ -10,13 +10,15 @@
 //! Scope: scancode set 1 as the controller translates it, the keys a desktop keyboard has
 //! outside Pause and Print Screen, and the device replies that matter during initialisation.
 //! Pause and Print Screen are consumed and not reported. The shared event queue and standard
-//! three-byte mouse decoder live in [`events`].
+//! three-byte mouse decoder live in [`events`]. Device-owned input objects, independent reader
+//! subscriptions, disconnect lifetime and overflow resynchronization live in [`objects`].
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 pub mod events;
+pub mod objects;
 
 /// The data port: bytes from the keyboard, and the data written to it.
 pub const DATA_PORT: u16 = 0x60;

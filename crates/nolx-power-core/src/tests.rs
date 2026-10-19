@@ -227,3 +227,71 @@ fn a_fadt_that_is_damaged_or_incomplete_is_refused_with_its_reason() {
         "a port above 0xFFFF is not an I/O port"
     );
 }
+
+#[test]
+fn sleep_control_preserves_every_unrelated_bit() {
+    let mask = (7 << 10) | (1 << 13);
+    for current in [0, 1, 0xffff, 0x1555, 0xaaaa] {
+        for typ in 0..8 {
+            for enable in [false, true] {
+                let word = pm1_sleep_control(current, typ, enable).unwrap();
+                assert_eq!(word & !mask, current & !mask);
+                assert_eq!(word & mask, pm1_sleep_value(typ, enable).unwrap());
+            }
+        }
+    }
+    assert_eq!(pm1_sleep_control(0xffff, 8, true), None);
+}
+
+#[test]
+fn fadt_records_acpi_enable_and_control_width_without_truncating_ports() {
+    let mut bytes = fadt(116, 1, 0x1000, 0, 0x604, 0);
+    bytes[48..52].copy_from_slice(&0xb2u32.to_le_bytes());
+    bytes[52] = 0xf1;
+    bytes[89] = 2;
+    bytes[9] = 0;
+    bytes[9] = 0u8.wrapping_sub(bytes[..116].iter().fold(0u8, |a, &b| a.wrapping_add(b)));
+    let parsed = Fadt::parse(&bytes[..116]).unwrap();
+    assert_eq!(parsed.smi_command, Some(0xb2));
+    assert_eq!(parsed.acpi_enable, 0xf1);
+    assert_eq!(parsed.pm1_control_bytes, 2);
+    bytes[48..52].copy_from_slice(&0x100b2u32.to_le_bytes());
+    bytes[9] = 0;
+    bytes[9] = 0u8.wrapping_sub(bytes[..116].iter().fold(0u8, |a, &b| a.wrapping_add(b)));
+    assert_eq!(Fadt::parse(&bytes[..116]).unwrap().smi_command, None);
+}
+
+#[test]
+fn resource_descriptor_bounds_cannot_borrow_bytes_from_the_next_descriptor() {
+    for bytes in [
+        &[0x4a, 0xf8, 3, 0x79, 0][..],
+        &[0x86, 1, 0, 0, 0x79, 0],
+        &[0x79],
+        &[0x8a, 43, 0, 0],
+    ] {
+        assert!(parse_resources(bytes).is_err());
+    }
+    assert!(parse_resources(&[0x79, 0, 0x22, 1, 0]).is_err());
+}
+#[test]
+fn resource_ranges_and_nonzero_checksums_are_validated() {
+    assert_eq!(
+        parse_resources(&[0x4b, 0xff, 0xff, 2, 0x79, 0]),
+        Err(ResourceError::InvalidRange)
+    );
+    assert_eq!(
+        parse_resources(&[0x4b, 0, 0, 0, 0x79, 0]),
+        Err(ResourceError::InvalidRange)
+    );
+    assert_eq!(parse_resources(&[0x79, 1]), Err(ResourceError::Checksum));
+    assert!(parse_resources(&[0x79, 0x87]).unwrap().is_empty());
+    assert!(parse_resources(&[0x79, 0, 0, 0]).unwrap().is_empty());
+}
+#[test]
+fn every_truncation_of_a_resource_template_is_refused() {
+    let bytes = [0x4b, 0xf8, 3, 8, 0x22, 16, 0, 0x79, 0];
+    for end in 0..bytes.len() {
+        assert!(parse_resources(&bytes[..end]).is_err());
+    }
+    assert_eq!(parse_resources(&bytes).unwrap().len(), 2);
+}

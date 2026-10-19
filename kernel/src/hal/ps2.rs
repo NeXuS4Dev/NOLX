@@ -6,7 +6,8 @@ use crate::sync::IrqMutex;
 use nolx_hal_core::console::HalConsole;
 use nolx_input_core::{
     self as input,
-    events::{Event, EventQueue, Kind, MouseDecoder, Source},
+    events::{Kind, MouseDecoder, Source},
+    objects::{Class, DeviceId, Location},
     Decoder,
 };
 
@@ -17,12 +18,14 @@ const LIMIT: u32 = 1_000_000;
 struct State {
     keyboard: Decoder,
     mouse: MouseDecoder,
-    events: EventQueue<64>,
+    keyboard_id: Option<DeviceId>,
+    mouse_id: Option<DeviceId>,
 }
 static STATE: IrqMutex<State> = IrqMutex::new(State {
     keyboard: Decoder::new(),
     mouse: MouseDecoder::new(),
-    events: EventQueue::new(),
+    keyboard_id: None,
+    mouse_id: None,
 });
 
 fn status() -> u8 {
@@ -128,14 +131,40 @@ fn initialize() -> Result<bool, ()> {
 /// Initialize both ports before CPU interrupts are enabled; absent devices are nonfatal.
 pub fn init(console: &mut dyn HalConsole) {
     match initialize() {
-        Ok(true) => {
-            let _ = writeln!(console, "input: PS/2 keyboard IRQ1, mouse IRQ12 ready");
-        }
-        Ok(false) => {
-            let _ = writeln!(
+        Ok(mouse) => {
+            let keyboard = super::input::register(
+                Source::Ps2Keyboard,
+                Class::Keyboard,
+                Location::Ps2Keyboard,
                 console,
-                "input: PS/2 keyboard IRQ1 ready; no auxiliary mouse"
             );
+            if let Ok(keyboard) = keyboard {
+                let auxiliary = if mouse {
+                    super::input::register(
+                        Source::Ps2Mouse,
+                        Class::Pointer,
+                        Location::Ps2Mouse,
+                        console,
+                    )
+                    .ok()
+                } else {
+                    None
+                };
+                let mut state = STATE.lock();
+                state.keyboard_id = Some(keyboard);
+                state.mouse_id = auxiliary;
+                drop(state);
+                if auxiliary.is_some() {
+                    let _ = writeln!(console, "input: PS/2 keyboard IRQ1, mouse IRQ12 ready");
+                } else {
+                    let _ = writeln!(
+                        console,
+                        "input: PS/2 keyboard IRQ1 ready; no auxiliary mouse"
+                    );
+                }
+            } else {
+                let _ = writeln!(console, "input: PS/2 input-object registration refused");
+            }
         }
         Err(()) => {
             let _ = writeln!(console, "input: PS/2 initialization refused or timed out");
@@ -157,43 +186,29 @@ pub fn on_interrupt() {
             state.mouse.reset();
             continue;
         }
-        let event = if flags & 0x20 != 0 {
-            state.mouse.feed(byte).map(|pointer| Event {
-                source: Source::Ps2Mouse,
-                kind: Kind::Pointer(pointer),
-            })
+        let (id, event) = if flags & 0x20 != 0 {
+            (state.mouse_id, state.mouse.feed(byte).map(Kind::Pointer))
         } else {
-            state.keyboard.feed(byte).map(|key| Event {
-                source: Source::Ps2Keyboard,
-                kind: Kind::Key(key),
-            })
+            (state.keyboard_id, state.keyboard.feed(byte).map(Kind::Key))
         };
-        if let Some(event) = event {
-            state.events.push(event);
+        if let (Some(id), Some(event)) = (id, event) {
+            let _ = super::input::publish(id, event);
         }
     }
 }
 
-/// Consume input in idle context; never prints from an ISR or holds the queue lock while printing.
-pub fn report_events(console: &mut dyn HalConsole) {
-    for _ in 0..64 {
-        let event = STATE.lock().events.pop();
-        match event.map(|event| event.kind) {
-            Some(Kind::Key(key)) => {
-                let _ = writeln!(
-                    console,
-                    "input: ps2 keyboard usage={:#04x} pressed={}",
-                    key.usage, key.pressed
-                );
-            }
-            Some(Kind::Pointer(pointer)) => {
-                let _ = writeln!(
-                    console,
-                    "input: ps2 mouse dx={} dy={} buttons={}",
-                    pointer.dx, pointer.dy, pointer.buttons
-                );
-            }
-            None => break,
-        }
+/// Irreversibly retire legacy input producers and mask their interrupt delivery for shutdown.
+pub fn quiesce() {
+    let _interrupts = super::cpu::InterruptGuard::disable();
+    apic::mask_legacy_irq(1);
+    apic::mask_legacy_irq(12);
+    pic::mask_irq(1);
+    pic::mask_irq(12);
+    let mut state = STATE.lock();
+    for id in [state.keyboard_id.take(), state.mouse_id.take()]
+        .into_iter()
+        .flatten()
+    {
+        let _ = super::input::disconnect(id);
     }
 }

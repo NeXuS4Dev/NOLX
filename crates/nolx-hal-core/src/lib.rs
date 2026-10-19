@@ -16,6 +16,7 @@ pub mod gdt;
 pub mod idt;
 pub mod interrupt;
 pub mod ipl;
+pub mod irq_vectors;
 pub mod pic;
 pub mod rtc;
 pub mod time;

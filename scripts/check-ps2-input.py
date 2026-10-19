@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Inject actual QMP keyboard/pointer input and assert the kernel-delivered PS/2 events."""
+import argparse
 import json
 import re
 import socket
@@ -14,11 +15,19 @@ QMP = BUILD / "input-qmp.sock"
 
 
 def main():
+    global LOG, QMP
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--objects',action='store_true',help='require hal-input-object-test and independent reader evidence')
+    parser.add_argument('--kernel',type=Path,default=BUILD/'nolx.elf')
+    args=parser.parse_args()
+    if args.objects:
+        LOG=BUILD/'input-ps2-objects.serial.log'
+        QMP=BUILD/'input-ps2-objects-qmp.sock'
     BUILD.mkdir(exist_ok=True)
     QMP.unlink(missing_ok=True)
     with LOG.open("w") as log:
         process = subprocess.Popen(
-            ["qemu-system-x86_64", "-kernel", str(BUILD / "nolx.elf"),
+            ["qemu-system-x86_64", "-kernel", str(args.kernel.resolve()),
              "-m", "512M", "-nographic", "-no-reboot", "-net", "none",
              "-qmp", f"unix:{QMP},server=on,wait=off"],
             cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
@@ -83,6 +92,14 @@ def main():
             ]})
             wait_for(lambda text: "input: ps2 mouse dx=0 dy=0 buttons=0" in text,
                      "mouse button release", 10)
+            text=LOG.read_text(errors="replace")
+            keyboard=re.findall(r'input: object attached device=(\d+:\d+) source=Ps2Keyboard',text)
+            mouse=re.findall(r'input: object attached device=(\d+:\d+) source=Ps2Mouse',text)
+            assert len(keyboard)==1 and len(mouse)==1 and keyboard[0]!=mouse[0],text
+            assert re.search(r'input: ps2 keyboard usage=0x04 pressed=true device='+keyboard[0]+r' sequence=[1-9]',text),text
+            assert re.search(r'input: ps2 mouse dx=6 dy=4 buttons=1 device='+mouse[0]+r' sequence=[1-9]',text),text
+            if args.objects:
+                wait_for(lambda t:'input: object independent reader verified PS/2 class=Keyboard' in t and 'input: object independent reader verified PS/2 class=Pointer' in t,'independent PS/2 object consumers',10)
             execute("quit")
             if process.wait(timeout=5) != 0:
                 raise RuntimeError("QEMU did not exit cleanly")

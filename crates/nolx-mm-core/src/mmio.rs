@@ -41,6 +41,8 @@ pub const fn mmio_flags() -> EntryFlags {
 /// Why an MMIO request was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MmioError {
+    /// The reservation was released or its slot now belongs to another generation.
+    Stale,
     /// A zero-length range has nothing to map.
     Empty,
     /// The range runs past the physical address space, or past the end of the window.
@@ -311,5 +313,166 @@ mod tests {
         );
         assert_eq!(check_access(0x100, 0, 8), Err(MmioError::BadWidth));
         assert_eq!(check_access(0x100, 0, 3), Err(MmioError::BadWidth));
+    }
+}
+
+/// A generation-checked reservation. Old copies cannot release or authorize a reused slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MappingId {
+    slot: usize,
+    generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Reservation {
+    id: MappingId,
+    window: Window,
+    owner: Option<usize>,
+}
+
+/// Bounded first-fit MMIO reservations, including a guard page after each live window.
+///
+/// Release is bookkeeping only: the kernel must retire users, unmap pages and invalidate
+/// translations before calling it. Unowned boot mappings remain live until explicitly released.
+pub struct ReusableMmioArena<const N: usize> {
+    slots: [Option<Reservation>; N],
+    generation: u64,
+}
+
+impl<const N: usize> Default for ReusableMmioArena<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> ReusableMmioArena<N> {
+    /// An empty bounded arena.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            slots: [None; N],
+            generation: 0,
+        }
+    }
+
+    /// Reserve disjoint space with a new identity; refusal does not change existing reservations.
+    pub fn reserve(
+        &mut self,
+        physical: u64,
+        length: u64,
+        direct: u64,
+        owner: Option<usize>,
+    ) -> Result<(MappingId, Window), MmioError> {
+        let mut window = MmioArena::new().reserve(physical, length, direct)?;
+        let slot = self
+            .slots
+            .iter()
+            .position(Option::is_none)
+            .ok_or(MmioError::Exhausted)?;
+        let generation = self.generation.checked_add(1).ok_or(MmioError::Exhausted)?;
+        let mut at = MMIO_BASE;
+        loop {
+            let end = at.checked_add(window.bytes()).ok_or(MmioError::Exhausted)?;
+            if end > MMIO_BASE + MMIO_BYTES {
+                return Err(MmioError::Exhausted);
+            }
+            let collision = self.slots.iter().flatten().find(|r| {
+                at < r.window.virt + r.window.bytes() + PAGE && r.window.virt < end + PAGE
+            });
+            if let Some(r) = collision {
+                at = r.window.virt + r.window.bytes() + PAGE;
+            } else {
+                break;
+            }
+        }
+        window.virt = at;
+        let id = MappingId { slot, generation };
+        self.slots[slot] = Some(Reservation { id, window, owner });
+        self.generation = generation;
+        Ok((id, window))
+    }
+
+    /// Resolve a live identity; stale/double-release identities are rejected.
+    pub fn get(&self, id: MappingId) -> Result<Window, MmioError> {
+        self.slots
+            .get(id.slot)
+            .and_then(Option::as_ref)
+            .filter(|r| r.id == id)
+            .map(|r| r.window)
+            .ok_or(MmioError::Stale)
+    }
+
+    /// Return a retired reservation's virtual range to first-fit allocation.
+    pub fn release(&mut self, id: MappingId) -> Result<Window, MmioError> {
+        let window = self.get(id)?;
+        self.slots[id.slot] = None;
+        Ok(window)
+    }
+
+    /// Snapshot the first reservation owned by a driver, without changing it.
+    #[must_use]
+    pub fn first_owned(&self, owner: usize) -> Option<MappingId> {
+        self.slots
+            .iter()
+            .flatten()
+            .find(|r| r.owner == Some(owner))
+            .map(|r| r.id)
+    }
+
+    /// Number of live reservations (not the high-water mark).
+    #[must_use]
+    pub fn live(&self) -> usize {
+        self.slots.iter().flatten().count()
+    }
+}
+
+#[cfg(test)]
+mod reuse_tests {
+    use super::*;
+    const DIRECT: u64 = 2 << 30;
+    #[test]
+    fn release_reuses_holes_without_aliasing_or_accepting_stale_handles() {
+        let mut arena = ReusableMmioArena::<4>::new();
+        let (a, aw) = arena.reserve(0xc0000000, 4097, DIRECT, Some(1)).unwrap();
+        let (b, bw) = arena.reserve(0xd0000000, 4096, DIRECT, Some(2)).unwrap();
+        assert_eq!(bw.virt, aw.virt + aw.bytes() + PAGE);
+        arena.release(a).unwrap();
+        let (c, cw) = arena.reserve(0xe0000030, 16, DIRECT, Some(1)).unwrap();
+        assert_eq!(cw.virt, aw.virt);
+        assert_ne!(a, c);
+        assert_eq!(arena.get(a), Err(MmioError::Stale));
+        assert_eq!(arena.release(a), Err(MmioError::Stale));
+        assert_eq!(arena.get(b), Ok(bw));
+        assert_eq!(arena.first_owned(1), Some(c));
+        assert_eq!(arena.first_owned(2), Some(b));
+        assert_eq!(arena.live(), 2);
+    }
+    #[test]
+    fn capacity_and_invalid_requests_leave_live_windows_unchanged() {
+        let mut arena = ReusableMmioArena::<1>::new();
+        let (a, aw) = arena.reserve(0xc0000000, 4096, DIRECT, None).unwrap();
+        assert_eq!(
+            arena.reserve(0xd0000000, 4096, DIRECT, Some(0)),
+            Err(MmioError::Exhausted)
+        );
+        assert_eq!(
+            arena.reserve(0, 4096, DIRECT, None),
+            Err(MmioError::Overlaps)
+        );
+        assert_eq!(arena.get(a), Ok(aw));
+        assert_eq!(arena.first_owned(0), None);
+        arena.release(a).unwrap();
+        assert!(arena.reserve(0xd0000000, MMIO_BYTES, DIRECT, None).is_ok());
+    }
+    #[test]
+    fn differently_sized_holes_and_unsorted_slots_preserve_guards() {
+        let mut arena = ReusableMmioArena::<8>::new();
+        let (a, _) = arena.reserve(0xc0000000, PAGE, DIRECT, None).unwrap();
+        let (_, b) = arena.reserve(0xd0000000, PAGE * 3, DIRECT, None).unwrap();
+        arena.release(a).unwrap();
+        let (_, c) = arena.reserve(0xe0000000, PAGE * 2, DIRECT, None).unwrap();
+        assert_eq!(c.virt, b.virt + b.bytes() + PAGE);
+        let (_, d) = arena.reserve(0xf0000000, PAGE, DIRECT, None).unwrap();
+        assert_eq!(d.virt, MMIO_BASE);
     }
 }

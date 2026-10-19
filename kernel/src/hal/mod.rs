@@ -20,24 +20,29 @@ pub mod dma;
 pub mod driver_start;
 pub mod e1000;
 pub mod hpet;
+pub mod input;
 pub mod interrupts;
 pub mod ioapic;
+pub mod irq_vectors;
 pub mod msix;
 pub mod multiboot;
 pub mod nvme;
 pub mod pci;
+pub mod pci_intx;
 pub mod pic;
+pub mod power;
 pub mod ps2;
 pub mod rtc;
+pub mod storage_volume;
 pub mod syscall;
 pub mod tables;
 pub mod timer;
 pub mod virtio_blk;
-pub mod virtio_volume;
+pub mod virtio_net;
 pub mod xhci;
 
 use nolx_hal_core::console::HalConsole;
-use nolx_power_core as power;
+use nolx_power_core as power_rules;
 
 /// `EFER`, the extended feature enable register.
 const MSR_EFER: u32 = 0xC000_0080;
@@ -143,7 +148,7 @@ pub fn init(console: &mut dyn HalConsole) {
         }
         match platform.s5_sleep_type {
             Some(sleep_type) => {
-                let word = power::pm1_sleep_value(sleep_type, true).unwrap_or(0);
+                let word = power_rules::pm1_sleep_value(sleep_type, true).unwrap_or(0);
                 let _ = writeln!(
                     console,
                     "acpi: S5 sleep type {sleep_type}, soft-off word would be {word:#x}, not entered"
@@ -525,3 +530,5 @@ pub unsafe fn cpuid(leaf: u32) -> (u32, u32, u32, u32) {
     };
     (eax, ebx, ecx, edx)
 }
+
+mod pci_exclusion;

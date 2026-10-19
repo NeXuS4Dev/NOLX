@@ -7,7 +7,7 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use nolx_mm_core::mmio::MmioError;
-use nolx_pci_core::{msi, Bar, BarSet, Bdf, ConfigSpace};
+use nolx_pci_core::{msi, BarSet, Bdf, ConfigSpace};
 
 use super::apic;
 use super::cpu::interrupts_enabled;
@@ -17,7 +17,7 @@ use crate::mm::PAGE_SHIFT;
 
 /// The page size the table's window is rounded to.
 const PAGE: u64 = 1 << PAGE_SHIFT;
-/// The most polls a wait for a delivery makes before it gives up.
+/// Clockless fallback ceiling; with HPET also allow asynchronous delivery up to two seconds.
 const WAIT_LIMIT: u32 = 1_000_000;
 
 /// Why MSI-X could not be set up for a function.
@@ -51,11 +51,11 @@ impl From<MmioError> for Error {
 
 /// The physical base of a memory BAR, or `None` when the slot is not one.
 fn bar_base(bars: &BarSet, slot: u8) -> Result<u64, Error> {
-    match bars.slots.get(usize::from(slot)) {
-        Some(Bar::Memory32 { base, .. }) => Ok(u64::from(*base)),
-        Some(Bar::Memory64 { base, .. }) => Ok(*base),
-        _ => Err(Error::Layout),
-    }
+    bars.slots
+        .get(usize::from(slot))
+        .copied()
+        .and_then(nolx_pci_core::assigned_memory_base)
+        .ok_or(Error::Layout)
 }
 
 /// Enable MSI-X on `bdf`, and program table entry `entry` to deliver `vector` to this processor's
@@ -65,7 +65,7 @@ fn bar_base(bars: &BarSet, slot: u8) -> Result<u64, Error> {
 /// # Errors
 /// [`Error`] for a missing capability, a table outside a memory BAR or past its end, a refused
 /// mapping or register access, or an encoding the message cannot carry.
-pub fn enable(bdf: Bdf, bars: &BarSet, entry: u16, vector: u8) -> Result<(), Error> {
+pub fn enable(owner: usize, bdf: Bdf, bars: &BarSet, entry: u16, vector: u8) -> Result<(), Error> {
     let list = nolx_pci_core::capabilities(&mut ConfigAccess, bdf);
     let cap = list.find(msi::CAP_MSI_X).ok_or(Error::NoCapability)?;
     let header = ConfigAccess.read_u32(bdf, cap.offset);
@@ -82,7 +82,7 @@ pub fn enable(bdf: Bdf, bars: &BarSet, entry: u16, vector: u8) -> Result<(), Err
     let table_end = table_at + u64::from(msix.table_size) * msi::MSIX_ENTRY_BYTES;
     let page = table_at & !(PAGE - 1);
     let length = (table_end - page).div_ceil(PAGE) * PAGE;
-    let region: Region = mmio::map(page, length)?;
+    let region: Region = mmio::map_owned(owner, page, length)?;
 
     let apic_id = u8::try_from(apic::current_apic_id()).map_err(|_| Error::Encoding)?;
     let address = u64::from(msi::message_address(apic_id));
@@ -121,10 +121,26 @@ pub fn wait_for_interrupts(counter: &AtomicUsize, expected: usize) -> usize {
     // SAFETY: `sti` sets IF and changes nothing else. The IDT, the local APIC, and the driver's
     // vector are installed before the drivers run.
     unsafe { asm!("sti", options(nomem, nostack)) };
-    let mut spins = 0u32;
-    while counter.load(Ordering::Acquire) < expected && spins < WAIT_LIMIT {
+    let clock = super::hpet::counter().zip(super::hpet::frequency_hz());
+    for spins in 0..WAIT_LIMIT * 100 {
+        if counter.load(Ordering::Acquire) >= expected {
+            break;
+        }
+        // Interrupt delivery is asynchronous with the device's completion-memory write.
+        // A CPU-speed-only spin budget can expire under host scheduling pressure even
+        // though the command completed successfully. Retain a hard bound in every case.
+        if spins % 1024 == 0 {
+            match (clock, super::hpet::counter()) {
+                (Some((start, frequency)), Some(now)) => {
+                    if super::hpet::elapsed_ticks(start, now) >= frequency.saturating_mul(2) {
+                        break;
+                    }
+                }
+                _ if spins >= WAIT_LIMIT => break,
+                _ => {}
+            }
+        }
         core::hint::spin_loop();
-        spins += 1;
     }
     if !was_enabled {
         // SAFETY: `cli` clears IF, which it was clear before this call.

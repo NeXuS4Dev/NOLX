@@ -146,7 +146,9 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
             panic!("mmio: window init failed: {error:?}");
         }
         mm::mmio::selfcheck(&mut console);
+        hal::acpi::evaluate_devices(&mut console);
         hal::pci::select_transport(&mut console);
+        hal::pci::prepare_resources(&mut console);
         // The virtio block device: bring it up and read sector 0, polled. Failure is reported
         // and boot goes on.
         hal::virtio_blk::probe(&mut console);
@@ -155,6 +157,7 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         hal::nvme::probe(&mut console);
         hal::xhci::probe(&mut console);
         hal::e1000::probe(&mut console);
+        hal::virtio_net::probe(&mut console);
         hal::blockdev::report(&mut console);
 
         obj::init(&mut console);
@@ -181,6 +184,8 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         hal::pci::init(&mut console);
         hal::ps2::init(&mut console);
 
+        hal::blockdev::retained_selftest(&mut console);
+        hal::driver_start::report(&mut console);
         hal::init_wall_clock(&mut console);
         let _ = writeln!(
             console,
@@ -206,11 +211,47 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
 
         let mut timer_marker_reported = false;
         let mut memory_selftest_done = false;
+        #[cfg(feature = "hal-driver-lifecycle-test")]
+        let mut lifecycle_test_done = false;
         let mut round_robin_reported = false;
         let mut user_test_started = false;
         let mut user_test_reported = false;
+        #[cfg(any(feature = "hal-power-test-s5", feature = "hal-power-quiesce-test"))]
+        let mut power_test_started = false;
         loop {
-            hal::ps2::report_events(&mut console);
+            hal::xhci::poll_events(&mut console);
+            hal::input::report_events(&mut console);
+            #[cfg(feature = "hal-xhci-transfer-fault-test")]
+            if memory_selftest_done {
+                hal::xhci::transfer_selftest(&mut console);
+            }
+            #[cfg(feature = "hal-xhci-recovery-test")]
+            if memory_selftest_done {
+                hal::xhci::recovery_selftest(&mut console);
+            }
+            #[cfg(feature = "hal-xhci-lifecycle-test")]
+            if memory_selftest_done {
+                hal::xhci::lifecycle_selftest(&mut console);
+            }
+            #[cfg(feature = "hal-e1000-recovery-test")]
+            if memory_selftest_done {
+                hal::e1000::recovery_selftest(&mut console);
+            }
+            #[cfg(feature = "hal-virtio-blk-recovery-test")]
+            if memory_selftest_done {
+                hal::virtio_blk::recovery_selftest(&mut console);
+            }
+            #[cfg(feature = "hal-virtio-net-recovery-test")]
+            if memory_selftest_done {
+                hal::virtio_net::recovery_selftest(&mut console);
+            }
+            #[cfg(feature = "hal-ahci-nvme-recovery-test")]
+            if memory_selftest_done {
+                hal::ahci::recovery_selftest(&mut console);
+                hal::nvme::recovery_selftest(&mut console);
+            }
+            #[cfg(feature = "hal-input-object-test")]
+            hal::input::hardware_selftest(&mut console);
             if !round_robin_reported && exec::round_robin_complete() {
                 round_robin_reported = true;
                 if !exec::report_round_robin(&mut console) {
@@ -269,6 +310,37 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
                 if let Err(message) = mm::space::selftest::run(&mut console) {
                     let _ = writeln!(console, "NOLX: address space selftest: FAILED: {message}");
                     panic!("address space selftest: {message}");
+                }
+            }
+
+            #[cfg(feature = "hal-driver-lifecycle-test")]
+            if memory_selftest_done && !lifecycle_test_done {
+                lifecycle_test_done = true;
+                hal::driver_start::lifecycle_selftest(&mut console);
+            }
+
+            #[cfg(feature = "hal-power-quiesce-test")]
+            if memory_selftest_done
+                && !power_test_started
+                && hal::power::quiesce_test_ready(&mut console)
+            {
+                power_test_started = true;
+                hal::power::quiesce_selftest(&mut console);
+            }
+
+            #[cfg(feature = "hal-power-test-s5")]
+            if memory_selftest_done && !power_test_started {
+                power_test_started = true;
+                // The dedicated power test refuses any active PCI bus master before calling
+                // the primitive. Production suspend/shutdown must supply a driver quiesce policy.
+                if hal::power::test_vm_has_active_busmaster() {
+                    let _ = writeln!(console, "power: S5 refused: active PCI bus master");
+                } else {
+                    // SAFETY: this feature is run only by the single-CPU QEMU test with no
+                    // DMA devices; all PCI bus masters were checked inactive above.
+                    if let Err(error) = unsafe { hal::power::request_s5_quiesced(&mut console) } {
+                        panic!("power: S5 request failed: {error:?}");
+                    }
                 }
             }
 

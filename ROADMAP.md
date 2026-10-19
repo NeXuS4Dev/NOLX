@@ -752,7 +752,9 @@ unfinished work rather than treating green existing tests as proof of completion
   route, acknowledges ICR and recycles descriptors into a bounded FIFO without allocating
   or printing in the ISR. A real ARP request/reply with QEMU's user-network gateway checks
   frame contents and interrupt delivery. The 82540EM does not advertise MSI; none is claimed.
-  Full AML-derived PCI link routing and a configurable network stack are not implemented.
+  Bounded PC/Q35 evaluated `_PRT`/current-link INTx is verified, including poisoned-line
+  direct/shared/nested fixtures. General link allocation/reprogramming and a configurable
+  network stack are not implemented.
 - PS/2 keyboard and standard three-byte mouse ports are initialized and IRQ1/IRQ12 are
   serviced on APIC and PIC paths. A bounded source-tagged event FIFO carries HID key usages,
   signed relative pointer motion and buttons to an idle-context consumer. CI injects real
@@ -927,3 +929,328 @@ NOLX: init sequence complete, halting the boot processor
 ```
 
 Every one of those lines is now a hard gate in the boot smoke test.
+
+### M9 storage completion work — all-backend filesystem durability (2026-10-16)
+
+The filesystem transport is no longer virtio-only. `nolxfs::sector::PartitionDevice` adapts
+queued virtio, AHCI and NVMe sector transports to 4 KiB blocks. Checkpoint barriers issue
+real device-cache flush commands. AHCI validates capacity from IDENTIFY DEVICE before
+trusting GPT addresses; native filesystems share the GPT checks and volume path.
+Only completely blank partitions can be formatted, and an existing checksum file is
+verified before being written again.
+
+All three backends passed local QEMU file/host-mount/reboot tests, Q35 variants, and
+malformed-media refusal; AHCI also passed without an APIC. The storage CI matrix now
+runs those file persistence and refusal gates for every backend, not just virtio.
+This completes the storage-file integration gate, **not M9**: the remaining work is
+tracked without reduced scope in `docs/development/m9-completion.md`.
+
+### M9 native virtio-net work (2026-10-16)
+
+Modern/transitional virtio-net PCI functions now negotiate modern split RX/TX queues with
+per-queue MSI-X, bounded frame delivery and retained DMA. A two-exchange gateway ARP test
+verifies descriptor recycling, both completion vectors, and exact Ethernet bytes captured
+outside the guest. The dedicated test covers pc/Q35, absent hardware and no-APIC refusal.
+This closes the basic virtio-net transport gate, not persistent multi-device framework
+lifecycle, configurable network configuration, USB/AML/power, or M9 as a whole.
+
+### M9 S5 hardware entry work (2026-10-16)
+
+A real ACPI S5 primitive now preserves PM1 control bits, enables ACPI mode when needed,
+and writes SLP_TYP/SLP_EN. Its unsafe contract requires prior system quiescence; the explicit
+hardware-test feature uses a no-active-DMA VM after the complete boot/memory tests.
+QMP observed actual guest shutdown and QEMU exit zero locally on pc/Q35; an active virtio-net
+bus master caused refusal. A dedicated CI job covers those positive and negative cases.
+S3 save/resume, AML methods and production system-wide device power/quiescence are still open.
+
+
+### M9 persistent healthy-driver lifecycle checkpoint (2026-10-16)
+
+Native virtio-blk/AHCI/NVMe/e1000/virtio-net now share a persistent registry, retain their
+transport ownership after probe return, and support tested healthy stop/restart/removal.
+The dedicated `hal-driver-lifecycle-test` build and `scripts/check-driver-lifecycle.py` run
+three cycles per driver independently and together, prove exact DMA page reclamation and
+reacquisition, and verify retained disk I/O or fresh network exchanges after restart.
+Callbacks never hold the registry IRQ lock while waiting. Public transport I/O is excluded
+from lifecycle operations and requires Started state. **M9 remains in progress**: failure-path
+ownership, reusable MMIO/IRQ resources and multiple instances/segments remain open alongside
+USB HID, AML resource discovery, BAR/bridge allocation and production S3/power policy.
+See the [completion gate](docs/development/m9-completion.md) for precise evidence and limits.
+
+
+### M9 owned MMIO lifecycle checkpoint (2026-10-17)
+
+Healthy native stop now retires driver-owned register/MSI-X windows; restart reuses their
+virtual ranges through a bounded generation-checked allocator. Mapping mutations are serialized,
+partial-map failures roll back, lower page tables are reclaimed and the shared MMIO root stays
+stable across address spaces. Expanded lifecycle tests cover stale-access refusal, OOM rollback,
+VA reuse and exact restart mapping counts. This supersedes the previous healthy-path monotonic
+MMIO limitation, **not** failure-path cleanup, multi-instance binding, IRQ resource release or
+SMP TLB shootdown. M9 remains in progress; see the completion gate for verified limits.
+
+
+### M9 multi-controller storage checkpoint (2026-10-17)
+
+Segment-zero virtio-blk/AHCI/NVMe now bind every matching PCI controller with a per-handle
+BDF/transport context, stable block ID, separate completion counter and MSI/MSI-X vector.
+Independent stop/restart preserves peer I/O and media identity, and repeated enumeration refuses
+duplicate BDFs without resetting live controllers. Ten native fixtures exercise two controllers
+of each backend and six together over legacy PCI and ECAM, plus PCI-bridge traversal and a six-storage/two-NIC Q35 fixture. The host
+checks all media writes, and every fixture ends with zero pinned DMA after removal. This does
+not implement multi-adapter networking, nonzero-segment native binding, all SATA ports/NVMe
+namespaces, dynamic BAR/vector allocation, hotplug retry or failure-path recovery. See the
+[M9 completion gate](docs/development/m9-completion.md); M9 remains in progress.
+
+
+### M9 multi-adapter network checkpoint (2026-10-17)
+
+Native e1000/virtio-net now retain BDF/MAC, rings, receive FIFOs and completion counters per
+framework handle. Exact-handle public RX/TX refuses stopped/removed/invalid/wrong-type targets,
+and shared e1000 INTx services every controller on the route before EOI. Nine native fixtures
+cover duplicate adapters, mixed four-NIC PC/Q35 setups, explicit shared INTx, bridge traversal
+and six-storage/four-NIC integration. Independent pcaps verify 214 tagged public ARP exchanges;
+all devices complete independent lifecycle reclamation with zero pinned DMA. This closes the
+healthy multi-adapter context gate, not firmware PCI interrupt discovery, native nonzero-segment
+binding, resource allocation, failure recovery or the USB/AML/power acceptance gates.
+
+
+### M9 bounded native PCI resource checkpoint (2026-10-17)
+
+Boot-time planning assigns missing 32/64-bit memory and I/O BARs and closed type-1 bridge
+windows on the validated PC/Q35 segment-zero profile. Fixed resources are reserved, nested
+windows are sized bottom-up, and programming verifies readback with rollback before drivers
+own DMA. Twelve new host tests cover refusal paths. Six cleared-firmware-assignment fixtures
+exercise root/one-bridge/two-nested-bridge layouts on both machines, with six real disk media,
+four captured NIC endpoints, independent lifecycle and zero pinned DMA. This is not general
+`_CRS` resource discovery, new bus numbering, hotplug/rebalancing, 64-bit prefetch windows or
+nonzero-segment native binding. The broader M9 resource gate remains partially open.
+
+
+**Bounded AML checkpoint (2026-10-17):** a safe portable DSDT/SSDT namespace and pure
+method evaluator now runs actual SeaBIOS PC/Q35 keyboard/serial `_STA` and `_CRS` methods.
+Native boot publishes a bounded status-gated catalog, refuses unsupported hardware-field and
+mutation operations, and releases interpreter heap. Forward references, aliases, atomic table
+rollback, strict descriptor bounds, and loop/recursion/allocation budgets have executable tests;
+seven firmware/SSDT/absent/malformed/no-ACPI boots are checked by `scripts/check-aml.py`.
+This supersedes historical statements that the kernel executes no AML, not the remaining PCI
+routing/resource or general AML gates: host-bridge apertures, PCI link `_PRT`, operation regions,
+USB HID, failed-lifecycle recovery and global power/S3 remain open. See the M9 completion gate.
+
+AML checkpoint CI [39022540188](https://github.com/NeXuS4Dev/NOLX/actions/runs/39022540188)
+on `353f5d0` passed all sixteen jobs, including seven firmware AML boots and the complete
+existing hardware-path regression suite. Host tests passed 743 tests in each overlapping
+command; PWR-012/013/014 are `tested-T1` and PWR-015 `tested-T2`. M9 remains in progress.
+
+
+**Root resource consumption checkpoint (2026-10-17):** evaluated host-bridge `_CRS` now
+supplies producer apertures to the missing-BAR/type-1-window allocator, rather than only a
+fixed board memory hole. Multiple disjoint memory/I/O ranges retain ownership and subtract
+loader-map and consumer reservations. Native allocations avoid the cached direct map and
+remain in the existing bounded PC/Q35 segment-zero policy. Only truly absent ACPI permits
+board fallback; incomplete, ambiguous or unreadable advertised roots refuse allocation.
+Eight resource fixtures cover nested bridges and RAM layouts with six media/four NICs and
+288 captured exchanges; thirteen AML fixtures cover both acceptance and refusal. General
+root/topology/64-bit allocation and PCI link routing, USB/HID, recovery and global power/S3
+are still open; see the detailed M9 completion gate for limits and CI evidence.
+
+Root-aperture CI [39026163686](https://github.com/NeXuS4Dev/NOLX/actions/runs/39026163686)
+on `7d58998` passed all sixteen jobs. PWR-016/PCI-025 are `tested-T1`, PCI-026 `tested-T2`;
+757 host tests and eight real resource fixtures passed. Follow-up catalog-capacity/HID-type
+hardening adds the thirteenth AML fixture, rerun locally with all eight resource fixtures;
+its final CI evidence is reported separately. No general M9 completion is claimed.
+
+
+M9 USB checkpoint: direct-root USB2 boot keyboard/mouse enumeration and polled native input
+now have executable PC/Q35 ring-wrap and root-device disconnect/reconnect DMA checks
+(`scripts/check-usb-input.py`). General HID/input objects, hubs/SuperSpeed, multiple host
+controllers and framework/power/failure integration remain open; see the completion gate.
+
+
+M9 input-object checkpoint: PS/2 and USB now publish into generation-checked kernel device
+objects with independent reader FIFOs, atomic subscription snapshots, explicit overflow resync
+and per-device disconnect/neutral EOF. Real hardware observers verify identity/order, subscriber
+isolation and stale-handle refusal. Executive/process-handle/security/waitable/user-device bindings
+remain separate open gates; this is not a new syscall or POSIX input ABI.
+
+
+M9 xHCI lifecycle checkpoint: segment-zero controllers now bind persistently per handle, with
+owned MMIO/DMA, serialized polling and checked stop/restart/removal. Two-controller PC/Q35 fixtures
+require fresh keyboard input after three restarts and mouse input while its peer is stopped;
+post-run startup rollback and failed-stop DMA/MMIO quarantine are separate executable modes.
+Supersedes earlier single-host/framework limitations. General USB, interrupts, quarantine recovery,
+Executive/user input bindings and global power/S3 remain open; M9 is not complete.
+
+
+M9 shutdown checkpoint: the persistent registry now irreversibly freezes device admission,
+flushes all started storage before stopping any driver, then stops in reverse order. BSP PC/Q35
+six-driver fixtures verify held USB input and PS2 reader retirement, DMA 38 -> 0, full segment-zero PCI
+bus-master readback, actual S5 and independently persisted disk data. Flush failure, stop failure
+and foreign active bus masters refuse S5 without reopening admission. General executive/cache/SMP
+shutdown orchestration, quarantine recovery and S3 save/resume remain open; M9 is still incomplete.
+
+
+M9 xHCI recovery checkpoint: Failed controllers can retry their original checked stop callback;
+only successful halt/reset/PCI DMA exclusion releases owned DMA/MMIO and moves to Stopped. Explicit
+restart then re-enumerates fresh input objects. PC/Q35 two-controller fixtures exercise repeated
+failed startup/stop cleanup, pinned ownership, live peer input and fresh keys after both recoveries.
+Recovery cannot reopen shutdown admission. Native recovery is deliberately admitted only for audited
+xHCI contexts; storage/network partial-start recovery and interrupt-resource reclamation remain open.
+
+
+M9 xHCI interrupt checkpoint: direct-root USB2 boot HID now uses per-handle MSI-X/MSI with a
+bounded acknowledge/mask/notify top half and IRQ-only idle event service; no decoding, ring access,
+framework checkout or reclamation in ISR. Startup/control enumeration remains bounded/polled;
+missing APIC/message capability is explicitly labelled polling. PC/Q35 interrupt-observer fixtures
+require 600+ real interrupts per 604-report workload, plus ring wraps, hotplug, object readers,
+independent controller/restart/recovery routes and rollback after an already delivered startup IRQ.
+Checked stop detaches/masks/disables message delivery before DMA/MMIO release; late vectors ignore
+retired state. Supersedes the earlier polled-only limitation. MSI-X is bounded to validated BAR0
+window tables; vectors remain statically reserved. General USB/Executive bindings, dynamic IRQ
+resource ownership, other-driver failure recovery and the remaining firmware/power gates stay open.
+
+
+M9 xHCI transfer-failure checkpoint: exact slot/endpoint/TRB affinity gates report decoding and
+rearm. Failed transfers retire input to neutral EOF and stop producers; checked Disable Slot is
+required before device DMA release. Quarantined root slots and safely retired faulted ports admit
+explicit repair/re-enumeration, not timer-driven retries or duplicate bindings. Missing/aborted/
+stopped/invalid command outcomes poison command reuse until checked whole-controller stop/reset.
+PC/Q35 fixtures generate real STALL completions and Halted endpoint contexts, exercise cleanup
+refusal and successful reclamation, and deliberately withhold an actual Disable Slot completion
+proof to verify pinned DMA and reset-only recovery. Fresh keyboard and peer mouse input gate each
+repair. General endpoint reset/dequeue/clear-halt, hubs, SuperSpeed and remaining M9 gates stay open.
+
+
+M9 USB speed checkpoint: endpoint-zero packet encoding is now speed-specific (USB3 exponent 9
+means 512 bytes, not nine). The native root path accepts default SuperSpeed ID4 and reads real
+USB3 descriptors; repeated unsupported mass-storage class refusals reclaim all five slot pages
+while existing HID input/IRQs remain live. Full-speed and high-speed keyboard/mouse input both
+have PC/Q35 ring-wrap/hotplug checks with actual speed/EP0 evidence. Portable selection requires
+one ordered HID descriptor and, for USB3, an immediate single-burst companion with bounded payload
+and interval. The endpoint context uses that payload rather than guessing it from maximum packet
+size. USB3 HID input and warm reset are NOT hardware-verified: stock QEMU exposes no SS HID model;
+SS HID selection and reset-write rules have host tests only. General USB/hubs/SSP/endpoint recovery,
+Executive input, firmware/PCI and power/S3 gates remain open. M9 is not complete.
+
+
+M9 e1000 recovery checkpoint: retain the mapped register owner independently of a successful boot
+report; allocate all eleven pages before DMA exposure, roll back incomplete unexposed batches, and
+publish RX/TX owners before programming addresses. Failed startup attempts checked rollback; failed
+reset or missing PCI exclusion proof pins all owners and refuses removal/I/O. Stop detaches only this
+adapter's software source, masks its NIC/PCI INTx (not the shared IOAPIC line), resets both engines,
+and reads back disabled engine/IRQ/DMA state before release. Framework recovery is audited for
+xHCI and e1000 only. PC/Q35 two-adapter fixtures exercise partial allocation, RX-only and post-ARP
+startup failures, repeated failed cleanup, failed stop and withheld PCI proof; independent pcaps
+verify eleven fresh public ARP exchanges, selected IRQ progress and live shared-route peer traffic.
+Checked recovery releases stale MMIO and exactly eleven pages, explicit restart restores identity,
+and final stop/removal leaves DMA zero; shutdown freeze still refuses recovery. Faults deliberately
+withhold/refuse proof, not claims of naturally failing QEMU reset/config writes. Storage/virtio-net
+failed-start recovery, dynamic interrupt ownership, runtime TX-timeout policy and other M9 gates
+remain open. M9 is not complete.
+
+
+M9 virtio-net recovery checkpoint: retain common configuration and all loose/complete queue owners
+before fallible queue programming. Startup rollback and explicit recovery require observed virtio
+reset, PCI bus-master/INTx exclusion and disabled/masked MSI-X (MSI also disabled if present).
+Detach the software source first: retired vectors and unused primary aliases cannot advance
+counters or touch queues. Failure pins all four DMA pages and owned register/table mappings;
+failed records refuse transport/removal/restart until checked recovery. Four PC/Q35 fixtures swap
+modern-only/transitional targets and peers, exercise partial allocation/RX-queue exposure/post-ARP
+startup failures, repeated failed cleanup and withheld PCI proof, then prove eleven fresh tagged
+wire exchanges, independent RX/TX IRQ progress, stale mapping refusal and final DMA zero. Faults
+are deliberate proof refusals, not naturally failing emulated hardware. The recovery allowlist is
+xHCI/e1000/virtio-net only; storage failure recovery, dynamic IRQ allocation, runtime TX-timeout
+policy, general USB/Executive/PCI/firmware and S3 gates remain open. M9 is not complete.
+
+
+M9 virtio-blk recovery checkpoint (2026-10-18): retain the common mapping, both loose pages,
+partially programmed queue and complete disk before fallible register/I/O work. A failed request
+poisons transport admission rather than flushing/reusing its outstanding descriptor; failed starts
+reset without additional I/O. Healthy stops flush first. All release paths require detached IRQs,
+reset status zero, PCI bus mastering off/INTx blocked and disabled MSI/MSI-X readback before freeing
+owners and MMIO. Shared virtio PCI/proof helpers preserve the virtio-net checks. Recovery is now
+audited for xHCI/e1000/virtio-net/virtio-blk only, and moves Failed to Stopped without restart or
+thawing shutdown. Four PC/Q35 modern/transitional target/peer profiles each boot twice on unchanged
+media, perform fifteen uniquely tagged public write/flush/read exchanges per boot, independently
+mount persisted files on the host and leave DMA zero. Faults deliberately refuse cleanup/flush or
+withhold proof/completion, not naturally failing QEMU hardware. AHCI/NVMe recovery, dynamic IRQ
+ownership, general PCI/firmware, USB/Executive and device-power/S3 gates remain open. M9 is incomplete.
+
+
+M9 AHCI/NVMe recovery checkpoint (2026-10-18): both native storage transports now retain their
+register mapping, every DMA page and the software command/queue state across every fallible step.
+Bring-up begins by disabling bus mastering and message delivery, so a partially configured
+controller cannot DMA before its owners exist; bus mastering is enabled only once the pages are
+owned. AHCI stops its HBA with the command-list/FIS-engine stop bits and polls their completion
+bits, clears the port's interrupt enable and the HBA's MSI enable, flushes the write cache and
+reads the result back. NVMe writes a zero control register, polls the controller's ready state
+away, issues a namespace flush and disables plus function-masks MSI-X with readback. A missing
+proof keeps every page and mapping pinned; only a fully proven stop releases them, and the
+released MMIO region refuses later access.
+
+A failed command quarantines the transport: no later public read, write or flush reuses the
+outstanding command, descriptor or buffer, and the framework record stays Failed until an
+explicit checked stop. Framework recovery is now audited for
+xHCI/e1000/virtio-net/virtio-blk/AHCI/NVMe; it moves Failed to Stopped without restarting
+hardware, never touches a Started peer and cannot thaw the shutdown freeze.
+
+`hal-ahci-nvme-recovery-test` plus `scripts/check-ahci-nvme-recovery.py` passed four profiles:
+AHCI and NVMe on PC and Q35, each with two real controllers. Every profile boots twice on
+unchanged media and performs fifteen uniquely tagged public write/flush/read exchanges per boot
+with the selected controller's own completion interrupt advancing. The fixtures cover a
+post-filesystem startup quarantine with repeated cleanup refusal, a one-page allocation rollback
+before the port or controller names the buffer, an enabled-port/enabled-controller partial
+startup that keeps all pages, a deliberately withheld PCI exclusion proof although the hardware
+really is excluded, a published-command failure that quarantines without flush or buffer reuse,
+and a refused stop flush that explicit recovery does not retry. The host verifies every written
+and untouched LBA and independently mounts the persisted file after each boot; the second boot
+verifies the old commit before writing again; final DMA is zero.
+
+Faults deliberately refuse cleanup, allocation or flush and withhold otherwise valid proof. This
+is **not** naturally failing QEMU reset/PCI-write hardware or physical-board verification.
+Vector reservations remain static, the transports stay BSP/segment-zero and expose only the
+first SATA port or namespace 1 per controller. Dynamic interrupt ownership, nonzero-segment
+binding, general PCI/firmware routing, USB/Executive bindings and general device-power/S3 gates
+remain open. M9 is not complete.
+
+The full native regression for this checkpoint passed 151 checks with exit zero, including the
+four new AHCI/NVMe profiles; 38 of those checks independently mounted the persisted files on
+the host after QEMU exited. Both overlapping Rust host suites passed 825 tests each, the unsafe
+audit covers 263 blocks with no missing invariant, and the conformance database holds 397
+assertions. CI run
+[39140774366](https://github.com/NeXuS4Dev/NOLX/actions/runs/39140774366) on `f145bcd`
+passed all nineteen jobs, including the new AHCI/NVMe recovery job.
+
+
+M9 dynamic interrupt-vector ownership checkpoint (2026-10-18): the three native storage
+transports now own their completion vectors from a shared table instead of computing one
+from the framework handle. The rules live in `nolx-hal-core::irq_vectors` (preferred vector
+first, then the kind's range from its lowest, the ledger entry, and the pools' disjointness
+and their distance from the firmware and USB ranges); the kernel keeps one atomic entry per
+vector and claims or releases it with a compare-and-swap, without a lock on the interrupt
+path. A driver claims its vector before the controller is told about it and releases it only
+after its own checked stop proved that the controller can no longer raise it; a failed
+controller keeps its vector, and a release that does not match the owner is refused. The
+vector-to-controller mapping is the table's, so an interrupt on a vector nobody owns reaches
+no driver and a released vector is ignored instead of counted for a retired controller.
+
+The AHCI, NVMe and virtio-blk recovery fixtures now prove it on hardware: the failed
+controller keeps its vector, the proven stop frees it, the restart takes the released vector
+again, an unowned vector advances no counter, and the vector another controller released is
+taken by the first one that asks again. All eight PC/Q35 profiles keep their two
+unchanged-media boots, their fifteen tagged durable exchanges and their host-mounted files.
+
+The pool is bounded and the refusal is real: with every vector of a kind taken, a driver
+that starts finds no vector, fails with the missing vector before the controller is told
+about any vector, leaves nothing behind, and starts again once the vectors are free.
+
+Local verification passed 128 native fixture profiles and 44 further host-side mounts, both
+host suites passed 832 tests each, the unsafe audit found 263 blocks without a missing
+SAFETY comment, the conformance database holds 400 assertions, and CI run
+[39163258921](https://github.com/NeXuS4Dev/NOLX/actions/runs/39163258921) on `68bab9d`
+passed all nineteen jobs.
+
+Only the storage transports take part: the xHCI's per-handle vectors, the virtio-net's
+receive/transmit pair and the e1000's firmware-routed INTx line are still static, the pools
+are fixed per driver kind, and the reclaim rule trusts each transport's own hardware proof.
+This is a bounded step towards general interrupt-resource reclamation, not a general dynamic
+allocator. M9 is not complete.

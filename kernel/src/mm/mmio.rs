@@ -7,20 +7,20 @@
 //!
 //! The window's top-level table is created by [`init`], before any address space exists. Each
 //! address space shares the kernel's PML4 entries by reference, so a table created later would
-//! be invisible to the spaces made before it. Mappings are not removed yet, so the window only
-//! grows, and [`Region`] checks every register access.
+//! be invisible to the spaces made before it. Unmapping preserves that shared top-level child.
+//! Reservations are serialized, generation-checked and reusable after their users retire.
 
 use crate::mm::phys;
 use crate::mm::space::kernel_root;
 use crate::mm::tables::KernelTableStore;
 use crate::mm::PAGE_SHIFT;
-use crate::sync::SyncCell;
+use crate::sync::IrqMutex;
 use nolx_hal_core::console::HalConsole;
-use nolx_mm_core::mmio::{self, MmioArena, MmioError};
+use nolx_mm_core::mmio::{self, MappingId, MmioError, ReusableMmioArena, Window};
 use nolx_mm_core::paging::{Entry, EntryFlags, MapError, PageTables, TableStore};
 
-/// Where the next window starts. Advanced only by [`map`], on the boot processor.
-static ARENA: SyncCell<MmioArena> = SyncCell::new(MmioArena::new());
+/// Protects reservations and their page-table edits, including post-boot driver restarts.
+static ARENA: IrqMutex<ReusableMmioArena<256>> = IrqMutex::new(ReusableMmioArena::new());
 
 /// Why a mapping could not be made.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,6 +35,7 @@ pub enum Failure {
 /// volatile, because the device changes these registers behind the processor's back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Region {
+    id: MappingId,
     base: u64,
     len: u64,
 }
@@ -54,6 +55,7 @@ impl Region {
 
     /// The address of a `width`-byte access at `offset`, after checking it.
     fn address(&self, offset: u64, width: u64) -> Result<u64, MmioError> {
+        ARENA.lock().get(self.id)?;
         mmio::check_access(self.len, offset, width)?;
         Ok(self.base + offset)
     }
@@ -125,31 +127,98 @@ pub fn init() -> Result<(), Failure> {
     Ok(())
 }
 
-/// Map `length` bytes of device memory at physical address `physical`, uncached and writable.
-///
-/// The window is planned first and then mapped. If the tables run out after planning, the
-/// address range is spent: the window is never reused, so the failure costs address space and
-/// nothing else.
+/// Map unowned platform registers; their lifetime extends through boot and driver restart.
 pub fn map(physical: u64, length: u64) -> Result<Region, Failure> {
-    // SAFETY: device setup runs on the boot processor before the periodic timer starts, and
-    // nothing else advances the arena.
-    let planned = unsafe { (*ARENA.get()).reserve(physical, length, phys::DIRECT_MAP_BYTES) };
-    let window = planned.map_err(Failure::Window)?;
+    map_region(None, physical, length)
+}
+
+/// Map registers owned by one framework handle. Failed starts conservatively retain them.
+pub(crate) fn map_owned(owner: usize, physical: u64, length: u64) -> Result<Region, Failure> {
+    map_region(Some(owner), physical, length)
+}
+
+fn map_region(owner: Option<usize>, physical: u64, length: u64) -> Result<Region, Failure> {
+    map_with_store(owner, physical, length, &mut KernelTableStore::new())
+}
+
+fn map_with_store(
+    owner: Option<usize>,
+    physical: u64,
+    length: u64,
+    store: &mut impl TableStore,
+) -> Result<Region, Failure> {
+    let mut arena = ARENA.lock();
+    let (id, window) = arena
+        .reserve(physical, length, phys::DIRECT_MAP_BYTES, owner)
+        .map_err(Failure::Window)?;
     let mut walker = PageTables::new(kernel_root());
-    let mut store = KernelTableStore::new();
-    let flags = mmio::mmio_flags();
-    let mapped = walker.map_range(
-        &mut store,
+    if let Err(error) = walker.map_range(
+        store,
         window.virt,
         window.physical,
         window.bytes(),
-        flags,
-    );
-    mapped.map_err(Failure::Tables)?;
+        mmio::mmio_flags(),
+    ) {
+        // This reservation was fresh, so every mapped leaf in it belongs to this operation.
+        // Roll back partial leaves and empty lower tables before recycling any virtual address.
+        clear_window(&mut walker, store, window);
+        arena.release(id).expect("MMIO rollback lost reservation");
+        return Err(Failure::Tables(error));
+    }
     Ok(Region {
+        id,
         base: window.requested_base(),
         len: length,
     })
+}
+
+fn clear_window(walker: &mut PageTables, store: &mut impl TableStore, window: Window) {
+    let mut at = window.virt;
+    while at < window.virt + window.bytes() {
+        let size = walker.translate(store, at).map_or(4096, |m| m.size);
+        match walker.unmap_shared(store, at) {
+            Ok(_) | Err(MapError::NotMapped) => {}
+            Err(error) => panic!("MMIO teardown failed: {error:?}"),
+        }
+        // SAFETY: a canonical page in our exclusively locked MMIO reservation was removed.
+        // NOLX currently runs only the BSP; no remote TLB can retain this translation.
+        unsafe {
+            core::arch::asm!("invlpg [{}]", in(reg) at, options(nostack, preserves_flags));
+        }
+        at += size;
+    }
+}
+
+/// Retire all windows for one successfully stopped driver, preserving shared PML4 children.
+///
+/// # Safety
+/// All CPU/IRQ users and raw addresses of these windows must have been retired, and no
+/// concurrent access may be in progress. Only the BSP is supported (no remote TLB shootdown).
+/// Old Region copies subsequently reject register accesses using their generation identity.
+pub(crate) unsafe fn release_owned(owner: usize) {
+    let mut arena = ARENA.lock();
+    let mut walker = PageTables::new(kernel_root());
+    let mut store = KernelTableStore::new();
+    while let Some(id) = arena.first_owned(owner) {
+        let window = arena.get(id).expect("MMIO owner lost reservation");
+        clear_window(&mut walker, &mut store, window);
+        arena.release(id).expect("MMIO release lost reservation");
+    }
+}
+
+/// Live mappings, rather than cumulative restart allocations.
+#[cfg(any(
+    feature = "hal-driver-lifecycle-test",
+    feature = "hal-e1000-recovery-test",
+    feature = "hal-virtio-net-recovery-test",
+    feature = "hal-virtio-blk-recovery-test",
+    feature = "hal-ahci-nvme-recovery-test",
+    feature = "hal-xhci-lifecycle-test",
+    feature = "hal-xhci-recovery-test",
+    feature = "hal-xhci-transfer-fault-test"
+))]
+pub(crate) fn live_mappings() -> usize {
+    ARENA.lock().live()
 }
 
 /// The local APIC's register page. The boot layer maps it through the direct map as well.
@@ -187,4 +256,91 @@ pub fn selfcheck(console: &mut dyn HalConsole) {
          version {through_window:#x} read through the window matches the direct map",
         region.base()
     );
+}
+
+/// Exercise real stale-handle rejection, reuse and partial table-allocation rollback after boot.
+#[cfg(feature = "hal-driver-lifecycle-test")]
+pub(crate) fn lifecycle_selftest(console: &mut dyn HalConsole) {
+    struct Budget {
+        inner: KernelTableStore,
+        remaining: usize,
+    }
+    impl TableStore for Budget {
+        fn entry(&self, frame: u64, index: usize) -> u64 {
+            self.inner.entry(frame, index)
+        }
+        fn set_entry(&mut self, frame: u64, index: usize, value: u64) {
+            self.inner.set_entry(frame, index, value);
+        }
+        fn allocate_table(&mut self) -> Option<u64> {
+            if self.remaining == 0 {
+                return None;
+            }
+            self.remaining -= 1;
+            self.inner.allocate_table()
+        }
+        fn release_table(&mut self, frame: u64) {
+            self.inner.release_table(frame);
+        }
+        fn is_empty_table(&self, frame: u64) -> bool {
+            self.inner.is_empty_table(frame)
+        }
+    }
+    let before = live_mappings();
+    let root = KernelTableStore::new().entry(kernel_root(), mmio::MMIO_SLOT);
+    {
+        let budget = 0;
+        let frames = crate::mm::free_frames();
+        let mut store = Budget {
+            inner: KernelTableStore::new(),
+            remaining: budget,
+        };
+        assert_eq!(
+            map_with_store(
+                Some(usize::MAX),
+                LAPIC_PHYSICAL,
+                (4 << 20) + 4096,
+                &mut store
+            ),
+            Err(Failure::Tables(MapError::OutOfMemory))
+        );
+        assert_eq!(live_mappings(), before, "failed map leaked reservation");
+        assert_eq!(
+            crate::mm::free_frames(),
+            frames,
+            "failed map leaked page tables"
+        );
+        assert_eq!(
+            KernelTableStore::new().entry(kernel_root(), mmio::MMIO_SLOT),
+            root
+        );
+    }
+    let first = map_owned(usize::MAX, LAPIC_PHYSICAL, 4096).unwrap();
+    let version = first.read32(APIC_VERSION).unwrap(); // Populate a real translation.
+                                                       // SAFETY: only this selftest owns the temporary alias; no IRQ/raw-pointer user references it.
+    unsafe {
+        release_owned(usize::MAX);
+    }
+    assert!(PageTables::new(kernel_root())
+        .translate(&KernelTableStore::new(), first.base())
+        .is_none());
+    assert_eq!(first.read32(APIC_VERSION), Err(MmioError::Stale));
+    let second = map_owned(usize::MAX, LAPIC_PHYSICAL, 4096).unwrap();
+    assert_eq!(
+        second.base(),
+        first.base(),
+        "released window was not reused"
+    );
+    assert_eq!(second.read32(APIC_VERSION), Ok(version));
+    assert_eq!(first.write32(APIC_VERSION, 0), Err(MmioError::Stale));
+    // SAFETY: the replacement alias also has no users outside this selftest.
+    unsafe {
+        release_owned(usize::MAX);
+    }
+    assert_eq!(live_mappings(), before);
+    assert_eq!(
+        KernelTableStore::new().entry(kernel_root(), mmio::MMIO_SLOT),
+        root
+    );
+    let _ = writeln!(console, "mm: MMIO lifecycle: stale access refused, VA reused, partial-map OOM rolled back, shared root retained");
 }

@@ -307,3 +307,82 @@ mod tests {
         assert_eq!(queues.pending(0), Ok(2));
     }
 }
+
+/// Stable transport-owner to block-ID bindings. IDs are never recycled under stale callers.
+/// Preferred legacy IDs and an extra-ID range allow gradual native multi-instance adoption.
+pub struct DeviceBindings<const N: usize> {
+    owners: [Option<usize>; N],
+}
+impl<const N: usize> Default for DeviceBindings<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl<const N: usize> DeviceBindings<N> {
+    /// No transport bindings.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { owners: [None; N] }
+    }
+    /// Bind once, or return the owner's existing stable ID. Reserved IDs below `extra` are
+    /// untouched except for `preferred`. Capacity/invalid-range refusal changes no binding.
+    pub fn bind(
+        &mut self,
+        owner: usize,
+        preferred: usize,
+        extra: usize,
+    ) -> Result<usize, QueueError> {
+        if preferred >= N || extra > N {
+            return Err(QueueError::UnknownDevice);
+        }
+        if let Some(id) = self.find(owner) {
+            return Ok(id);
+        }
+        let id = if self.owners[preferred].is_none() {
+            preferred
+        } else {
+            (extra..N)
+                .find(|&id| self.owners[id].is_none())
+                .ok_or(QueueError::Full)?
+        };
+        self.owners[id] = Some(owner);
+        Ok(id)
+    }
+    /// Resolve a block ID to its transport owner.
+    #[must_use]
+    pub fn owner(&self, id: usize) -> Option<usize> {
+        self.owners.get(id).copied().flatten()
+    }
+    /// Resolve a transport owner to its stable block ID.
+    #[must_use]
+    pub fn find(&self, owner: usize) -> Option<usize> {
+        self.owners.iter().position(|slot| *slot == Some(owner))
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+    #[test]
+    fn stable_ids_do_not_steal_reserved_backend_slots() {
+        let mut bindings = DeviceBindings::<5>::new();
+        assert_eq!(bindings.bind(8, 0, 3), Ok(0));
+        assert_eq!(bindings.bind(9, 0, 3), Ok(3));
+        assert_eq!(bindings.bind(10, 0, 3), Ok(4));
+        assert_eq!(bindings.bind(9, 0, 3), Ok(3));
+        assert_eq!(bindings.owner(1), None);
+        assert_eq!(bindings.owner(2), None);
+        assert_eq!(bindings.bind(11, 0, 3), Err(QueueError::Full));
+        assert_eq!(bindings.owner(3), Some(9));
+        assert_eq!(bindings.find(10), Some(4));
+    }
+    #[test]
+    fn invalid_and_unknown_bindings_are_refused_without_mutation() {
+        let mut bindings = DeviceBindings::<2>::new();
+        assert_eq!(bindings.bind(7, 2, 2), Err(QueueError::UnknownDevice));
+        assert_eq!(bindings.bind(7, 0, 3), Err(QueueError::UnknownDevice));
+        assert_eq!(bindings.owner(usize::MAX), None);
+        assert_eq!(bindings.find(7), None);
+        assert_eq!(bindings.bind(7, 0, 2), Ok(0));
+    }
+}

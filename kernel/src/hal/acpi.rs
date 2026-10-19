@@ -15,6 +15,7 @@ const EBDA_MIN: u64 = 0x400;
 const EBDA_MAX: u64 = 0xA0000;
 const BIOS_SCAN_START: u64 = 0xE0000;
 const BIOS_SCAN_END: u64 = 0x100000;
+static RSDP_ADVERTISED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Firmware tables needed by the local-APIC and HPET HAL backends.
 pub struct PlatformTables {
@@ -127,6 +128,7 @@ fn find_rsdp_in(start: u64, end: u64) -> Option<Rsdp> {
         let bytes =
             unsafe { core::slice::from_raw_parts(phys::direct_ptr::<u8>(address), available) };
         if bytes.get(..8) == Some(&b"RSD PTR "[..]) {
+            RSDP_ADVERTISED.store(true, core::sync::atomic::Ordering::Release);
             if let Ok(rsdp) = Rsdp::parse(bytes) {
                 return Some(rsdp);
             }
@@ -172,4 +174,368 @@ fn sleep_types(dsdt_address: u64) -> (Option<u8>, Option<u8>) {
         power::sleep_type(aml, SleepState::S5.name()),
         power::sleep_type(aml, SleepState::S3.name()),
     )
+}
+
+/// One evaluated firmware device. Resource records are observations, not permission to
+/// access hardware or allocate PCI apertures; native routing policy is a separate gate.
+#[derive(Clone, Copy)]
+pub struct FirmwareDevice {
+    name: [u8; 160],
+    length: usize,
+    /// Evaluated/defaulted `_STA` value.
+    pub status: u32,
+    /// Fully validated `_CRS`, present only for usable devices with successful evaluation.
+    pub resources: Option<power::Resources>,
+}
+impl FirmwareDevice {
+    /// Absolute AML namespace path.
+    pub fn name(&self) -> &str {
+        core::str::from_utf8(&self.name[..self.length]).unwrap_or("invalid")
+    }
+}
+impl core::fmt::Write for FirmwareDevice {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        let end = self
+            .length
+            .checked_add(text.len())
+            .ok_or(core::fmt::Error)?;
+        let dst = self
+            .name
+            .get_mut(self.length..end)
+            .ok_or(core::fmt::Error)?;
+        dst.copy_from_slice(text.as_bytes());
+        self.length = end;
+        Ok(())
+    }
+}
+const MAX_FIRMWARE_DEVICES: usize = 128;
+static FIRMWARE_DEVICES: crate::sync::IrqMutex<[Option<FirmwareDevice>; MAX_FIRMWARE_DEVICES]> =
+    crate::sync::IrqMutex::new([None; MAX_FIRMWARE_DEVICES]);
+
+/// Root resource provenance: absent ACPI alone permits the old bounded board fallback.
+// Fixed boot metadata must survive interpreter teardown without heap ownership. The
+// bounded payload is only 392 bytes, not a large device catalog or DMA allocation.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Copy)]
+pub enum RootResourceState {
+    /// No ACPI platform exists.
+    Absent,
+    /// ACPI exists but its namespace or root resources cannot authorize allocation.
+    Refused,
+    /// One completely validated root template, independent of unrelated device-method errors.
+    Ready(power::root::RootResources),
+}
+static ROOT_RESOURCES: crate::sync::IrqMutex<RootResourceState> =
+    crate::sync::IrqMutex::new(RootResourceState::Absent);
+/// Snapshot evaluated root resource provenance before PCI allocation.
+pub fn root_resources() -> RootResourceState {
+    *ROOT_RESOURCES.lock()
+}
+
+static FIRMWARE_CATALOG_COMPLETE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+/// Snapshot one evaluated firmware device without copying the whole catalog onto the stack.
+pub fn firmware_device(index: usize) -> Option<FirmwareDevice> {
+    FIRMWARE_DEVICES.lock().get(index).copied().flatten()
+}
+/// Whether all applicable namespace-device evaluations fit and completed without refusal.
+/// Even true is not proof of a complete physical inventory or permission to route/map resources.
+pub fn firmware_catalog_complete() -> bool {
+    FIRMWARE_CATALOG_COMPLETE.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Load checksummed DSDT/SSDT AML and evaluate device status/resources before driver startup.
+/// Every unsupported operation is reported. Failed tables roll back atomically; failed status
+/// is never defaulted to present, and failed/unsupported resources are never published.
+#[inline(never)]
+pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
+    use core::fmt::Write;
+    use power::aml::Namespace;
+    FIRMWARE_DEVICES.lock().fill(None);
+    super::pci_intx::revoke();
+    *ROOT_RESOURCES.lock() = RootResourceState::Absent;
+    FIRMWARE_CATALOG_COMPLETE.store(false, core::sync::atomic::Ordering::Release);
+    let mut table_refusals = 0;
+    let Some(platform) = discover() else {
+        if RSDP_ADVERTISED.load(core::sync::atomic::Ordering::Acquire) {
+            *ROOT_RESOURCES.lock() = RootResourceState::Refused;
+            let _ = writeln!(
+                console,
+                "aml: ACPI advertised but platform tables unavailable; allocation refused"
+            );
+        } else {
+            let _ = writeln!(console, "aml: no ACPI platform; namespace unavailable");
+        }
+        return;
+    };
+    *ROOT_RESOURCES.lock() = RootResourceState::Refused;
+    let mut loaded = 0;
+    let dsdt = platform
+        .fadt
+        .and_then(|f| read_sdt_at(f.dsdt))
+        .filter(|s| s.signature() == *b"DSDT");
+    let Some(dsdt) = dsdt else {
+        let _ = writeln!(
+            console,
+            "aml: DSDT unavailable or invalid; namespace incomplete"
+        );
+        return;
+    };
+    let snapshot = super::pci_intx::Snapshot::capture();
+    let mut namespace = Namespace::with_dsdt_revision(dsdt.bytes()[8]);
+    namespace.set_field_reader(&snapshot);
+    match namespace.load(&dsdt.bytes()[36..]) {
+        Ok(()) => {
+            loaded += 1;
+            let _ = writeln!(
+                console,
+                "aml: DSDT loaded atomically, {} objects",
+                namespace.len()
+            );
+        }
+        Err(error) => {
+            table_refusals += 1;
+            let _ = writeln!(console, "aml: DSDT refused atomically: {error:?}");
+        }
+    }
+    if let Some(rsdp) = find_rsdp() {
+        let address = if platform.used_xsdt {
+            rsdp.xsdt_address
+        } else {
+            u64::from(rsdp.rsdt_address)
+        };
+        if let Some(root) = read_sdt_at(address) {
+            if let Ok(entries) = root.root_entries() {
+                for address in entries {
+                    let Some(ssdt) = read_sdt_at(address) else {
+                        table_refusals += 1;
+                        let _ = writeln!(
+                            console,
+                            "aml: invalid root entry at {address:#x}; namespace incomplete"
+                        );
+                        continue;
+                    };
+                    if ssdt.signature() != *b"SSDT" {
+                        continue;
+                    }
+                    match namespace.load(&ssdt.bytes()[36..]) {
+                        Ok(()) => {
+                            loaded += 1;
+                            let _ = writeln!(
+                                console,
+                                "aml: SSDT loaded atomically, {} objects",
+                                namespace.len()
+                            );
+                        }
+                        Err(error) => {
+                            table_refusals += 1;
+                            let _ = writeln!(console, "aml: SSDT refused atomically: {error:?}");
+                        }
+                    }
+                }
+            } else {
+                table_refusals += 1;
+            }
+        } else {
+            table_refusals += 1;
+        }
+    } else {
+        table_refusals += 1;
+    }
+    // Select before any resource evaluation: even a narrowly supported _PIC may change
+    // an integer referenced by _SEG/_BBN/_CRS, not only by _PRT.
+    let interrupt_model_ready = if table_refusals == 0 {
+        match namespace.select_interrupt_model(super::apic::is_enabled()) {
+            Ok(notified) => {
+                let _ = writeln!(
+                    console,
+                    "aml: interrupt model={}, _PIC notified={notified}",
+                    if super::apic::is_enabled() {
+                        "APIC"
+                    } else {
+                        "PIC"
+                    }
+                );
+                true
+            }
+            Err(error) => {
+                let _ = writeln!(console, "pci: ACPI INTx evaluation refused: _PIC {error:?}");
+                false
+            }
+        }
+    } else {
+        false
+    };
+    if table_refusals == 0 {
+        match power::root::discover(&namespace) {
+            Ok(resources) => {
+                for window in resources.iter() {
+                    let _ = writeln!(
+                        console,
+                        "aml: PCI root {:?} {} {:#x}..{:#x} flags={:#x}",
+                        window.space,
+                        if window.producer {
+                            "aperture"
+                        } else {
+                            "reservation"
+                        },
+                        window.start,
+                        window.end,
+                        window.memory_flags
+                    );
+                }
+                *ROOT_RESOURCES.lock() = RootResourceState::Ready(resources);
+                let _ = writeln!(console, "aml: evaluated PCI root resources authorized");
+            }
+            Err(error) => {
+                let _ = writeln!(
+                    console,
+                    "aml: PCI root resource authorization refused: {error:?}"
+                );
+            }
+        }
+    } else {
+        let _ = writeln!(
+            console,
+            "aml: PCI root resource authorization refused: incomplete table load"
+        );
+    }
+    if interrupt_model_ready && matches!(root_resources(), RootResourceState::Ready(_)) {
+        super::pci_intx::evaluate(&namespace, console);
+    }
+    let mut retained = 0;
+    let mut ready = 0;
+    let mut refused = table_refusals;
+    for path in namespace.devices() {
+        let (status, defaulted) = match namespace.device_status(path) {
+            Ok(value) => value,
+            Err(error) => {
+                refused += 1;
+                let _ = writeln!(
+                    console,
+                    "aml: {path} _STA refused: {error:?}; device not admitted"
+                );
+                continue;
+            }
+        };
+        let _ = writeln!(
+            console,
+            "aml: {path} _STA={status:#x}, defaulted={defaulted}"
+        );
+        let resources = if power::is_usable(status) {
+            match namespace.device_resources(path) {
+                Ok(Some(bytes)) => {
+                    match power::parse_resources(&bytes) {
+                        Ok(resources) => {
+                            ready += 1;
+                            let _ = writeln!(
+                                console,
+                                "aml: {path} _CRS evaluated and decoded: {} resources",
+                                resources.len()
+                            );
+                            Some(resources)
+                        }
+                        Err(error) => {
+                            refused += 1;
+                            let _ = writeln!(console, "aml: {path} _CRS resource refusal: {error:?}; resources not published");
+                            None
+                        }
+                    }
+                }
+                Ok(None) => None,
+                Err(error) => {
+                    refused += 1;
+                    let _ = writeln!(
+                        console,
+                        "aml: {path} _CRS evaluation refused: {error:?}; resources not published"
+                    );
+                    None
+                }
+            }
+        } else {
+            let _ = writeln!(
+                console,
+                "aml: {path} _CRS skipped: device status is not usable"
+            );
+            None
+        };
+        if retained == MAX_FIRMWARE_DEVICES {
+            super::pci_intx::revoke();
+            *ROOT_RESOURCES.lock() = RootResourceState::Refused;
+            let _ = writeln!(
+                console,
+                "aml: PCI root resource authorization refused: firmware catalog capacity"
+            );
+            refused += 1;
+            let _ = writeln!(
+                console,
+                "aml: firmware catalog capacity refused; no silent truncation"
+            );
+            break;
+        }
+        let mut device = FirmwareDevice {
+            name: [0; 160],
+            length: 0,
+            status,
+            resources,
+        };
+        if write!(&mut device, "{path}").is_err() {
+            refused += 1;
+            continue;
+        }
+        FIRMWARE_DEVICES.lock()[retained] = Some(device);
+        retained += 1;
+    }
+    FIRMWARE_CATALOG_COMPLETE.store(
+        loaded > 0 && refused == 0,
+        core::sync::atomic::Ordering::Release,
+    );
+    let _ = writeln!(console, "aml: namespace evaluation: {loaded} tables, {} objects, {retained} catalog devices, {ready} resource results, {refused} refusals", namespace.len());
+    #[cfg(feature = "hal-aml-test")]
+    {
+        assert!(!firmware_catalog_complete());
+        assert!(firmware_device(MAX_FIRMWARE_DEVICES).is_none());
+        assert!(firmware_device(0).is_some());
+        let catalog = FIRMWARE_DEVICES.lock();
+        let fixture = catalog
+            .iter()
+            .flatten()
+            .find(|d| d.name() == "\\_SB_.NLX0")
+            .expect("missing AML firmware fixture");
+        assert_eq!(fixture.status, 15);
+        let resources = fixture.resources.unwrap();
+        assert_eq!(resources.len(), 3);
+        assert_eq!(
+            resources.iter().collect::<alloc::vec::Vec<_>>(),
+            [
+                power::Resource::Io {
+                    base: 0x3f8,
+                    length: 8
+                },
+                power::Resource::Memory {
+                    base: 0xfedc0000,
+                    length: 4096
+                },
+                power::Resource::Irq { mask: 16 }
+            ]
+        );
+        let absent = catalog
+            .iter()
+            .flatten()
+            .find(|d| d.name() == "\\_SB_.NLX1")
+            .unwrap();
+        assert_eq!(absent.status, 0);
+        assert!(absent.resources.is_none());
+        for name in ["\\_SB_.NLX2", "\\_SB_.NLX4", "\\_SB_.NLX5"] {
+            assert!(!catalog.iter().flatten().any(|d| d.name() == name));
+        }
+        assert!(catalog
+            .iter()
+            .flatten()
+            .find(|d| d.name() == "\\_SB_.NLX3")
+            .unwrap()
+            .resources
+            .is_none());
+        let _ = writeln!(console, "aml: firmware method selftest: computed status, decoded resources, disabled-device gating, unsupported/loop/recursion refusal verified");
+    }
 }

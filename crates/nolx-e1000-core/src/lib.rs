@@ -219,3 +219,57 @@ pub fn tx_free(head: u32, tail: u32, count: u32) -> u32 {
 
 #[cfg(test)]
 mod tests;
+
+/// Validate final readbacks after reset and PCI interrupt/DMA exclusion. This does not
+/// stop hardware itself: the caller must detach software users and obtain these readbacks
+/// before reclaiming any exposed descriptor, packet buffer or register mapping.
+pub fn stop_proven(ctrl: u32, receive: u32, transmit: u32, mask: u32, command: u32) -> bool {
+    ctrl & CTRL_RST == 0
+        && receive & 2 == 0
+        && transmit & 2 == 0
+        && mask == 0
+        && command & ((1 << 2) | (1 << 10)) == 1 << 10
+}
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    #[test]
+    fn no_partial_quiescence_proof_authorizes_reclamation() {
+        for reset in [false, true] {
+            for rx in [false, true] {
+                for tx in [false, true] {
+                    for irq in [false, true] {
+                        for bm in [false, true] {
+                            for intx in [false, true] {
+                                assert_eq!(
+                                    stop_proven(
+                                        if reset { CTRL_RST } else { 0 },
+                                        if rx { 2 } else { 0 },
+                                        if tx { 2 } else { 0 },
+                                        u32::from(irq),
+                                        (u32::from(bm) << 2) | (u32::from(intx) << 10)
+                                    ),
+                                    !reset && !rx && !tx && !irq && !bm && intx
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(!stop_proven(
+            u32::MAX,
+            u32::MAX,
+            u32::MAX,
+            u32::MAX,
+            u32::MAX
+        ));
+    }
+    #[test]
+    fn unrelated_control_bits_do_not_substitute_for_or_invalidate_stop_proof() {
+        assert!(stop_proven(!CTRL_RST, !2, !2, 0, !4));
+        for bit in 0..32 {
+            assert!(!stop_proven(0, 0, 0, 1 << bit, 1 << 10));
+        }
+    }
+}

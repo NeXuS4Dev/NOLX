@@ -5,6 +5,13 @@
 //! bytes behind the kernel's back. The frame is zeroed when it is taken.
 
 use crate::mm::{self, phys, PAGE_SIZE};
+use core::sync::atomic::{AtomicUsize, Ordering};
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// DMA pages still owned/pinned by devices (including conservative failed-start retention).
+pub fn live_pages() -> usize {
+    LIVE.load(Ordering::Acquire)
+}
 
 /// Memory one device reads or writes, reached through the direct map. A frame is 4 KiB and is
 /// zeroed when it is taken; every access is checked to stay inside that frame.
@@ -17,9 +24,25 @@ impl Dma {
         let frame = mm::allocate_frame_zeroed()?;
         // The allocator manages only frames inside the direct map, so this address is one the
         // device can be given and the kernel can reach.
+        LIVE.fetch_add(1, Ordering::Relaxed);
         Some(Self {
             phys: frame as u64 * PAGE_SIZE as u64,
         })
+    }
+
+    /// Release a DMA page only after the device can no longer access it.
+    ///
+    /// # Safety
+    /// The caller must have stopped/reset every engine that can DMA to this page, retired its
+    /// outstanding commands and prevented further submissions. There is deliberately no Drop:
+    /// failed-start unwinding must pin memory rather than free it under an active controller.
+    pub(crate) unsafe fn release(self) {
+        mm::free_frame((self.phys / PAGE_SIZE as u64) as usize)
+            .expect("DMA frame ownership corrupted");
+        assert!(
+            LIVE.fetch_sub(1, Ordering::AcqRel) > 0,
+            "DMA ownership counter underflow"
+        );
     }
 
     /// The physical address the device uses for `offset` within this page.
