@@ -864,10 +864,7 @@ fn transaction_permission(field: PciField, values: &[u8]) -> PciFieldWritePermis
 fn pci_write_transaction_checks_snapshots_and_commits_ordered_readback_verified_writes() {
     let pirqa = transaction_field(0x60);
     let pirqb = transaction_field(0x61);
-    let effects = transaction_effects(
-        &[(pirqa, 1)],
-        &[(pirqa, 2), (pirqa, 3), (pirqb, 4)],
-    );
+    let effects = transaction_effects(&[(pirqa, 1)], &[(pirqa, 2), (pirqa, 3), (pirqb, 4)]);
     let permissions = [
         transaction_permission(pirqa, &[2, 3]),
         transaction_permission(pirqb, &[4]),
@@ -884,10 +881,7 @@ fn pci_write_transaction_checks_snapshots_and_commits_ordered_readback_verified_
     assert_eq!(result, Ok(()));
     assert!(postcondition_ran);
     assert_eq!(backend.values, vec![(pirqa, 3), (pirqb, 4)]);
-    assert_eq!(
-        backend.writes,
-        vec![(pirqa, 2), (pirqa, 3), (pirqb, 4)]
-    );
+    assert_eq!(backend.writes, vec![(pirqa, 2), (pirqa, 3), (pirqb, 4)]);
 }
 
 #[test]
@@ -1000,7 +994,9 @@ fn pci_write_transaction_rolls_back_readback_and_postcondition_failures() {
         apply_pci_field_writes(&effects, &[permission], &mut bad_postcondition, || {
             Err::<(), &'static str>("_CRS mismatch")
         }),
-        Err(PciFieldWriteTransactionError::Postcondition("_CRS mismatch"))
+        Err(PciFieldWriteTransactionError::Postcondition(
+            "_CRS mismatch"
+        ))
     );
     assert_eq!(bad_postcondition.values, vec![(field, 1)]);
     assert_eq!(bad_postcondition.writes, vec![(field, 2), (field, 1)]);
