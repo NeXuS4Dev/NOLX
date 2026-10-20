@@ -171,8 +171,9 @@ pub(super) fn run(console: &mut dyn HalConsole) {
         Some((INTX_KIND, target_irq.gsi as usize))
     );
     assert_eq!(super::super::ioapic::pci_route_references(target_irq.gsi), 2);
-    route_owned(dev, target_irq, vector, 2, "initial target");
-    route_owned(peer, peer_irq, vector, 2, "initial peer");
+    // The target is intentionally quarantined after its injected post-ARP startup failure;
+    // pinned() verifies its retained route reference while the source vector is masked.
+    route_owned(peer, peer_irq, vector, 2, "initial live peer");
     pinned(dev, peer, region, mappings, vector, true);
     assert_eq!(driver_start::recover(peer), Err(Error::BadState));
     assert_eq!(

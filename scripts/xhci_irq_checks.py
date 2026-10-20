@@ -6,7 +6,7 @@ MANAGED_FIRST = 0x50
 MANAGED_LAST = 0xDF
 
 
-def verify_interrupts(text, reports=1, controllers=1, arms=1, transport=None):
+def verify_interrupts(text, reports=1, controllers=1, arms=1, transport=None, unique_vectors=True):
     assert 'polled fallback' not in text and 'xhci: polled work' not in text, text
     armed = re.findall(r'xhci: handle=(\d+) (MSI-X|MSI) vector=(0x[\da-f]+) delivered=(\d+), deferred HID', text)
     batches = re.findall(r'xhci: irq work handle=(\d+) vector=(0x[\da-f]+) delivered=(\d+) reports=(\d+)', text)
@@ -20,13 +20,14 @@ def verify_interrupts(text, reports=1, controllers=1, arms=1, transport=None):
         assert 0 <= numeric_handle < 16, armed
         assert MANAGED_FIRST <= numeric_vector <= MANAGED_LAST, armed
         assert transport is None or kind == transport, armed
-        # The first simultaneously observed arms must have distinct owned vectors. A later
-        # re-arm may legitimately receive a different vector after checked release/reuse.
+        # Vector reuse across handles is allowed only when the caller knows the earlier arm
+        # was checked-released; otherwise all observed controllers must have unique vectors.
         first_vector.setdefault(handle, vector)
         armed_vectors.setdefault(handle, set()).add(vector)
         assert int(delivered) > previous.get(handle, 0), armed
         previous[handle] = int(delivered)
-    assert len(set(first_vector.values())) == len(first_vector), f"two live controllers shared a vector: {first_vector}"
+    if unique_vectors:
+        assert len(set(first_vector.values())) == len(first_vector), f"two live controllers shared a vector: {first_vector}"
     assert text.count('xhci: IRQ-only admission verified handle=') == len(armed), text
     previous = {}
     for handle, vector, delivered, count in batches:

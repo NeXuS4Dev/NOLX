@@ -47,12 +47,7 @@ fn owner(info: Info) -> usize {
     };
     BINDINGS
         .iter()
-        .position(|b| {
-            b.lock()
-                .bdf
-                .map(Bdf::packed_id)
-                == Some(controller)
-        })
+        .position(|b| b.lock().bdf.map(Bdf::packed_id) == Some(controller))
         .unwrap()
 }
 fn quarantined(t: &Test, pages: usize, mappings: usize, console: &mut dyn HalConsole) {

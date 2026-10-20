@@ -25,6 +25,19 @@ class InterruptEvidence(unittest.TestCase):
         self.assertEqual(verify_interrupts(DYNAMIC, controllers=2, arms=2, reports=2), (2, 2))
         self.assertEqual(verify_interrupts(BASE.replace('0xd0', '0x61')), (1, 1))
 
+    def test_checked_failed_start_can_release_and_reuse_a_vector(self):
+        reused = DYNAMIC.replace('vector=0x60', 'vector=0xd0')
+        self.assertEqual(
+            verify_interrupts(
+                reused,
+                controllers=2,
+                arms=2,
+                reports=2,
+                unique_vectors=False,
+            ),
+            (2, 2),
+        )
+
     def test_input_console_output_alone_is_not_evidence(self):
         with self.assertRaises(AssertionError):
             verify_interrupts('input: usb keyboard usage=0x04 pressed=true')

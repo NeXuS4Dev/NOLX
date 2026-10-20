@@ -28,6 +28,11 @@ static VECTORS: [AtomicU8; driver_start::DEVICES] =
 ))]
 static LAST_VECTOR: [AtomicU8; driver_start::DEVICES] =
     [const { AtomicU8::new(NO_VECTOR) }; driver_start::DEVICES];
+#[cfg(any(
+    feature = "hal-xhci-lifecycle-test",
+    feature = "hal-xhci-recovery-test",
+    feature = "hal-xhci-transfer-fault-test"
+))]
 pub(super) fn vector(dev: usize) -> u8 {
     VECTORS[dev].load(Ordering::Acquire)
 }
@@ -91,7 +96,7 @@ fn disable_messages(bdf: Bdf) -> Result<bool, Failure> {
     }
     Ok(caps.find(msi::CAP_MSI).is_some() || caps.find(msi::CAP_MSI_X).is_some())
 }
-fn program(dev: usize, bdf: Bdf, regs: Region, vector: u8) -> Result<&'static str, Failure> {
+fn program(bdf: Bdf, regs: Region, vector: u8) -> Result<&'static str, Failure> {
     let caps = nolx_pci_core::capabilities(&mut ConfigAccess, bdf);
     // PCI command status is W1C: never echo the upper half while blocking legacy INTx.
     let command = ConfigAccess.read_u32(bdf, PCI_COMMAND) & 0xffff;
@@ -225,7 +230,7 @@ pub(super) fn arm(
         regs.write32(runtime, rule::PENDING)?;
         regs.write32(op + usb::OP_USBSTS, rule::STATUS_EVENT)?;
         *SOURCES[dev].lock() = Some(Source { regs, op, runtime });
-        transport = program(dev, bdf, regs, vector)?;
+        transport = program(bdf, regs, vector)?;
         regs.write32(runtime + 4, 0)?; // no moderation delay for this bounded profile
         regs.write32(runtime, rule::ENABLE)?;
         regs.write32(
