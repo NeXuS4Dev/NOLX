@@ -2,8 +2,7 @@ use super::alloc::vec;
 use super::alloc::vec::Vec;
 use super::{
     build_srs_template, link_possible_interrupts, link_srs_template, possible_interrupts,
-    select_link_route, Error, LinkIrqNumber, LinkIrqOption, Namespace, Path,
-    MAX_TEMPLATE_BYTES,
+    select_link_route, Error, LinkIrqNumber, LinkIrqOption, Namespace, Path, MAX_TEMPLATE_BYTES,
 };
 
 fn template(mut descriptors: Vec<u8>, checksum: bool) -> Vec<u8> {
@@ -32,12 +31,7 @@ fn link_aml(prs: &[u8], crs: &[u8], status: Option<u8>) -> Vec<u8> {
     link_aml_with_srs_arity(prs, crs, status, 1)
 }
 
-fn link_aml_with_srs_arity(
-    prs: &[u8],
-    crs: &[u8],
-    status: Option<u8>,
-    srs_arity: u8,
-) -> Vec<u8> {
+fn link_aml_with_srs_arity(prs: &[u8], crs: &[u8], status: Option<u8>, srs_arity: u8) -> Vec<u8> {
     let mut body = b"LNK0".to_vec();
     body.extend(name_buffer(b"_PRS", prs));
     body.extend(name_buffer(b"_CRS", crs));

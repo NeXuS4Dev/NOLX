@@ -93,13 +93,15 @@ fn device_method_arity_is_inspected_without_invoking_or_coercing_members() {
     device.extend(method(b"_SRS", 1, &[0xa3]));
     device.extend([8, b'_', b'C', b'R', b'S', 0]);
     let mut namespace = Namespace::new();
-    namespace
-        .load(&pkg(&[0x5b, 0x82], device))
-        .unwrap();
+    let aml = pkg(&[0x5b, 0x82], device);
+    namespace.load(&aml).unwrap();
     let dev = path("\\DEV0");
     assert_eq!(namespace.device_method_arity(&dev, *b"_SRS"), Ok(Some(1)));
     assert_eq!(namespace.device_method_arity(&dev, *b"_STA"), Ok(None));
-    assert_eq!(namespace.device_method_arity(&dev, *b"_CRS"), Err(Error::Type));
+    assert_eq!(
+        namespace.device_method_arity(&dev, *b"_CRS"),
+        Err(Error::Type)
+    );
     assert_eq!(
         namespace.device_method_arity(&path("\\MISS"), *b"_SRS"),
         Err(Error::Type)
