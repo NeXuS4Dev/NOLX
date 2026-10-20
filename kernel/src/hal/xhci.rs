@@ -61,6 +61,8 @@ pub enum Failure {
     CommandUnavailable,
     /// MSI/MSI-X setup, delivery proof or interrupt masking/readback failed.
     Interrupt,
+    /// Every vector in the shared native interrupt domain is owned by another source.
+    NoVector,
     /// A DMA allocation could not be obtained.
     Memory,
     /// Controller/device features exceed the supported direct-root boot-HID profile.
@@ -109,7 +111,7 @@ static MATCHES: &[Match] = &[Match::by_class(
 
 /// Bind every discovered controller once; a failed/quarantined identity is never rebound.
 pub fn probe(console: &mut dyn HalConsole) {
-    let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
+    let inventory = super::pci::enumerate_native();
     let mut found = false;
     for info in inventory.as_slice().iter().filter(|info| {
         info.class == XHCI_CLASS && info.subclass == XHCI_SUBCLASS && info.prog_if == XHCI_PROG_IF
@@ -226,17 +228,18 @@ fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<(), Failure> {
     let ports = usb::max_ports(hcsparams1);
     let _ = writeln!(
         console,
-        "xhci: {:02x}:{:02x}.{} bar0 {base:#x}, version {version:#x}, {ports} ports, {} slots",
+        "xhci: {:02x}:{:02x}.{} bar0 {base:#x}, version {version:#x}, {ports} ports, {} slots, segment {}",
         bdf.bus,
         bdf.device,
         bdf.function,
         usb::max_slots(hcsparams1),
+        bdf.segment,
     );
     let _ = writeln!(console, "xhci: controller reset, halted");
     report_ports(console, &regs, caplength, ports)?;
     live::start(
         dev,
-        u32::from(bdf.bus) << 16 | u32::from(bdf.device) << 8 | u32::from(bdf.function),
+        bdf.packed_id(),
         regs,
         op,
         ports,
@@ -347,6 +350,9 @@ fn stop_device(dev: usize) -> bool {
     let command = ConfigAccess.read_u32(bdf, PCI_COMMAND) & 0xffff;
     ConfigAccess.write_u32(bdf, PCI_COMMAND, command & !COMMAND_BUS_MASTER);
     if ConfigAccess.read_u32(bdf, PCI_COMMAND) & COMMAND_BUS_MASTER != 0 {
+        return false;
+    }
+    if !irq::release_vector(dev) {
         return false;
     }
     // SAFETY: halt/reset acknowledged (or no register/DMA exposure ever occurred), PCI bus

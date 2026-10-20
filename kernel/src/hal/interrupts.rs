@@ -69,6 +69,13 @@ extern "C" fn nolx_interrupt_dispatch(frame_pointer: *mut InterruptFrame) -> *mu
         });
     }
 
+    // A source whose checked stop released its vector may already have had one MSI queued
+    // in the local APIC. The shared owner table no longer dispatches it to a driver, but
+    // acknowledging the reserved native-vector domain keeps that late delivery harmless.
+    if apic::is_enabled() && super::irq_vectors::is_managed_vector(vector) {
+        return device_completion(frame_pointer, || {});
+    }
+
     if apic::is_enabled() && apic::handles_vector(vector) {
         // Interrupt gates clear IF. APIC TPR and the per-CPU software IPL are both raised
         // until after the local APIC EOI, then restored in that order.

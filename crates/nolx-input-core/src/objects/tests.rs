@@ -4,7 +4,7 @@ fn key(pressed: bool) -> Kind {
 }
 fn usb(port: u8) -> Location {
     Location::Usb {
-        controller: 3 << 8,
+        controller: 3 << 3,
         port,
     }
 }
@@ -199,22 +199,6 @@ fn duplicates_invalid_profiles_and_capacity_fail_without_partial_objects() {
         (Source::Ps2Mouse, Class::Keyboard, Location::Ps2Mouse),
         (Source::UsbHid, Class::Keyboard, Location::Ps2Keyboard),
         (Source::UsbHid, Class::Keyboard, usb(0)),
-        (
-            Source::UsbHid,
-            Class::Keyboard,
-            Location::Usb {
-                controller: 32 << 8,
-                port: 1,
-            },
-        ),
-        (
-            Source::UsbHid,
-            Class::Keyboard,
-            Location::Usb {
-                controller: 8,
-                port: 1,
-            },
-        ),
     ] {
         assert_eq!(r.attach(source, class, location), Err(Error::Invalid));
         assert_eq!(r.devices().count(), 0);
@@ -231,6 +215,27 @@ fn duplicates_invalid_profiles_and_capacity_fail_without_partial_objects() {
     r.disconnect(d).unwrap();
     assert!(r.devices().next().is_none());
 }
+#[test]
+fn usb_controller_identity_keeps_the_pci_segment() {
+    let mut r = Registry::<2, 1, 1>::new();
+    let segment_zero = Location::Usb {
+        controller: 3 << 8,
+        port: 1,
+    };
+    let segment_one = Location::Usb {
+        controller: (1 << 16) | (3 << 8),
+        port: 1,
+    };
+    r.attach(Source::UsbHid, Class::Keyboard, segment_zero)
+        .unwrap();
+    r.attach(Source::UsbHid, Class::Keyboard, segment_one)
+        .unwrap();
+    assert_eq!(
+        r.attach(Source::UsbHid, Class::Keyboard, segment_zero),
+        Err(Error::Duplicate)
+    );
+}
+
 #[test]
 fn zero_capacities_are_safe_and_zero_queue_reports_resync() {
     assert_eq!(

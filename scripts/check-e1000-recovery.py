@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Real e1000 failure recovery on two shared-INTx adapters, with independent wire captures.
 
-Requires hal-e1000-recovery-test. Faults refuse cleanup or withhold proof; they do
-not claim QEMU actually fails reset/PCI writes. Packet bytes and IRQs are real.
+Requires hal-e1000-recovery-test. Faults refuse cleanup, withhold proof, or override
+route-readback evidence; they do not claim QEMU hardware actually fails writes. Packet bytes
+and IRQs are real.
 """
 import argparse
 import os
@@ -54,8 +55,15 @@ def boot(qemu, kernel, machine):
     for marker in ['post-ARP startup quarantine recovered', 'failed stop/repeated refusal retained 22 pages',
                    'partial three-page allocation rollback reclaimed before exposure',
                    'RX-only partial startup retained all eleven pages until checked reset',
-                   'deliberately withheld PCI exclusion proof pinned DMA despite actual bus-master disable']:
+                   'deliberately withheld PCI exclusion proof pinned DMA despite actual bus-master disable',
+                   'inconclusive remask readback quarantined GSI']:
         assert f'e1000-recovery: {marker}' in text, text
+    route_release = re.search(
+        r'e1000-recovery: shared GSI (\d+) vector (0x[0-9a-f]+) released only after last checked stop',
+        text,
+    )
+    assert route_release, text
+    assert 0x50 <= int(route_release.group(2), 16) <= 0xdf, route_release.groups()
     exchanges = re.findall(r'e1000-recovery: exchange=(\d+) handle=(\d+) mac=\[([^]]+)\] local=(\d+) selected IRQ progressed', text)
     assert len(exchanges) == 11 and {int(r[0]) for r in exchanges} == set(range(11)), exchanges
     frames = {mac: WIRE['packets'](path) for mac, path in captures.items()}

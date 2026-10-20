@@ -37,7 +37,7 @@ pub enum Class {
     /// Relative pointer motion and buttons.
     Pointer,
 }
-/// Producer location; USB controller is segment-zero bus<<16 | device<<8 | function.
+/// Producer location; USB controller is packed segment<<16 | bus<<8 | device<<3 | function.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Location {
     /// Fixed i8042 keyboard port.
@@ -46,7 +46,7 @@ pub enum Location {
     Ps2Mouse,
     /// Direct-root USB port; USB addresses/slots may be reused independently.
     Usb {
-        /// Encoded segment-zero PCI controller.
+        /// Encoded segment-qualified PCI controller.
         controller: u32,
         /// One-based root port.
         port: u8,
@@ -212,12 +212,7 @@ impl<const D: usize, const R: usize, const Q: usize> Registry<D, R, Q> {
         let valid = match (source, class, location) {
             (Source::Ps2Keyboard, Class::Keyboard, Location::Ps2Keyboard)
             | (Source::Ps2Mouse, Class::Pointer, Location::Ps2Mouse) => true,
-            (Source::UsbHid, _, Location::Usb { controller, port }) => {
-                port != 0
-                    && controller < 0x1000000
-                    && (controller >> 8) & 255 < 32
-                    && controller & 255 < 8
-            }
+            (Source::UsbHid, _, Location::Usb { port, .. }) => port != 0,
             _ => false,
         };
         if !valid {

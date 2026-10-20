@@ -56,6 +56,12 @@ def boot(qemu, kernel, machine, modern):
                    'RX-queue-only partial startup retained all four pages until checked reset',
                    'deliberately withheld PCI exclusion proof pinned DMA despite actual bus-master disable']:
         assert f'virtio-net-recovery: {marker}' in text, text
+    vectors = re.search(
+        r'virtio-net-recovery: vectors (0x[0-9a-f]+)/(0x[0-9a-f]+) released after checked stop and reclaimed on restart',
+        text,
+    )
+    assert vectors, text
+    assert len(set(vectors.groups())) == 2 and all(0x50 <= int(vector, 16) <= 0xdf for vector in vectors.groups()), vectors.groups()
     exchanges = re.findall(r'virtio-net-recovery: exchange=(\d+) handle=(\d+) mac=\[([^]]+)\] local=(\d+) selected IRQ progressed', text)
     assert len(exchanges) == 11 and {int(r[0]) for r in exchanges} == set(range(11)), exchanges
     frames = {mac: WIRE['packets'](path) for mac, path in captures.items()}

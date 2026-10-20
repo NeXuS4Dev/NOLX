@@ -112,6 +112,20 @@ fn addresses_the_hardware_cannot_express_are_refused() {
 }
 
 #[test]
+fn equal_bus_device_function_tuples_in_distinct_segments_are_distinct() {
+    let segment_zero = Bdf::new(3, 4, 1).unwrap();
+    let segment_seven = Bdf::in_segment(7, 3, 4, 1).unwrap();
+    assert_eq!((segment_zero.bus, segment_zero.device, segment_zero.function), (3, 4, 1));
+    assert_eq!((segment_seven.bus, segment_seven.device, segment_seven.function), (3, 4, 1));
+    assert_eq!(segment_zero.packed_id(), (3_u32 << 8) | (4 << 3) | 1);
+    assert_eq!(
+        segment_seven.packed_id(),
+        (7_u32 << 16) | (3 << 8) | (4 << 3) | 1
+    );
+    assert_ne!(segment_zero, segment_seven);
+}
+
+#[test]
 fn an_absent_function_is_not_recorded() {
     let mut machine = Machine::new();
     assert_eq!(read_function(&mut machine, bdf(0, 5, 0)), None);
@@ -369,6 +383,26 @@ fn a_bridge_that_points_back_is_refused_and_enumeration_terminates() {
     let inventory = enumerate(&mut machine);
     assert_eq!(inventory.len, 1);
     assert_eq!(inventory.refused_bridges, 1);
+}
+
+#[test]
+fn multiple_root_ranges_scan_a_bus_and_refused_bridge_only_once() {
+    let mut machine = Machine::new();
+    machine.add(bdf(0, 0, 0), Regs::bridge(0x1022, 0x1, 0));
+    let inventory = enumerate_ranges(&mut machine, &[(0, 0), (0, 1), (1, 1)]);
+    assert_eq!(inventory.len, 1);
+    assert_eq!(inventory.refused_bridges, 1);
+
+    let mut machine = Machine::new();
+    machine.add(bdf(0, 0, 0), Regs::bridge(0x8086, 0x2448, 1));
+    machine.add(
+        bdf(1, 0, 0),
+        Regs::endpoint(0x10ec, 0x8168, 0x02, 0x00, false),
+    );
+    let inventory = enumerate_ranges(&mut machine, &[(0, 0), (0, 1), (1, 1)]);
+    assert_eq!(inventory.len, 2);
+    assert_eq!(inventory.refused_bridges, 0);
+    assert_eq!(inventory.as_slice()[1].bdf, bdf(1, 0, 0));
 }
 
 #[test]

@@ -92,7 +92,11 @@ impl EcamWindow {
         offset: u16,
         width: AccessWidth,
     ) -> Result<u64, EcamError> {
-        if segment != self.segment || bdf.bus < self.start_bus || bdf.bus > self.end_bus {
+        if segment != self.segment
+            || bdf.segment != segment
+            || bdf.bus < self.start_bus
+            || bdf.bus > self.end_bus
+        {
             return Err(EcamError::OutsideWindow);
         }
         // Bdf fields are public, so callers need not have used Bdf::new.
@@ -112,7 +116,8 @@ impl EcamWindow {
 }
 
 /// Segment-aware full configuration-space transactions supplied by a kernel or test model.
-/// Implementations must reject unsupported segments rather than alias them to segment zero.
+/// Implementations must reject unsupported segments and any mismatch between the explicit
+/// segment and `bdf.segment`, rather than aliasing the request to segment zero.
 pub trait ExtendedConfigSpace {
     /// Read an aligned dword within a function's 4 KiB configuration space.
     fn read_dword(&mut self, segment: u16, bdf: Bdf, offset: u16) -> Result<u32, EcamError>;
@@ -135,16 +140,25 @@ pub struct SegmentConfig<'a, C: ExtendedConfigSpace> {
 }
 
 impl<C: ExtendedConfigSpace> crate::ConfigSpace for SegmentConfig<'_, C> {
+    fn segment(&self) -> u16 {
+        self.segment
+    }
+
     fn read_u32(&mut self, bdf: Bdf, offset: u8) -> u32 {
+        if bdf.segment != self.segment {
+            return u32::MAX;
+        }
         self.transport
             .read_dword(self.segment, bdf, u16::from(offset & !3))
             .unwrap_or(u32::MAX)
     }
 
     fn write_u32(&mut self, bdf: Bdf, offset: u8, value: u32) {
-        let _ = self
-            .transport
-            .write_dword(self.segment, bdf, u16::from(offset & !3), value);
+        if bdf.segment == self.segment {
+            let _ = self
+                .transport
+                .write_dword(self.segment, bdf, u16::from(offset & !3), value);
+        }
     }
 }
 
@@ -157,8 +171,17 @@ mod tests {
         let window = EcamWindow::new(0x8000_0000, 7, 0x40, 0x4f).unwrap();
         assert_eq!(window.physical_range(), (0x8400_0000, 0x0100_0000));
         assert_eq!(
-            window.address(7, Bdf::new(0x42, 3, 5).unwrap(), 0xabc, AccessWidth::Dword),
+            window.address(
+                7,
+                Bdf::in_segment(7, 0x42, 3, 5).unwrap(),
+                0xabc,
+                AccessWidth::Dword
+            ),
             Ok(0x8421_dabc)
+        );
+        assert_eq!(
+            window.address(7, Bdf::new(0x42, 3, 5).unwrap(), 0, AccessWidth::Dword),
+            Err(EcamError::OutsideWindow)
         );
     }
 
@@ -182,7 +205,12 @@ mod tests {
         let window = EcamWindow::new(0, 1, 2, 3).unwrap();
         for (segment, bus) in [(0, 2), (1, 1), (1, 4)] {
             assert_eq!(
-                window.address(segment, Bdf::new(bus, 0, 0).unwrap(), 0, AccessWidth::Dword),
+                window.address(
+                    segment,
+                    Bdf::in_segment(segment, bus, 0, 0).unwrap(),
+                    0,
+                    AccessWidth::Dword
+                ),
                 Err(EcamError::OutsideWindow)
             );
         }
@@ -191,6 +219,7 @@ mod tests {
                 window.address(
                     1,
                     Bdf {
+                        segment: 1,
                         bus: 2,
                         device,
                         function,
@@ -261,6 +290,9 @@ mod transport_tests {
 
     impl ExtendedConfigSpace for Model {
         fn read_dword(&mut self, segment: u16, bdf: Bdf, offset: u16) -> Result<u32, EcamError> {
+            if bdf.segment != segment {
+                return Err(EcamError::OutsideWindow);
+            }
             Ok(*self
                 .0
                 .get(&(segment, bdf.bus, bdf.device, bdf.function, offset))
@@ -273,6 +305,9 @@ mod transport_tests {
             offset: u16,
             value: u32,
         ) -> Result<(), EcamError> {
+            if bdf.segment != segment {
+                return Err(EcamError::OutsideWindow);
+            }
             self.0
                 .insert((segment, bdf.bus, bdf.device, bdf.function, offset), value);
             Ok(())
@@ -282,8 +317,8 @@ mod transport_tests {
     #[test]
     fn identical_bdfs_in_distinct_segments_never_alias() {
         let mut model = Model::default();
-        let bdf = Bdf::new(64, 2, 0).unwrap();
         for (segment, value) in [(0, 0x1234_5678), (7, 0xabcd_1234)] {
+            let bdf = Bdf::in_segment(segment, 64, 2, 0).unwrap();
             SegmentConfig {
                 transport: &mut model,
                 segment,
@@ -295,7 +330,14 @@ mod transport_tests {
                 transport: &mut model,
                 segment,
             };
+            let bdf = Bdf::in_segment(segment, 64, 2, 0).unwrap();
             assert_eq!(cfg.read_u32(bdf, 0), value);
+            if segment != 0 {
+                let wrong_segment = Bdf::new(64, 2, 0).unwrap();
+                assert_eq!(cfg.read_u32(wrong_segment, 0), u32::MAX);
+                cfg.write_u32(wrong_segment, 0, 0xdead_beef);
+                assert_eq!(cfg.read_u32(bdf, 0), value);
+            }
             let found = crate::enumerate_range(&mut cfg, 64, 64);
             assert_eq!(found.len, 1);
             assert_eq!(found.as_slice()[0].bdf, bdf);
@@ -318,7 +360,7 @@ mod transport_tests {
         let mut model = Model::default();
         for bus in [0, 40, 41, 42] {
             model
-                .write_dword(1, Bdf::new(bus, 0, 0).unwrap(), 0, 0x1000_8086)
+                .write_dword(1, Bdf::in_segment(1, bus, 0, 0).unwrap(), 0, 0x1000_8086)
                 .unwrap();
         }
         let found = crate::enumerate_range(

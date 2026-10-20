@@ -20,7 +20,10 @@ fn current_irq_descriptors_preserve_flags_and_validate_lengths_checksums() {
             shared: true
         })
     );
-    let small = [0x23, 0, 8, 0x18, 0x79, 0];
+    // ResourceProducer is valid for a link device that supplies the interrupt to PCI children.
+    let producer = [0x89, 6, 0, 8, 1, 20, 0, 0, 0, 0x79, 0];
+    assert_eq!(interrupt(&producer), interrupt(&extended));
+    let small = [0x23, 0, 8, 0x1e, 0x79, 0];
     assert_eq!(
         interrupt(&small).unwrap(),
         Interrupt {
@@ -44,6 +47,7 @@ fn current_irq_descriptors_preserve_flags_and_validate_lengths_checksums() {
         assert!(interrupt(&bad).is_err());
     }
     assert!(interrupt(&[0x22, 3, 0, 0x79, 0]).is_err());
+    assert!(interrupt(&[0x23, 1, 0, 0x09, 0x79, 0]).is_err());
     assert!(interrupt(&[extended.as_slice(), &[1]].concat()).is_err());
 }
 #[test]

@@ -1,8 +1,14 @@
-//! Bounded evaluated ACPI PCI interrupt routing, with link descriptor flags preserved.
-//! This resolves existing routing only: no `_SRS`, hardware writes or route allocation.
+//! Bounded evaluated ACPI PCI interrupt routing and preparatory link-resource selection.
+//! Current routing resolution performs no `_SRS`, hardware writes or route allocation.
 extern crate alloc;
 use crate::aml::{self, Namespace, Path, Value};
 use alloc::vec::Vec;
+
+mod link;
+pub use link::{
+    build_srs_template, link_possible_interrupts, link_srs_template, possible_interrupts,
+    LinkIrqNumber, LinkIrqOption,
+};
 
 /// Fully resolved interrupt electrical characteristics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,7 +72,7 @@ pub fn interrupt(bytes: &[u8]) -> Result<Interrupt, Error> {
                 return Err(Error::Invalid);
             }
             let flags = if len == 3 { data[2] } else { 1 };
-            if flags & !0x39 != 0 {
+            if flags & !0x3f != 0 || (flags & 1 == 0) != (flags & 8 != 0) {
                 return Err(Error::Invalid);
             }
             (
@@ -84,7 +90,7 @@ pub fn interrupt(bytes: &[u8]) -> Result<Interrupt, Error> {
                 return Err(Error::Invalid);
             }
             let data = bytes.get(3..9).ok_or(Error::Invalid)?;
-            if data[0] & !0x1f != 0 || data[0] & 1 == 0 || data[1] != 1 {
+            if data[0] & !0x1f != 0 || data[1] != 1 {
                 return Err(Error::Invalid);
             }
             (

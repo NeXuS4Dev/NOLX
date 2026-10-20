@@ -4,6 +4,15 @@ M9 is **not complete**. Passing the current CI suite proves only the assertions 
 This checklist tracks the remaining integration work against ROADMAP.md, without shrinking
 M9 to the already implemented boot probes. Check items only with executable evidence.
 
+**Working-tree note (2026-10-20):** shared dynamic-vector reclamation was extended to xHCI,
+virtio-net and e1000, and a portable ACPI link-resource candidate helper was added. An e1000
+I/O-APIC failed-remask path now retains and quarantines an unverified vector claim; the targeted
+recovery fixture was extended but has not been built or run in QEMU. Segment-qualified PCI
+identity and native scans of mapped MCFG allocations were also added in the working tree; the
+native nonzero-segment binding gate remains open, especially for segment-zero-only `_PRT`,
+resource repair, and e1000 INTx. None of these changes upgrades any completion or conformance
+status.
+
 ## PCI and driver plumbing
 
 - [x] Select ECAM for driver configuration reads/writes when MCFG mappings are usable;
@@ -16,8 +25,8 @@ M9 to the already implemented boot probes. Check items only with executable evid
       independent virtio-net MSI-X completions; 82540EM does not support MSI.
 - [ ] Discover/reroute PCI interrupts using evaluated ACPI `_PRT`/link devices rather
       than relying on the legacy PCI Interrupt Line value. Bounded PC/Q35 current-route
-      discovery/programming is now verified (checkpoint below); arbitrary link reprogramming,
-      unsupported root/topology/source models and dynamic vector ownership remain open.
+      discovery/programming is now verified (checkpoint below); arbitrary link reprogramming
+      and unsupported root/topology/source models remain open.
 - [x] Assign missing memory32/memory64/I/O BARs and closed type-1 memory/I/O bridge
       windows on the bounded PC/Q35 segment-zero profile, with readback and rollback.
 - [x] Consume evaluated host-bridge `_CRS` producer apertures for bounded PC/Q35 missing
@@ -27,7 +36,10 @@ M9 to the already implemented boot probes. Check items only with executable evid
 - [x] Bind multiple virtio-blk/AHCI/NVMe PCI controllers on segment zero, including
       secondary buses, with per-controller queues, interrupts and independent lifecycle.
 - [x] Multi-adapter native e1000/virtio-net contexts with exact-handle public RX/TX.
-- [ ] Native nonzero-segment binding.
+- [ ] Native nonzero-segment binding. The 2026-10-20 working tree adds segment-qualified
+      `Bdf` identity and routes native probes through every successfully mapped MCFG allocation;
+      this is unbuilt/unverified. Nonzero-segment `_PRT`/e1000 INTx and BAR/bridge resource
+      assignment remain refused or unsupported, so this gate stays open.
 - [x] Persistent system registry; retain native storage/network state past probe return;
       healthy stop/restart/removal with hardware quiescence and exact DMA reclamation.
 - [x] Serialized, reusable, generation-checked MMIO windows with partial-map rollback
@@ -39,13 +51,12 @@ M9 to the already implemented boot probes. Check items only with executable evid
 - [x] Checked modern/transitional virtio-blk partial-start/failed-stop recovery, including
       published-request quarantine, independent durable peer I/O and unchanged-media reboot.
 - [ ] Complete failed-start/failed-stop recovery for remaining native drivers and general
-      interrupt-resource reclamation;
-      all six native driver kinds (xHCI, e1000, virtio-net, virtio-blk, AHCI, NVMe) now have
-      checked failed-start/failed-stop recovery, and the three storage transports now own
-      their interrupt vectors dynamically and release them after a proven stop; the xHCI,
-      virtio-net and e1000 vectors are still statically assigned, the pools are bounded per
-      driver kind rather than shared by all of them, and the PS/2 and input-object paths have
-      no framework recovery contract at all;
+      interrupt-resource reclamation. All six native driver kinds (xHCI, e1000, virtio-net,
+      virtio-blk, AHCI, NVMe) have checked recovery; storage-vector reclamation has prior
+      executable evidence. The 2026-10-20 working tree now routes xHCI, virtio-net and e1000
+      through a shared dynamic allocator, including shared-GSI e1000 references and APIC
+      acknowledgment of unowned managed vectors, but this revision is unbuilt/unverified and
+      this gate stays open. PS/2/input-object paths still have no framework recovery contract;
       remaining segment binding and firmware routing are tracked separately above.
 
 ## Storage integration
@@ -641,7 +652,16 @@ Line or that all operation-region/link evaluation is unwired. It does not comple
 
 - Evaluate the actual root/bridge `_PRT` packages and link `_STA`/`_CRS`, preserving polarity,
   trigger and sharing flags from single current Small IRQ/Extended IRQ descriptors. Direct
-  GSIs retain PCI defaults. No `_PRS` guesses, `_SRS`, general firmware writes or link allocation.
+  GSIs retain PCI defaults. Current route discovery uses no `_PRS` guesses, `_SRS`, general
+  firmware writes or link allocation.
+- A portable helper now parses one simple `_PRS` IRQ descriptor: Small/Extended IRQs, including
+  Small IRQ wake bit 5 and legal mode/polarity combinations, plus Extended IRQ producer/consumer
+  usage. It builds a candidate `_SRS` buffer from `_CRS`, preserving descriptor order/type/length,
+  ignored Small IRQ bits, and recalculating a present checksum.
+  This code is not connected to kernel routing and is uncompiled/untested. The AML interpreter
+  has a read-only `FieldReader`, refuses operation-region writes, and its namespace is temporary;
+  a whitelistable hardware-write provider plus a masked, readback-verified route transaction and
+  `_CRS` re-evaluation are still prerequisites. General link reprogramming remains open.
 - Select the validated `_PIC(Arg0)` Store-to-integer subset **before** root resources and routes;
   Q35 takes the actual APIC table. Unknown/unsupported `_PIC` is a routing refusal, not PIC fallback.
 - Snapshot only verified PIIX/ICH9 root-bus PIRQ bytes; support read-only ByteAccess PCI fields
@@ -1404,3 +1424,46 @@ not SMP-safe against concurrent claims of the same vector beyond the compare-and
 the vectors themselves remain local APIC vectors, not an IOAPIC route. General reclamation,
 nonzero-segment binding, USB/Executive bindings and general device-power/S3 remain open.
 **M9 is not complete.**
+
+
+## Shared dynamic-vector working-tree extension (2026-10-20, unverified)
+
+This is a working-tree implementation update, **not** a new verified checkpoint. The shared
+rules now retain preferred vectors `0x50..0x55` and `0xd0`, with all kinds falling back to the
+common bounded `0x60..0xdf` range while excluding every preferred slot. One kernel owner table
+covers xHCI, virtio-blk, AHCI, NVMe, both virtio-net queues, and e1000 shared-GSI routes. The
+managed domain is `0x50..0xdf`; central APIC dispatch EOIs an unowned vector in that domain
+without calling a driver.
+
+The working tree claims xHCI vectors before message programming and releases them only after
+the existing checked stop/bus-master proof. Virtio-net similarly claims both queue vectors
+before MSI-X setup and releases the pair after checked stop. E1000 now claims one vector per
+GSI route; adapters sharing a GSI share that route with a reference count, and the final
+reference masks/readbacks the I/O APIC entry before returning the vector. If a failed route
+transaction cannot confirm its retry-mask readback (or matching owner release), the claim is
+retained and a per-GSI quarantine refuses later acquisitions instead of leaking a second vector.
+The e1000 recovery fixture injects a failed program readback followed by an unconfirmed
+remask readback, then checks the claim remains owned and a retry makes no duplicate claim; this
+is software readback
+fault injection, not hardware-failure evidence. Recovery assertions, network logs/checks and the
+xHCI interrupt-proof parser were adjusted to test allocated ownership rather than static
+formulas. The latest unverified pass also keeps e1000's source identity routable until both the
+PCI INTx-disable bit and NIC interrupt mask read back, and makes virtio-net retry a partially
+released pair without silently forgetting a vector now owned by an unexpected source.
+
+A separate 2026-10-20 working-tree change adds a segment field to `Bdf`, checks explicit/embedded
+segment agreement in ECAM and `SegmentConfig`, and routes native driver probes through mapped
+MCFG allocations with full-address deduplication. The segment-zero legacy path cannot alias a
+nonzero request; the generic BAR/bridge planner and ACPI INTx routing reject nonzero segments
+until their topology/provider models are segment-aware. Thus the working tree attempts native
+MSI/MSI-X binding for mapped, preassigned nonzero-segment devices, but has no multi-segment QEMU
+fixture and remains unbuilt/unverified. It does not complete general multi-root enumeration or
+resource assignment.
+
+**No Rust build, Rust unit test, or QEMU fixture has run on this revision.** The local shell has
+no `cargo`, `rustc`, or `qemu-system-x86_64`. Python syntax checks, the six xHCI parser tests,
+the 21-check boot-layer validation, 31 layout tests, generated NOLXFS/user-image checks, the
+401-assertion conformance check and `git diff --check` pass; these are not substitutes for the
+missing Rust and hardware evidence. The shared-vector implementation therefore remains an open
+M9 gate, and all unrelated `_PRT`/link reprogramming, PCI root/segment, USB hub/SuperSpeed/hotplug,
+Executive/input-object, remaining AML, power-policy/S3 and final-evidence gates remain open.

@@ -1105,8 +1105,10 @@ require 600+ real interrupts per 604-report workload, plus ring wraps, hotplug, 
 independent controller/restart/recovery routes and rollback after an already delivered startup IRQ.
 Checked stop detaches/masks/disables message delivery before DMA/MMIO release; late vectors ignore
 retired state. Supersedes the earlier polled-only limitation. MSI-X is bounded to validated BAR0
-window tables; vectors remain statically reserved. General USB/Executive bindings, dynamic IRQ
-resource ownership, other-driver failure recovery and the remaining firmware/power gates stay open.
+window tables. The 2026-10-17 tests exercised static vector reservations; a 2026-10-19 working-tree
+change now gives xHCI, virtio-net and e1000 shared dynamic ownership/reclamation, but it is not yet
+built or verified, so the dynamic IRQ-resource gate stays open. General USB/Executive bindings,
+other-driver failure recovery and the remaining firmware/power gates stay open.
 
 
 M9 xHCI transfer-failure checkpoint: exact slot/endpoint/TRB affinity gates report decoding and

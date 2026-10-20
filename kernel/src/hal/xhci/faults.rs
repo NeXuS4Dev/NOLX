@@ -61,7 +61,7 @@ fn owner(info: Info) -> usize {
         .position(|b| {
             b.lock()
                 .bdf
-                .map(|b| u32::from(b.bus) << 16 | u32::from(b.device) << 8 | u32::from(b.function))
+                .map(Bdf::packed_id)
                 == Some(controller)
         })
         .unwrap()
@@ -262,7 +262,7 @@ pub(super) fn step(console: &mut dyn HalConsole) {
         }
         5 if mouse(t, 8) => {
             driver_start::stop(t.dev).unwrap();
-            irq::detached_test(t.dev);
+            irq::detached_test(t.dev, false);
             assert_eq!(dma::live_pages(), 8);
             assert!(t.region.read8(0).is_err());
             driver_start::start(t.dev).unwrap();
@@ -319,9 +319,9 @@ pub(super) fn step(console: &mut dyn HalConsole) {
         }
         10 if pressed(t.reader, 8) => {
             driver_start::stop(t.dev).unwrap();
-            irq::detached_test(t.dev);
+            irq::detached_test(t.dev, false);
             driver_start::stop(t.peer).unwrap();
-            irq::detached_test(t.peer);
+            irq::detached_test(t.peer, false);
             assert_eq!(dma::live_pages(), 0);
             assert_eq!(mmio::live_mappings() + 2, t.mappings);
             terminal(t, 8);
