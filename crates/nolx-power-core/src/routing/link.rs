@@ -157,8 +157,7 @@ pub fn build_srs_template(
                 return Err(Error::Invalid);
             };
             output[base_irq.start + 3] = (base_irq.flags & 1) | extended_irq_flags(selected);
-            output[base_irq.start + 5..base_irq.start + 9]
-                .copy_from_slice(&number.to_le_bytes());
+            output[base_irq.start + 5..base_irq.start + 9].copy_from_slice(&number.to_le_bytes());
             // A candidate derived from a multi-GSI `_PRS` descriptor still carries the
             // unselected GSIs behind the selected one. Drop them and shrink the encoded
             // descriptor so the candidate names exactly one interrupt. The parser has
@@ -166,10 +165,8 @@ pub fn build_srs_template(
             let extra = base_irq.options.len() - 1;
             if extra > 0 {
                 let shrink = extra * 4;
-                let length = u16::from_le_bytes([
-                    output[base_irq.start + 1],
-                    output[base_irq.start + 2],
-                ]);
+                let length =
+                    u16::from_le_bytes([output[base_irq.start + 1], output[base_irq.start + 2]]);
                 let length = usize::from(length) - shrink;
                 let length = u16::try_from(length).map_err(|_| Error::Invalid)?;
                 output[base_irq.start + 1..base_irq.start + 3]
@@ -250,7 +247,7 @@ pub fn select_link_route(
     mut available: impl FnMut(Interrupt) -> bool,
 ) -> Result<LinkRouteSelection, Error> {
     let (status, _) = namespace.device_status(link)?;
-    if !crate::is_usable(status) {
+    if !link_may_be_programmed(status) {
         return Err(Error::Invalid);
     }
     let current = namespace.device_resources(link)?.ok_or(Error::Invalid)?;
@@ -324,7 +321,7 @@ pub fn plan_link_srs(
         return Err(Error::Invalid);
     }
     let (status, _) = namespace.device_status(link)?;
-    if !crate::is_usable(status) || namespace.device_method_arity(link, *b"_SRS")? != Some(1) {
+    if !link_may_be_programmed(status) || namespace.device_method_arity(link, *b"_SRS")? != Some(1) {
         return Err(Error::Invalid);
     }
     namespace
@@ -335,6 +332,20 @@ pub fn plan_link_srs(
             permissions,
         )
         .map_err(Error::from)
+}
+
+/// Whether a link's `_STA` permits selecting or planning an `_SRS` for it.
+///
+/// ACPI reports a disabled PCI interrupt link as present and functioning but not
+/// enabled: SeaBIOS returns 0x9 for a PIRQ link whose steering byte has its disable bit
+/// set, and enabling it is precisely what `_SRS` does. Requiring the enabled bit here
+/// would refuse every link this module exists to repair. A link that is absent or not
+/// functioning can never be steered, whatever its templates claim. Route publication
+/// keeps using the stricter [`crate::is_usable`], which a successfully reprogrammed
+/// link satisfies because the steering write also enables it.
+fn link_may_be_programmed(status: u32) -> bool {
+    let needed = crate::STA_PRESENT | crate::STA_FUNCTIONAL;
+    status & needed == needed
 }
 
 fn mapped_pci_interrupt(

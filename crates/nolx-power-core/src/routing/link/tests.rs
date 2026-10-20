@@ -1,6 +1,6 @@
+use super::super::plan_link_reprogramming;
 use super::alloc::vec;
 use super::alloc::vec::Vec;
-use super::super::plan_link_reprogramming;
 use super::{
     build_srs_template, link_possible_interrupts, link_srs_template, plan_link_srs,
     possible_interrupts, select_link_route, Error, LinkIrqNumber, LinkIrqOption, Namespace, Path,
@@ -640,7 +640,9 @@ fn link_selector_repairs_a_disabled_link_instead_of_refusing_it() {
         template(vec![0x23, 0, 0, 0x18], true),
         template(Vec::new(), true),
     ] {
-        let aml = link_aml(&possible, &current, None);
+        // SeaBIOS reports a disabled PIRQ link as _STA 0x9: present and functioning,
+        // but not enabled until _SRS steers it. That status must not refuse selection.
+        let aml = link_aml(&possible, &current, Some(9));
         let mut namespace = Namespace::new();
         namespace.load(&aml).unwrap();
         let link = Path::parse("\\LNK0").unwrap();
@@ -709,8 +711,8 @@ fn link_preflight_retains_available_current_routes_without_srs() {
     let mut namespace = Namespace::new();
     namespace.load(&aml).unwrap();
     let root = Path::parse("\\PCI0").unwrap();
-    let plan = plan_link_reprogramming(&namespace, &root, |irq| Some(u32::from(irq)), |_| true)
-        .unwrap();
+    let plan =
+        plan_link_reprogramming(&namespace, &root, |irq| Some(u32::from(irq)), |_| true).unwrap();
     // Two rows name the same link; it is still one selection.
     assert_eq!(plan.evaluated, 1);
     assert!(plan.reprogramming.is_empty());
@@ -732,13 +734,19 @@ fn link_preflight_reprograms_only_links_whose_current_route_is_unavailable() {
     let root = Path::parse("\\PCI0").unwrap();
     // The platform cannot program GSI3. LNK0 moves to GSI5; LNK1 already sits on GSI5
     // with identical electrical flags, so sharing it needs no second reprogramming.
-    let plan = plan_link_reprogramming(&namespace, &root, |irq| Some(u32::from(irq)), |irq| {
-        irq.gsi != 3
-    })
+    let plan = plan_link_reprogramming(
+        &namespace,
+        &root,
+        |irq| Some(u32::from(irq)),
+        |irq| irq.gsi != 3,
+    )
     .unwrap();
     assert_eq!(plan.evaluated, 2);
     assert_eq!(plan.reprogramming.len(), 1);
-    assert_eq!(plan.reprogramming[0].link, Path::parse("\\PCI0.LNK0").unwrap());
+    assert_eq!(
+        plan.reprogramming[0].link,
+        Path::parse("\\PCI0.LNK0").unwrap()
+    );
     assert_eq!(plan.reprogramming[0].selection.interrupt.gsi, 5);
     assert!(plan.reprogramming[0].selection.srs_argument.is_some());
 }
@@ -755,8 +763,7 @@ fn link_preflight_never_shares_a_gsi_across_conflicting_electrical_flags() {
     let aml = root_with_prt(&[direct_row(4, 5), link_row(2, b"LNK0")], &[link]);
     let mut namespace = Namespace::new();
     namespace.load(&aml).unwrap();
-    let plan =
-        plan_link_reprogramming(&namespace, &root, |_| None, |irq| irq.gsi != 3).unwrap();
+    let plan = plan_link_reprogramming(&namespace, &root, |_| None, |irq| irq.gsi != 3).unwrap();
     assert_eq!(plan.reprogramming.len(), 1);
     assert_eq!(plan.reprogramming[0].selection.interrupt.gsi, 5);
 
@@ -783,9 +790,26 @@ fn link_preflight_refuses_a_link_it_cannot_reprogram() {
     namespace.load(&aml).unwrap();
     let root = Path::parse("\\PCI0").unwrap();
     assert_eq!(
-        plan_link_reprogramming(&namespace, &root, |irq| Some(u32::from(irq)), |irq| {
-            irq.gsi != 3
-        }),
+        plan_link_reprogramming(
+            &namespace,
+            &root,
+            |irq| Some(u32::from(irq)),
+            |irq| { irq.gsi != 3 }
+        ),
+        Err(Error::Invalid)
+    );
+}
+
+#[test]
+fn link_selector_refuses_a_present_but_not_functioning_link() {
+    let possible = template(vec![0x23, 0x28, 0, 0x18], true);
+    let current = template(vec![0x23, 0, 0, 0x18], true);
+    let aml = link_aml(&possible, &current, Some(1));
+    let mut namespace = Namespace::new();
+    namespace.load(&aml).unwrap();
+    let link = Path::parse("\\LNK0").unwrap();
+    assert_eq!(
+        select_link_route(&namespace, &link, |irq| Some(u32::from(irq)), |_| true),
         Err(Error::Invalid)
     );
 }

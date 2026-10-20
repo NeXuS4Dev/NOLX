@@ -189,6 +189,16 @@ enum SrsError {
     Refused(&'static str),
     Transaction(aml::PciFieldWriteTransactionError<(), nolx_power_core::routing::Error>),
 }
+impl core::fmt::Display for SrsError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Route(error) => write!(formatter, "route selection or planning: {error:?}"),
+            Self::Permission(error) => write!(formatter, "write permission: {error:?}"),
+            Self::Refused(reason) => write!(formatter, "{reason}"),
+            Self::Transaction(error) => write!(formatter, "write transaction: {error:?}"),
+        }
+    }
+}
 /// Map an ISA IRQ from a link `_PRS` to its GSI through the MADT source overrides.
 ///
 /// Current-route decoding has always treated the descriptor number itself as the GSI, so
@@ -229,8 +239,7 @@ fn apply_link_srs(
     let mut permissions = alloc::vec::Vec::with_capacity(count);
     for field in &fields[..count] {
         permissions.push(
-            PciFieldWritePermission::from_values(*field, &[value])
-                .map_err(SrsError::Permission)?,
+            PciFieldWritePermission::from_values(*field, &[value]).map_err(SrsError::Permission)?,
         );
     }
     let effects = nolx_power_core::routing::plan_link_srs(
@@ -434,7 +443,7 @@ pub fn evaluate(
                 revoke();
                 let _ = writeln!(
                     console,
-                    "pci: ACPI INTx evaluation refused: link _SRS {error:?}"
+                    "pci: ACPI INTx evaluation refused: link _SRS: {error}"
                 );
                 return;
             }

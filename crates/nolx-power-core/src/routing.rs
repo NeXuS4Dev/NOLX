@@ -226,10 +226,7 @@ pub fn entries(namespace: &Namespace<'_>, value: Value) -> Result<Vec<Entry>, Er
     Ok(entries)
 }
 /// Every `_PRT` package under `root`, with each scope's root-relative bridge ADRs.
-fn prt_packages(
-    namespace: &Namespace<'_>,
-    root: &Path,
-) -> Result<Vec<(Vec<u32>, Value)>, Error> {
+fn prt_packages(namespace: &Namespace<'_>, root: &Path) -> Result<Vec<(Vec<u32>, Value)>, Error> {
     let mut packages = Vec::new();
     for path in namespace.devices() {
         let Some(value) = namespace.device_value(path, *b"_PRT")? else {
