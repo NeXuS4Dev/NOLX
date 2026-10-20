@@ -7,8 +7,7 @@ mod recovery;
 use super::{
     dma::Dma,
     driver_start::{self, Log},
-    irq_vectors,
-    msix,
+    irq_vectors, msix,
     pci::ConfigAccess,
 };
 use crate::{
