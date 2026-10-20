@@ -43,8 +43,7 @@ static PCI_DESTINATION: AtomicU32 = AtomicU32::new(0);
 static PCI_PROGRAMMED: [AtomicU32; PCI_GSIS] = [const { AtomicU32::new(0) }; PCI_GSIS];
 /// A vector retained after a failed route transaction whose remask or owner release was not
 /// confirmed; it prevents another acquisition from claiming a second vector for this GSI.
-static PCI_QUARANTINED_VECTOR: [AtomicU32; PCI_GSIS] =
-    [const { AtomicU32::new(0) }; PCI_GSIS];
+static PCI_QUARANTINED_VECTOR: [AtomicU32; PCI_GSIS] = [const { AtomicU32::new(0) }; PCI_GSIS];
 /// Number of live adapter sources sharing each programmed route.
 static PCI_REFERENCES: [AtomicU32; PCI_GSIS] = [const { AtomicU32::new(0) }; PCI_GSIS];
 /// Serializes route-vector ownership, shared references and I/O APIC programming.
