@@ -321,7 +321,8 @@ pub fn plan_link_srs(
         return Err(Error::Invalid);
     }
     let (status, _) = namespace.device_status(link)?;
-    if !link_may_be_programmed(status) || namespace.device_method_arity(link, *b"_SRS")? != Some(1) {
+    if !link_may_be_programmed(status) || namespace.device_method_arity(link, *b"_SRS")? != Some(1)
+    {
         return Err(Error::Invalid);
     }
     namespace

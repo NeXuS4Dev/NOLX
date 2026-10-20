@@ -716,6 +716,8 @@ fn link_preflight_retains_available_current_routes_without_srs() {
     // Two rows name the same link; it is still one selection.
     assert_eq!(plan.evaluated, 1);
     assert!(plan.reprogramming.is_empty());
+    assert_eq!(plan.retained.len(), 1);
+    assert_eq!(plan.retained[0].1.gsi, 3);
 }
 
 #[test]
@@ -749,6 +751,18 @@ fn link_preflight_reprograms_only_links_whose_current_route_is_unavailable() {
     );
     assert_eq!(plan.reprogramming[0].selection.interrupt.gsi, 5);
     assert!(plan.reprogramming[0].selection.srs_argument.is_some());
+    assert_eq!(
+        plan.retained,
+        vec![(
+            Path::parse("\\PCI0.LNK1").unwrap(),
+            super::super::Interrupt {
+                gsi: 5,
+                active_low: true,
+                level: true,
+                shared: true,
+            },
+        )]
+    );
 }
 
 #[test]

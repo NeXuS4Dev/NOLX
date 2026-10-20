@@ -285,6 +285,11 @@ pub struct LinkReprogramming {
 pub struct LinkPlan {
     /// Distinct links referenced by the validated tables.
     pub evaluated: usize,
+    /// Links whose current route the platform can program as it stands, in
+    /// first-reference order, with the interrupt that route resolves to. Retained and
+    /// reprogrammed links together account for every evaluated link, which is what makes
+    /// a boot log able to show that no link was silently skipped by the preflight.
+    pub retained: Vec<(Path, Interrupt)>,
     /// Links that need `_SRS`, in first-reference order. Empty means every current route
     /// can be retained and publication needs no firmware writes.
     pub reprogramming: Vec<LinkReprogramming>,
@@ -353,6 +358,7 @@ pub fn plan_link_reprogramming(
             }
         }
     }
+    let mut retained = Vec::new();
     let mut reprogramming = Vec::new();
     for link in &links {
         let selection = select_link_route(namespace, link, &isa_to_gsi, |interrupt| {
@@ -375,10 +381,13 @@ pub fn plan_link_reprogramming(
                 link: link.clone(),
                 selection,
             });
+        } else {
+            retained.push((link.clone(), selection.interrupt));
         }
     }
     Ok(LinkPlan {
         evaluated: links.len(),
+        retained,
         reprogramming,
     })
 }

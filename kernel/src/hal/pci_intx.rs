@@ -438,6 +438,16 @@ pub fn evaluate(
             plan.evaluated,
             plan.reprogramming.len()
         );
+        #[cfg(feature = "hal-pci-link-srs-test")]
+        {
+            for (link, interrupt) in &plan.retained {
+                let _ = writeln!(
+                    console,
+                    "pci: link test: retained {} at GSI {}",
+                    link, interrupt.gsi
+                );
+            }
+        }
         for item in &plan.reprogramming {
             if let Err(error) = apply_link_srs(namespace, snapshot, item, console) {
                 revoke();
