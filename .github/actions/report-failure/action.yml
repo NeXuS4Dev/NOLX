@@ -46,9 +46,10 @@ runs:
             {
               grep -E 'RUN:|Traceback|File .*line |^AssertionError|^error:|^PANIC|^FAILED' "$LOG" | tail -12 | cut -c1-500 || true
               echo '--- captured log tail ---'
-              tail -n 8 "$LOG" | cut -c1-500
+              # Include enough output to show multiple rustfmt hunks in push-only runs.
+              tail -c 12000 "$LOG" | cut -c1-500
             } > "$SUMMARY"
-            python3 -c 'import pathlib,sys; t=pathlib.Path(sys.argv[1]).read_text(errors="replace")[:3500]; print("::error title=Captured failure summary::"+t.replace("%","%25").replace("\r","%0D").replace("\n","%0A"))' "$SUMMARY"
+            python3 -c 'import pathlib,sys; t=pathlib.Path(sys.argv[1]).read_text(errors="replace")[:12000]; print("::error title=Captured failure summary::"+t.replace("%","%25").replace("\r","%0D").replace("\n","%0A"))' "$SUMMARY"
             rm -f "$SUMMARY"
           fi
         fi
