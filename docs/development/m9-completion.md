@@ -4,15 +4,16 @@ M9 is **not complete**. Passing the current CI suite proves only the assertions 
 This checklist tracks the remaining integration work against ROADMAP.md, without shrinking
 M9 to the already implemented boot probes. Check items only with executable evidence.
 
-**Verification update (2026-10-20):** Exact-revision CI run [39406985079](https://github.com/NeXuS4Dev/NOLX/actions/runs/39406985079)
-on `ab2a8d05e5ee831dc934fd106f3a1a4757685e7a` passed all 19 jobs, including the bounded `_SRS`
-effects-planner host tests, kernel build, formatting, Clippy, unsafe audit, image/layout and
-conformance checks. The planner software-evaluates selected AML into caller-authorized PCI
-field-write intents; it does not apply those writes to hardware, perform a hardware-backed `_SRS`
-transaction, re-evaluate `_CRS`, or publish a route. The segment-qualified PCI host tests also ran;
-no nonzero-segment QEMU/native-binding fixture ran, so native binding remains unverified. This is
-host/QEMU CI evidence, not physical-hardware verification. General `_PRT`/link `_SRS` programming
-and the broader open M9 gates below remain incomplete.
+**Verification update (2026-10-20):** Exact-revision CI run [39420993249](https://github.com/NeXuS4Dev/NOLX/actions/runs/39420993249)
+on `6749beaaff10e0014aae5767ff702d96be1e4131` passed all 19 jobs, including host tests for the
+bounded `_SRS` effects planner, planning read-set, and portable byte-write transaction, plus the
+kernel build, formatting, Clippy, unsafe audit, image/layout and conformance checks. The helper
+validates authorized writes, snapshots, byte readback, rollback, and a caller postcondition, but no
+production kernel backend applies writes to hardware; live `_CRS` re-evaluation and route
+publication remain unimplemented. The segment-qualified PCI host tests also ran; no nonzero-segment
+QEMU/native-binding fixture ran, so native binding remains unverified. This is host/QEMU CI
+evidence, not physical-hardware verification. General `_PRT`/link `_SRS` programming and the
+broader open M9 gates below remain incomplete.
 
 ## PCI and driver plumbing
 
@@ -667,16 +668,16 @@ Line or that all operation-region/link evaluation is unwired. It does not comple
   ignored Small IRQ bits, and recalculating a present checksum. `select_link_route` prefers an
   available current `_CRS` route, otherwise chooses an available level/shared `_PRS` option after
   caller-supplied ISA-to-GSI mapping, checks that `_SRS` has one argument when a reprogramming
-  candidate is needed, and returns the candidate buffer. These selector and effects-planner host tests passed in exact-revision CI [39406985079](https://github.com/NeXuS4Dev/NOLX/actions/runs/39406985079).
+  candidate is needed, and returns the candidate buffer. These selector, effects-planner, and portable transaction host tests passed in exact-revision CI [39420993249](https://github.com/NeXuS4Dev/NOLX/actions/runs/39420993249).
   `plan_link_srs` software-evaluates the selected `_SRS` body in a bounded AML frame, including
   DWord buffer fields sourced from the candidate `Arg0`, AML locals, or method-private named
   buffers, and returns an ordered journal only for exact, caller-permitted PCI-config byte fields
   (ByteAcc, Preserve, aligned 8-bit fields on the bounded segment-zero/root-bus-zero profile).
   Other field shapes and unpermitted values are refused; failed evaluation returns no partial
   journal. `MethodEffects` also retains the unique PCI field read-set used during planning.
-  `apply_pci_field_writes` now validates the whole permission set and read snapshot before I/O,
-  applies exact byte writes with readback, runs a caller postcondition, and reverses/validates
-  attempted writes if any step fails. Ordinary `Namespace::evaluate` remains read-only. This is
+  `apply_pci_field_writes` validates the whole permission set before hardware access, checks the
+  planning read-set before its first write, applies exact byte writes with readback, runs a caller
+  postcondition, and reverses/validates attempted writes if any step fails. Ordinary `Namespace::evaluate` remains read-only. This is
   still only a portable helper: no kernel backend applies the journal, re-evaluates live `_CRS`,
   or publishes the resulting route. General link reprogramming stays open.
 - Select the validated `_PIC(Arg0)` Store-to-integer subset **before** root resources and routes;
