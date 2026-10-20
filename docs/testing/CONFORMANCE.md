@@ -11,13 +11,13 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | Status | Assertions | Cumulative verified at or above status |
 |---|---|---|
 | `unimplemented` | 0 | 100.0% |
-| `implemented` | 7 | 100.0% |
-| `tested-T1` | 274 | 97.8% |
-| `pending-T2` | 2 | — |
-| `tested-T2` | 118 | 29.4% |
+| `implemented` | 6 | 100.0% |
+| `tested-T1` | 274 | 98.3% |
+| `pending-T2` | 1 | — |
+| `tested-T2` | 120 | 29.9% |
 | `tested-T3` | 0 | 0.0% |
 
-**392 of 401 assertions have a passing automated test; 2 are awaiting T2 results.**
+**394 of 401 assertions have a passing automated test; 1 are awaiting T2 results.**
 
 ## By area
 
@@ -38,7 +38,7 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | nvme | 15 | 15 | 10 | 0 | 5 | 0 |
 | nxfs | 15 | 15 | 14 | 0 | 1 | 0 |
 | obj | 14 | 14 | 9 | 0 | 5 | 0 |
-| pci | 32 | 32 | 21 | 2 | 7 | 0 |
+| pci | 32 | 32 | 21 | 1 | 9 | 0 |
 | power | 21 | 21 | 14 | 0 | 7 | 0 |
 | ps2 | 10 | 10 | 9 | 0 | 1 | 0 |
 | usb | 31 | 31 | 15 | 0 | 16 | 0 |
@@ -48,7 +48,7 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 
 None.
 
-## Implemented but untested (7)
+## Implemented but untested (6)
 
 | ID | Specification reference |
 |---|---|
@@ -57,15 +57,13 @@ None.
 | HAL-019 | APIC arithmetic: x2APIC MSRs, compressed TPR priority classes, timer divisors, and HPET-based counter calibration are checked |
 | HAL-020 | HPET clocksource: 32-bit MMIO reads and wrap extension produce monotonic nanoseconds |
 | HAL-021 | I/O APIC routes: GSI windows and ISA overrides are validated, redirections start masked, and NMI sources use MADT polarity/trigger flags |
-| PCI-029 | NOLX M9 Native interrupt-vector ownership: each native source takes its reserved preferred vector when free, otherwise claims the lowest free vector from one global bounded fallback pool; no two live owners share a vector, and a checked stop releases only the source's vector (an e1000 route is owned once per GSI) |
 | PCI-032 | NOLX M9 Segment-qualified PCI identity: equal bus/device/function tuples remain distinct across segments; ECAM and segment-zero-only routing/resource APIs reject mismatches or mixed-segment input; multiple declared root ranges scan each bus and refused bridge once |
 
-## Pending T2 verification (2)
+## Pending T2 verification (1)
 
 | ID | Specification reference | Configured test |
 |---|---|---|
-| PCI-030 | NOLX M9 Reclaimed interrupt vectors reach no retired controller: failed sources retain ownership, checked stops release xHCI/virtio-net vectors or the final e1000 GSI reference, unowned managed vectors reach no driver, and restart reacquires ownership | Updated recovery assertions in `kernel/src/hal/xhci`, `kernel/src/hal/virtio_net/recovery.rs` and `kernel/src/hal/e1000/recovery.rs`; scripts `check-xhci-lifecycle.py`, `check-virtio-net-recovery.py` and `check-e1000-recovery.py`; no Rust build or QEMU run has completed on this revision |
-| PCI-031 | NOLX M9 An exhausted vector pool is refused: with every candidate of a kind occupied, a driver refuses to start without sharing a vector, mapping or ownership leak and can start again after release | Existing storage exhaustion fixtures are `scripts/check-ahci-nvme-recovery.py` and `scripts/check-virtio-blk-recovery.py`; the changed global-pool rules have not been rebuilt or rerun, and xHCI/network exhaustion fixtures remain to be added |
+| PCI-031 | NOLX M9 An exhausted vector pool is refused: with every candidate of a kind occupied, a driver refuses to start without sharing a vector, mapping or ownership leak and can start again after release | The eight shared-rule host tests, including all-kind exhaustion, passed in the host-test job of CI [39391895780](https://github.com/NeXuS4Dev/NOLX/actions/runs/39391895780); existing storage exhaustion fixtures (`scripts/check-ahci-nvme-recovery.py`, `scripts/check-virtio-blk-recovery.py`) also ran there. End-to-end exhaustion fixtures for xHCI and network sources remain to be added; keep the broader driver refusal/reacquisition assertion pending |
 
 ## All assertions
 
@@ -362,11 +360,11 @@ None.
 | PCI-025 | pci | NOLX M9 Disjoint apertures: first-fit pools validate multiple ranges, reject overlapping ownership and never allocate across gaps or reservations | `tested-T1` | nolx-pci-core resources::tests::disjoint_firmware_apertures_never_allocate_across_holes_or_double_own_overlap and resources::tests::reservations_split_firmware_windows_without_joining_separate_ranges; CI [39026163686](https://github.com/NeXuS4Dev/NOLX/actions/runs/39026163686) on `7d58998` passed all sixteen jobs (initial twelve AML fixtures); added catalog-capacity fixture and malformed-HID assertion also passed locally, subsequent revision CI pending |
 | PCI-026 | pci | NOLX M9 Native evaluated root allocation: missing BARs and nested bridge windows use actual root producer apertures with all loader-map regions excluded; bad/ambiguous/unsupported advertised ACPI cannot downgrade to board fallback; eight real multi-device resource fixtures and thirteen AML/refusal fixtures preserve hardware I/O and heap/DMA ownership | `tested-T2` | scripts/check-pci-resources.py and scripts/check-aml.py; local PC/Q35 checks passed; bounded chipset/direct-map/I/O policy remains, not general PCI routing or topology; CI [39026163686](https://github.com/NeXuS4Dev/NOLX/actions/runs/39026163686) on `7d58998` passed all sixteen jobs (initial twelve AML fixtures); added catalog-capacity fixture and malformed-HID assertion also passed locally, subsequent revision CI pending |
 | PCI-027 | pci | NOLX M9 Firmware scope mapping and INTx swizzle: numbered bridge ADR chains and each child slot map pins to exact/wildcard rows; ambiguous parents/rows, incomplete inventories and missing rows in described buses are refused, with no Interrupt Line read or config writes | `tested-T1` | nolx-pci-core routing::tests; five local Rust 1.88 tests passed |
-| PCI-028 | pci | NOLX M9 Native evaluated current INTx: actual PIC/APIC tables and current links drive readback-verified reserved-safe GSI programming; poisoned-line direct/shared/bridged/nested PC/Q35 hardware I/O succeeds, while advertised malformed/unmapped/unsupported firmware never downgrades to line routing | `tested-T2` | `scripts/check-network-multi.py --intx-routing-only` with `hal-driver-net-multi-test,hal-pci-intx-poison-test`; fourteen local fixtures passed; eight combined ten-device resource fixtures also passed with poisoning; bounded segment-zero GSI3..23 policy and no link allocation. Those runs exercised the prior vector wiring; current dynamic vector/refcount work is tracked by PCI-029/030 and remains unverified |
-| PCI-029 | pci | NOLX M9 Native interrupt-vector ownership: each native source takes its reserved preferred vector when free, otherwise claims the lowest free vector from one global bounded fallback pool; no two live owners share a vector, and a checked stop releases only the source's vector (an e1000 route is owned once per GSI) | `implemented` | `crates/nolx-hal-core/src/irq_vectors.rs` defines the shared `0x60..=0xdf` fallback and reserved preferred slots; eight host tests are present but have not run on this working-tree revision because Rust tooling is unavailable; `kernel/src/hal/irq_vectors.rs` owns the atomic table |
-| PCI-030 | pci | NOLX M9 Reclaimed interrupt vectors reach no retired controller: failed sources retain ownership, checked stops release xHCI/virtio-net vectors or the final e1000 GSI reference, unowned managed vectors reach no driver, and restart reacquires ownership | `pending-T2` | Updated recovery assertions in `kernel/src/hal/xhci`, `kernel/src/hal/virtio_net/recovery.rs` and `kernel/src/hal/e1000/recovery.rs`; scripts `check-xhci-lifecycle.py`, `check-virtio-net-recovery.py` and `check-e1000-recovery.py`; no Rust build or QEMU run has completed on this revision |
-| PCI-031 | pci | NOLX M9 An exhausted vector pool is refused: with every candidate of a kind occupied, a driver refuses to start without sharing a vector, mapping or ownership leak and can start again after release | `pending-T2` | Existing storage exhaustion fixtures are `scripts/check-ahci-nvme-recovery.py` and `scripts/check-virtio-blk-recovery.py`; the changed global-pool rules have not been rebuilt or rerun, and xHCI/network exhaustion fixtures remain to be added |
-| PCI-032 | pci | NOLX M9 Segment-qualified PCI identity: equal bus/device/function tuples remain distinct across segments; ECAM and segment-zero-only routing/resource APIs reject mismatches or mixed-segment input; multiple declared root ranges scan each bus and refused bridge once | `implemented` | `nolx-pci-core` adds `Bdf::in_segment`, `Bdf::packed_id`, `enumerate_ranges`, mismatch/resource/routing tests; kernel `pci::enumerate_native` groups mapped MCFG allocations by segment and retains the native nonzero-segment binding gate open. Rust tests and a nonzero-segment native fixture have not run on this working tree. |
+| PCI-028 | pci | NOLX M9 Native evaluated current INTx: actual PIC/APIC tables and current links drive readback-verified reserved-safe GSI programming; poisoned-line direct/shared/bridged/nested PC/Q35 hardware I/O succeeds, while advertised malformed/unmapped/unsupported firmware never downgrades to line routing | `tested-T2` | `scripts/check-network-multi.py --intx-routing-only` with `hal-driver-net-multi-test,hal-pci-intx-poison-test`; fourteen local fixtures passed; eight combined ten-device resource fixtures also passed with poisoning; bounded segment-zero GSI3..23 policy and no link allocation. The original poisoned-line fixtures cover current-route programming; shared dynamic vector/refcount behavior is separately verified by PCI-029/030 in CI [39391895780](https://github.com/NeXuS4Dev/NOLX/actions/runs/39391895780) |
+| PCI-029 | pci | NOLX M9 Native interrupt-vector ownership: each native source takes its reserved preferred vector when free, otherwise claims the lowest free vector from one global bounded fallback pool; no two live owners share a vector, and a checked stop releases only the source's vector (an e1000 route is owned once per GSI) | `tested-T2` | `crates/nolx-hal-core/src/irq_vectors.rs` host tests and kernel atomic ownership table; CI [39391895780](https://github.com/NeXuS4Dev/NOLX/actions/runs/39391895780) passed host tests plus QEMU xHCI two-controller IRQ lifecycle, multi-adapter network and shared-INTx tests; all vectors checked in `0x50..=0xdf` |
+| PCI-030 | pci | NOLX M9 Reclaimed interrupt vectors reach no retired controller: failed sources retain ownership, checked stops release xHCI/virtio-net vectors or the final e1000 GSI reference, unowned managed vectors reach no driver, and restart reacquires ownership | `tested-T2` | CI [39391895780](https://github.com/NeXuS4Dev/NOLX/actions/runs/39391895780): `Native USB HID interrupts, lifecycle and DMA safety` exercised xHCI stop/restart and recovery; `Multi-adapter network wire identity and lifecycle` exercised e1000 last-reference release/quarantine and virtio-net MSI-X recovery, with captured peer traffic |
+| PCI-031 | pci | NOLX M9 An exhausted vector pool is refused: with every candidate of a kind occupied, a driver refuses to start without sharing a vector, mapping or ownership leak and can start again after release | `pending-T2` | The eight shared-rule host tests, including all-kind exhaustion, passed in the host-test job of CI [39391895780](https://github.com/NeXuS4Dev/NOLX/actions/runs/39391895780); existing storage exhaustion fixtures (`scripts/check-ahci-nvme-recovery.py`, `scripts/check-virtio-blk-recovery.py`) also ran there. End-to-end exhaustion fixtures for xHCI and network sources remain to be added; keep the broader driver refusal/reacquisition assertion pending |
+| PCI-032 | pci | NOLX M9 Segment-qualified PCI identity: equal bus/device/function tuples remain distinct across segments; ECAM and segment-zero-only routing/resource APIs reject mismatches or mixed-segment input; multiple declared root ranges scan each bus and refused bridge once | `implemented` | `nolx-pci-core` adds `Bdf::in_segment`, `Bdf::packed_id`, `enumerate_ranges`, mismatch/resource/routing tests; kernel `pci::enumerate_native` groups mapped MCFG allocations by segment. Host tests ran in CI [39391895780](https://github.com/NeXuS4Dev/NOLX/actions/runs/39391895780), but no multi-segment QEMU/native fixture or end-to-end nonzero-segment binding test ran; native binding remains unverified. |
 | PN-001 | vfs | XBD 4.12 Pathname Resolution: a pathname beginning with a slash resolves against the root | `tested-T1` | crates/nolx-vfs path::tests::leading_slash_ignores_the_start_node |
 | PN-002 | vfs | XBD 4.12 Pathname Resolution: the empty pathname is invalid | `tested-T1` | crates/nolx-vfs path::tests::empty_path_is_enoent |
 | PN-003 | vfs | XBD 4.12 Pathname Resolution: the last component may be empty, and then refers to the directory itself | `tested-T1` | crates/nolx-vfs path::tests::trailing_slash_requires_a_directory |

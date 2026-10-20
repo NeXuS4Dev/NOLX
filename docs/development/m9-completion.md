@@ -4,14 +4,14 @@ M9 is **not complete**. Passing the current CI suite proves only the assertions 
 This checklist tracks the remaining integration work against ROADMAP.md, without shrinking
 M9 to the already implemented boot probes. Check items only with executable evidence.
 
-**Working-tree note (2026-10-20):** shared dynamic-vector reclamation was extended to xHCI,
-virtio-net and e1000, and a portable ACPI link-resource candidate helper was added. An e1000
-I/O-APIC failed-remask path now retains and quarantines an unverified vector claim; the targeted
-recovery fixture was extended but has not been built or run in QEMU. Segment-qualified PCI
-identity and native scans of mapped MCFG allocations were also added in the working tree; the
-native nonzero-segment binding gate remains open, especially for segment-zero-only `_PRT`,
-resource repair, and e1000 INTx. None of these changes upgrades any completion or conformance
-status.
+**Verification update (2026-10-20):** CI run [39391895780](https://github.com/NeXuS4Dev/NOLX/actions/runs/39391895780)
+on `82b414c` passed all 19 jobs. It compiled the shared dynamic-vector changes and exercised
+e1000 shared-INTx remask quarantine, virtio-net MSI-X recovery, xHCI IRQ/lifecycle recovery,
+host tests, the kernel build, formatting, Clippy, unsafe audit, image/layout and conformance
+checks. The segment-qualified PCI host tests also ran in the host-test job. No nonzero-segment
+QEMU/native-binding fixture ran, so native nonzero-segment binding remains unverified. This is
+host/QEMU CI evidence, not physical-hardware verification. General `_PRT`/link `_SRS`
+programming and the broader open M9 gates below remain incomplete.
 
 ## PCI and driver plumbing
 
@@ -36,10 +36,12 @@ status.
 - [x] Bind multiple virtio-blk/AHCI/NVMe PCI controllers on segment zero, including
       secondary buses, with per-controller queues, interrupts and independent lifecycle.
 - [x] Multi-adapter native e1000/virtio-net contexts with exact-handle public RX/TX.
-- [ ] Native nonzero-segment binding. The 2026-10-20 working tree adds segment-qualified
-      `Bdf` identity and routes native probes through every successfully mapped MCFG allocation;
-      this is unbuilt/unverified. Nonzero-segment `_PRT`/e1000 INTx and BAR/bridge resource
-      assignment remain refused or unsupported, so this gate stays open.
+- [ ] Native nonzero-segment binding. The segment-qualified `Bdf` identity and native scan
+      grouping for successfully mapped MCFG allocations compile, and the host tests pass in
+      CI run [39391895780](https://github.com/NeXuS4Dev/NOLX/actions/runs/39391895780). There is
+      still no multi-segment QEMU/native fixture or end-to-end nonzero-segment binding evidence.
+      Nonzero-segment `_PRT`/e1000 INTx and BAR/bridge resource assignment remain refused or
+      unsupported, so this gate stays open.
 - [x] Persistent system registry; retain native storage/network state past probe return;
       healthy stop/restart/removal with hardware quiescence and exact DMA reclamation.
 - [x] Serialized, reusable, generation-checked MMIO windows with partial-map rollback
@@ -52,12 +54,13 @@ status.
       published-request quarantine, independent durable peer I/O and unchanged-media reboot.
 - [ ] Complete failed-start/failed-stop recovery for remaining native drivers and general
       interrupt-resource reclamation. All six native driver kinds (xHCI, e1000, virtio-net,
-      virtio-blk, AHCI, NVMe) have checked recovery; storage-vector reclamation has prior
-      executable evidence. The 2026-10-20 working tree now routes xHCI, virtio-net and e1000
-      through a shared dynamic allocator, including shared-GSI e1000 references and APIC
-      acknowledgment of unowned managed vectors, but this revision is unbuilt/unverified and
-      this gate stays open. PS/2/input-object paths still have no framework recovery contract;
-      remaining segment binding and firmware routing are tracked separately above.
+      virtio-blk, AHCI, NVMe) have checked recovery; the shared dynamic allocator now covers
+      xHCI, virtio-net and e1000 as well as storage, including shared-GSI e1000 references and
+      APIC acknowledgment of unowned managed vectors. CI run [39391895780](https://github.com/NeXuS4Dev/NOLX/actions/runs/39391895780)
+      passed the changed recovery/build checks. This bounded checkpoint does not close general
+      interrupt-resource reclamation or every exhaustion case. PS/2/input-object paths still
+      have no framework recovery contract; remaining segment binding and firmware routing are
+      tracked separately above.
 
 ## Storage integration
 
@@ -121,10 +124,13 @@ status.
 
 ## Final verification
 
-- [ ] Host tests and negative/malformed-input tests for new portable contracts.
-- [ ] Kernel build, formatting, Clippy, unsafe audit, image/layout/conformance checks.
-- [ ] Dedicated boot tests for each new hardware path, including absent-device fallbacks.
-- [ ] Separate virtio/AHCI/NVMe disk boots with persistent file checksums.
+- [x] Host tests and negative/malformed-input tests for new portable contracts (CI run
+      [39391895780](https://github.com/NeXuS4Dev/NOLX/actions/runs/39391895780)).
+- [x] Kernel build, formatting, Clippy, unsafe audit, image/layout/conformance checks (same
+      19-job CI run).
+- [ ] Dedicated boot tests for each new hardware path, including absent-device fallbacks;
+      nonzero-segment binding and some allocator-exhaustion cases still lack fixtures.
+- [x] Separate virtio/AHCI/NVMe disk boots with persistent file checksums (same CI run).
 - [ ] Assertion database, README and roadmap agree on the final state and cite CI evidence.
 - [ ] All checks on the final revision pass. Only then change M9 to **done**.
 
@@ -1426,44 +1432,50 @@ nonzero-segment binding, USB/Executive bindings and general device-power/S3 rema
 **M9 is not complete.**
 
 
-## Shared dynamic-vector working-tree extension (2026-10-20, unverified)
+## Shared dynamic-vector verification checkpoint (2026-10-20)
 
-This is a working-tree implementation update, **not** a new verified checkpoint. The shared
-rules now retain preferred vectors `0x50..0x55` and `0xd0`, with all kinds falling back to the
-common bounded `0x60..0xdf` range while excluding every preferred slot. One kernel owner table
-covers xHCI, virtio-blk, AHCI, NVMe, both virtio-net queues, and e1000 shared-GSI routes. The
-managed domain is `0x50..0xdf`; central APIC dispatch EOIs an unowned vector in that domain
+This checkpoint supersedes the earlier static-vector description, but **does not complete M9**.
+The shared rules retain preferred vectors `0x50..0x55` and `0xd0`, with all kinds falling back
+to the common bounded `0x60..0xdf` range while excluding every preferred slot. One kernel owner
+table covers xHCI, virtio-blk, AHCI, NVMe, both virtio-net queues, and e1000 shared-GSI routes.
+The managed domain is `0x50..0xdf`; central APIC dispatch EOIs an unowned vector in that domain
 without calling a driver.
 
-The working tree claims xHCI vectors before message programming and releases them only after
-the existing checked stop/bus-master proof. Virtio-net similarly claims both queue vectors
-before MSI-X setup and releases the pair after checked stop. E1000 now claims one vector per
+The current implementation claims xHCI vectors before message programming and releases them
+only after the existing checked stop/bus-master proof. Virtio-net similarly claims both queue
+vectors before MSI-X setup and releases the pair after checked stop. E1000 claims one vector per
 GSI route; adapters sharing a GSI share that route with a reference count, and the final
 reference masks/readbacks the I/O APIC entry before returning the vector. If a failed route
 transaction cannot confirm its retry-mask readback (or matching owner release), the claim is
 retained and a per-GSI quarantine refuses later acquisitions instead of leaking a second vector.
-The e1000 recovery fixture injects a failed program readback followed by an unconfirmed
-remask readback, then checks the claim remains owned and a retry makes no duplicate claim; this
-is software readback
-fault injection, not hardware-failure evidence. Recovery assertions, network logs/checks and the
-xHCI interrupt-proof parser were adjusted to test allocated ownership rather than static
-formulas. The latest unverified pass also keeps e1000's source identity routable until both the
-PCI INTx-disable bit and NIC interrupt mask read back, and makes virtio-net retry a partially
+The e1000 recovery fixture injects a failed program readback followed by an unconfirmed remask
+readback, then checks the claim remains owned and a retry makes no duplicate claim. This is
+software readback fault injection, not physical-hardware-failure evidence. Recovery assertions,
+network logs/checks and the xHCI interrupt-proof parser test allocated ownership rather than
+static formulas. The verified revision also keeps e1000's source identity routable until both
+the PCI INTx-disable bit and NIC interrupt mask read back, and makes virtio-net retry a partially
 released pair without silently forgetting a vector now owned by an unexpected source.
 
-A separate 2026-10-20 working-tree change adds a segment field to `Bdf`, checks explicit/embedded
-segment agreement in ECAM and `SegmentConfig`, and routes native driver probes through mapped
-MCFG allocations with full-address deduplication. The segment-zero legacy path cannot alias a
-nonzero request; the generic BAR/bridge planner and ACPI INTx routing reject nonzero segments
-until their topology/provider models are segment-aware. Thus the working tree attempts native
-MSI/MSI-X binding for mapped, preassigned nonzero-segment devices, but has no multi-segment QEMU
-fixture and remains unbuilt/unverified. It does not complete general multi-root enumeration or
-resource assignment.
+A separate 2026-10-20 change adds a segment field to `Bdf`, checks explicit/embedded segment
+agreement in ECAM and `SegmentConfig`, and routes native driver probes through mapped MCFG
+allocations with full-address deduplication. The segment-zero legacy path cannot alias a nonzero
+request; the generic BAR/bridge planner and ACPI INTx routing reject nonzero segments until
+their topology/provider models are segment-aware. Host tests for this identity and range logic
+ran in CI run [39391895780](https://github.com/NeXuS4Dev/NOLX/actions/runs/39391895780), but no
+multi-segment QEMU fixture or end-to-end nonzero-segment native binding was exercised. The
+nonzero-segment native-binding gate remains unverified, and this change does not complete
+general multi-root enumeration or resource assignment.
 
-**No Rust build, Rust unit test, or QEMU fixture has run on this revision.** The local shell has
-no `cargo`, `rustc`, or `qemu-system-x86_64`. Python syntax checks, the six xHCI parser tests,
-the 21-check boot-layer validation, 31 layout tests, generated NOLXFS/user-image checks, the
-401-assertion conformance check and `git diff --check` pass; these are not substitutes for the
-missing Rust and hardware evidence. The shared-vector implementation therefore remains an open
-M9 gate, and all unrelated `_PRT`/link reprogramming, PCI root/segment, USB hub/SuperSpeed/hotplug,
-Executive/input-object, remaining AML, power-policy/S3 and final-evidence gates remain open.
+CI run [39391895780](https://github.com/NeXuS4Dev/NOLX/actions/runs/39391895780) on `82b414c`
+passed all 19 jobs. This includes both Rust host-test steps, kernel build and Clippy, `cargo fmt`,
+unsafe audit, and QEMU checks for xHCI controller lifecycle/IRQ recovery, e1000 shared-INTx
+remask quarantine and peer traffic, and virtio-net MSI-X recovery and peer traffic. The suite
+also passed the three isolated storage boots, PCI resource recovery, USB/HID and AML checks.
+Locally, seven xHCI parser tests and the 401-assertion conformance check passed; local
+`cargo`/`rustc`/QEMU binaries remain unavailable. The QEMU fault hooks prove software handling
+of injected readback failures, not physical hardware failure. The shared-vector changes are
+therefore verified for the CI scenarios, but this is not general interrupt-resource or M9
+completion evidence. General `_PRT`/link `_SRS` programming, native nonzero-segment binding,
+missing vector-exhaustion fixtures, USB hub/SuperSpeed/hotplug, Executive/input-object,
+remaining AML, power-policy/S3 and final cross-document evidence gates remain open.
+**M9 remains incomplete.**
