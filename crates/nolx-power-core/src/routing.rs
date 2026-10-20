@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 mod link;
 pub use link::{
     build_srs_template, link_possible_interrupts, link_srs_template, possible_interrupts,
-    LinkIrqNumber, LinkIrqOption,
+    select_link_route, LinkIrqNumber, LinkIrqOption, LinkRouteSelection,
 };
 
 /// Fully resolved interrupt electrical characteristics.
@@ -33,6 +33,8 @@ pub enum Error {
     Ambiguous,
     /// Resource, table or topology capacity exceeded.
     Limit,
+    /// The link's current route and every advertised alternative are unavailable.
+    NoRoute,
 }
 impl From<aml::Error> for Error {
     fn from(value: aml::Error) -> Self {

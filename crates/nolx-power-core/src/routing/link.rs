@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use crate::aml::{Namespace, Path, Value};
 
-use super::Error;
+use super::{Error, Interrupt};
 
 /// Maximum resource-template bytes accepted from one AML value.
 const MAX_TEMPLATE_BYTES: usize = 16_384;
@@ -177,6 +177,101 @@ pub fn link_srs_template(
     };
     let current = namespace.device_resources(link)?.ok_or(Error::Invalid)?;
     build_srs_template(&current, &possible, selected)
+}
+
+/// A bounded link-route selection and, when needed, the candidate `_SRS` argument.
+///
+/// This is a planning result only. It does not invoke `_SRS`, alter AML state, or program a
+/// controller. The caller must map ISA IRQs through the platform's MADT overrides and use
+/// `available` to reject reserved, unsupported, or already-conflicting GSIs. A returned
+/// `srs_argument` must not be published as the active route until `_SRS` succeeds and `_CRS`
+/// re-evaluation confirms the selected resource.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkRouteSelection {
+    /// The exact advertised resource option selected for this link.
+    pub option: LinkIrqOption,
+    /// The selected route after the caller's ISA-to-GSI mapping.
+    pub interrupt: Interrupt,
+    /// Candidate `_SRS` buffer when the current `_CRS` route is unavailable; `None` means the
+    /// existing `_CRS` route can be retained without asking firmware to change it.
+    pub srs_argument: Option<Vec<u8>>,
+}
+
+/// Prefer an available current `_CRS` route; otherwise select an advertised `_PRS` alternative.
+///
+/// Only level-triggered, shareable choices can be selected for PCI INTx. ISA choices are mapped
+/// by `isa_to_gsi`; returning `None` refuses that option. `_PRS` is consulted only when the
+/// current route cannot be retained. The generated buffer preserves the `_CRS` descriptor shape,
+/// but this function does not execute `_SRS` or authorize hardware writes.
+pub fn select_link_route(
+    namespace: &Namespace<'_>,
+    link: &Path,
+    isa_to_gsi: impl Fn(u8) -> Option<u32>,
+    mut available: impl FnMut(Interrupt) -> bool,
+) -> Result<LinkRouteSelection, Error> {
+    let (status, _) = namespace.device_status(link)?;
+    if !crate::is_usable(status) {
+        return Err(Error::Invalid);
+    }
+    let current = namespace.device_resources(link)?.ok_or(Error::Invalid)?;
+    let current_irq = parse_template(&current)?.irq.ok_or(Error::Invalid)?;
+    if current_irq.options.len() != 1 {
+        return Err(Error::Ambiguous);
+    }
+    let current_option = current_irq.options[0];
+    if let Some(interrupt) = mapped_pci_interrupt(current_option, &isa_to_gsi) {
+        if available(interrupt) {
+            return Ok(LinkRouteSelection {
+                option: current_option,
+                interrupt,
+                srs_argument: None,
+            });
+        }
+    }
+
+    let value = namespace
+        .device_value(link, *b"_PRS")?
+        .ok_or(Error::Invalid)?;
+    let Value::Buffer(possible) = value else {
+        return Err(Error::Invalid);
+    };
+    for option in possible_interrupts(&possible)? {
+        let Some(interrupt) = mapped_pci_interrupt(option, &isa_to_gsi) else {
+            continue;
+        };
+        if !available(interrupt) {
+            continue;
+        }
+        if namespace.device_method_arity(link, *b"_SRS")? != Some(1) {
+            return Err(Error::Invalid);
+        }
+        let srs_argument = build_srs_template(&current, &possible, option)?;
+        return Ok(LinkRouteSelection {
+            option,
+            interrupt,
+            srs_argument: Some(srs_argument),
+        });
+    }
+    Err(Error::NoRoute)
+}
+
+fn mapped_pci_interrupt(
+    option: LinkIrqOption,
+    isa_to_gsi: &impl Fn(u8) -> Option<u32>,
+) -> Option<Interrupt> {
+    if !option.level || !option.shared {
+        return None;
+    }
+    let gsi = match option.number {
+        LinkIrqNumber::Isa(irq) => isa_to_gsi(irq)?,
+        LinkIrqNumber::Gsi(gsi) => gsi,
+    };
+    Some(Interrupt {
+        gsi,
+        active_low: option.active_low,
+        level: option.level,
+        shared: option.shared,
+    })
 }
 
 fn small_irq_flags(option: LinkIrqOption) -> u8 {

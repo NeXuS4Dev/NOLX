@@ -824,6 +824,30 @@ impl<'a> Namespace<'a> {
         }
         self.evaluate(&member, &[]).map(Some)
     }
+    /// Inspect a device member's method argument count without invoking it.
+    /// An absent member is `Ok(None)`; a present non-method member is a type error.
+    pub fn device_method_arity(
+        &self,
+        path: &Path,
+        member: [u8; 4],
+    ) -> Result<Option<usize>, Error> {
+        if !self
+            .objects
+            .iter()
+            .any(|o| &o.path == path && matches!(o.kind, Kind::Device))
+        {
+            return Err(Error::Type);
+        }
+        check_segment(&member)?;
+        let member = path.child(member)?;
+        let Some(object) = self.objects.iter().find(|o| o.path == member) else {
+            return Ok(None);
+        };
+        match &object.kind {
+            Kind::Method { args, .. } => Ok(Some(*args)),
+            _ => Err(Error::Type),
+        }
+    }
     /// Evaluate a device's `_STA`, using the ACPI default 0x0f only when the member
     /// genuinely does not exist. A failing method is never treated as an absent member.
     /// The boolean distinguishes the default from a computed result.

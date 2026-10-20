@@ -1,8 +1,9 @@
 use super::alloc::vec;
 use super::alloc::vec::Vec;
 use super::{
-    build_srs_template, link_possible_interrupts, link_srs_template, possible_interrupts, Error,
-    LinkIrqNumber, LinkIrqOption, Namespace, Path, MAX_TEMPLATE_BYTES,
+    build_srs_template, link_possible_interrupts, link_srs_template, possible_interrupts,
+    select_link_route, Error, LinkIrqNumber, LinkIrqOption, Namespace, Path,
+    MAX_TEMPLATE_BYTES,
 };
 
 fn template(mut descriptors: Vec<u8>, checksum: bool) -> Vec<u8> {
@@ -17,6 +18,46 @@ fn template(mut descriptors: Vec<u8>, checksum: bool) -> Vec<u8> {
     }
     descriptors.extend_from_slice(&[0, 0]);
     descriptors
+}
+
+fn name_buffer(name: &[u8; 4], bytes: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x08];
+    out.extend_from_slice(name);
+    out.extend_from_slice(&[0x11, (bytes.len() + 3) as u8, 0x0a, bytes.len() as u8]);
+    out.extend_from_slice(bytes);
+    out
+}
+
+fn link_aml(prs: &[u8], crs: &[u8], status: Option<u8>) -> Vec<u8> {
+    link_aml_with_srs_arity(prs, crs, status, 1)
+}
+
+fn link_aml_with_srs_arity(
+    prs: &[u8],
+    crs: &[u8],
+    status: Option<u8>,
+    srs_arity: u8,
+) -> Vec<u8> {
+    let mut body = b"LNK0".to_vec();
+    body.extend(name_buffer(b"_PRS", prs));
+    body.extend(name_buffer(b"_CRS", crs));
+    if let Some(status) = status {
+        body.extend_from_slice(&[0x08, b'_', b'S', b'T', b'A', 0x0a, status]);
+    }
+    body.extend_from_slice(&[0x14, 7, b'_', b'S', b'R', b'S', srs_arity, 0xa3]);
+    let mut aml = vec![0x5b, 0x82];
+    let package_length = body.len() + 1;
+    if package_length < 64 {
+        aml.push(package_length as u8);
+    } else {
+        let package_length = body.len() + 2;
+        aml.extend_from_slice(&[
+            0x40 | (package_length & 0x0f) as u8,
+            (package_length >> 4) as u8,
+        ]);
+    }
+    aml.extend(body);
+    aml
 }
 
 fn small_link_template() -> Vec<u8> {
@@ -160,6 +201,115 @@ fn namespace_helpers_evaluate_prs_and_build_from_current_crs() {
     assert_eq!(choices.len(), 2);
     let candidate = link_srs_template(&namespace, &link, choices[1]).unwrap();
     assert_eq!(possible_interrupts(&candidate).unwrap(), vec![choices[1]]);
+}
+
+#[test]
+fn link_selector_keeps_an_available_current_route_without_building_srs() {
+    let possible = small_link_template();
+    let current = small_current_template();
+    let aml = link_aml(&possible, &current, None);
+    let mut namespace = Namespace::new();
+    namespace.load(&aml).unwrap();
+    let link = Path::parse("\\LNK0").unwrap();
+
+    let selected = select_link_route(
+        &namespace,
+        &link,
+        |irq| Some(u32::from(irq) + 16),
+        |interrupt| interrupt.gsi == 19,
+    )
+    .unwrap();
+    assert_eq!(selected.option.number, LinkIrqNumber::Isa(3));
+    assert_eq!(
+        selected.interrupt,
+        super::super::Interrupt {
+            gsi: 19,
+            active_low: true,
+            level: true,
+            shared: true,
+        }
+    );
+    assert!(selected.srs_argument.is_none());
+}
+
+#[test]
+fn link_selector_chooses_an_available_advertised_alternative_and_builds_srs() {
+    let possible = small_link_template();
+    let current = small_current_template();
+    let aml = link_aml(&possible, &current, None);
+    let mut namespace = Namespace::new();
+    namespace.load(&aml).unwrap();
+    let link = Path::parse("\\LNK0").unwrap();
+
+    let selected = select_link_route(
+        &namespace,
+        &link,
+        |irq| Some(u32::from(irq) + 16),
+        |interrupt| interrupt.gsi == 21,
+    )
+    .unwrap();
+    assert_eq!(selected.option.number, LinkIrqNumber::Isa(5));
+    assert_eq!(selected.interrupt.gsi, 21);
+    let srs = selected.srs_argument.unwrap();
+    assert_eq!(possible_interrupts(&srs).unwrap(), vec![selected.option]);
+}
+
+#[test]
+fn link_selector_handles_extended_gsi_choices_and_builds_srs() {
+    let possible = extended_link_template();
+    let current = extended_current_template();
+    let aml = link_aml(&possible, &current, None);
+    let mut namespace = Namespace::new();
+    namespace.load(&aml).unwrap();
+    let link = Path::parse("\\LNK0").unwrap();
+
+    let selected = select_link_route(&namespace, &link, |_| None, |irq| irq.gsi == 21).unwrap();
+    assert_eq!(selected.option.number, LinkIrqNumber::Gsi(21));
+    assert_eq!(selected.interrupt.gsi, 21);
+    let srs = selected.srs_argument.unwrap();
+    assert_eq!(possible_interrupts(&srs).unwrap(), vec![selected.option]);
+}
+
+#[test]
+fn link_selector_refuses_a_reprogramming_method_with_wrong_arity() {
+    let possible = small_link_template();
+    let current = small_current_template();
+    let aml = link_aml_with_srs_arity(&possible, &current, None, 0);
+    let mut namespace = Namespace::new();
+    namespace.load(&aml).unwrap();
+    let link = Path::parse("\\LNK0").unwrap();
+
+    assert_eq!(
+        select_link_route(
+            &namespace,
+            &link,
+            |irq| Some(u32::from(irq) + 16),
+            |interrupt| interrupt.gsi == 21,
+        ),
+        Err(Error::Invalid)
+    );
+}
+
+#[test]
+fn link_selector_refuses_unusable_devices_and_when_no_route_is_available() {
+    let possible = small_link_template();
+    let current = small_current_template();
+    let aml = link_aml(&possible, &current, Some(0));
+    let mut namespace = Namespace::new();
+    namespace.load(&aml).unwrap();
+    let link = Path::parse("\\LNK0").unwrap();
+    assert_eq!(
+        select_link_route(&namespace, &link, |_| Some(3), |_| true),
+        Err(Error::Invalid)
+    );
+
+    let aml = link_aml(&possible, &current, None);
+    let mut namespace = Namespace::new();
+    namespace.load(&aml).unwrap();
+    assert_eq!(
+        select_link_route(&namespace, &link, |_| Some(3), |_| false),
+        Err(Error::NoRoute)
+    );
 }
 
 #[test]

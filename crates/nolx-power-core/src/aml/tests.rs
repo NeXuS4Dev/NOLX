@@ -88,6 +88,25 @@ fn scopes_devices_parent_search_and_absolute_names_have_distinct_identity() {
     );
 }
 #[test]
+fn device_method_arity_is_inspected_without_invoking_or_coercing_members() {
+    let mut device = b"DEV0".to_vec();
+    device.extend(method(b"_SRS", 1, &[0xa3]));
+    device.extend([8, b'_', b'C', b'R', b'S', 0]);
+    let mut namespace = Namespace::new();
+    namespace
+        .load(&pkg(&[0x5b, 0x82], device))
+        .unwrap();
+    let dev = path("\\DEV0");
+    assert_eq!(namespace.device_method_arity(&dev, *b"_SRS"), Ok(Some(1)));
+    assert_eq!(namespace.device_method_arity(&dev, *b"_STA"), Ok(None));
+    assert_eq!(namespace.device_method_arity(&dev, *b"_CRS"), Err(Error::Type));
+    assert_eq!(
+        namespace.device_method_arity(&path("\\MISS"), *b"_SRS"),
+        Err(Error::Type)
+    );
+}
+
+#[test]
 fn table_load_is_atomic_on_unknown_opcode_duplicate_and_truncated_package() {
     let initial = [vec![8], b"GOOD".to_vec(), vec![1]].concat();
     let mut n = Namespace::new();
