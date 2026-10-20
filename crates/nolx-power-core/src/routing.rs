@@ -6,8 +6,8 @@ use alloc::vec::Vec;
 
 mod link;
 pub use link::{
-    build_srs_template, link_possible_interrupts, link_srs_template, possible_interrupts,
-    select_link_route, LinkIrqNumber, LinkIrqOption, LinkRouteSelection,
+    build_srs_template, link_possible_interrupts, link_srs_template, plan_link_srs,
+    possible_interrupts, select_link_route, LinkIrqNumber, LinkIrqOption, LinkRouteSelection,
 };
 
 /// Fully resolved interrupt electrical characteristics.

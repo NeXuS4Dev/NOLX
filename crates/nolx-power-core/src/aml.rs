@@ -47,6 +47,8 @@ pub enum Error {
     NoReturn,
     /// Only local/argument targets and NullName are supported; global writes are refused.
     Target,
+    /// A field write was not covered by an explicit caller-supplied permission.
+    WriteDenied,
 }
 
 /// An absolute, validated AML namespace path.
@@ -142,7 +144,8 @@ impl Value {
         }
     }
 }
-/// A bounded read-only PCI configuration field request. No hardware writes are exposed.
+/// A bounded PCI configuration field address. `FieldReader` is read-only; staged write intents
+/// are data only and are never applied by the AML evaluator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PciField {
     /// PCI device address encoded as device << 16 | function, on root bus zero.
@@ -157,6 +160,52 @@ pub trait FieldReader {
     /// Return a snapshot value, or refuse a location not covered by the provider.
     fn read(&self, field: PciField) -> Result<u64, Error>;
 }
+/// One whitelisted byte write produced by bounded method planning; never applied by the AML evaluator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PciFieldWrite {
+    /// Exact root-bus-zero PCI configuration byte.
+    pub field: PciField,
+    /// Value to write to that byte, after AML field-width truncation.
+    pub value: u8,
+}
+/// Caller-declared allowed byte values for one exact PCI configuration field.
+///
+/// Permissions are data rather than callbacks: planning cannot trigger hidden hardware effects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PciFieldWritePermission {
+    /// Exact field authorized by this permission.
+    pub field: PciField,
+    values: [u64; 4],
+}
+impl PciFieldWritePermission {
+    /// Authorize the listed values for one field. An empty list denies every write.
+    pub fn from_values(field: PciField, allowed_values: &[u8]) -> Result<Self, Error> {
+        if allowed_values.len() > 256 {
+            return Err(Error::Limit);
+        }
+        let mut values = [0u64; 4];
+        for value in allowed_values {
+            let value = usize::from(*value);
+            values[value / 64] |= 1u64 << (value % 64);
+        }
+        Ok(Self { field, values })
+    }
+    fn allows(self, value: u8) -> bool {
+        let value = usize::from(value);
+        self.values[value / 64] & (1u64 << (value % 64)) != 0
+    }
+}
+/// Result of software-only AML method execution with authorized PCI field writes journaled.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MethodEffects {
+    /// Returned AML value, if the method executed a Return opcode.
+    pub result: Option<Value>,
+    /// Ordered field-write intents. Hardware is untouched; callers must separately validate,
+    /// apply, read back and, if needed, roll back a transaction before publishing anything.
+    pub writes: Vec<PciFieldWrite>,
+}
+const MAX_FIELD_WRITE_PERMISSIONS: usize = 32;
+const MAX_FIELD_WRITES: usize = 64;
 #[derive(Clone)]
 enum Kind<'a> {
     Scope,
@@ -806,7 +855,62 @@ impl<'a> Namespace<'a> {
             .position(|o| &o.path == path)
             .ok_or(Error::Missing)?;
         let mut steps = MAX_STEPS;
-        self.object(index, args, 0, &mut steps)
+        let mut effects = EvaluationEffects::read_only();
+        self.object(index, args, 0, &mut steps, &mut effects)
+    }
+    /// Execute a device method in the bounded interpreter and return only explicitly permitted
+    /// PCI-config byte-write intents. This never writes hardware or publishes a route. Field
+    /// writes are denied unless the caller supplies an exact field/value permission.
+    pub(crate) fn plan_device_method(
+        &self,
+        path: &Path,
+        member: [u8; 4],
+        args: &[Value],
+        permissions: &[PciFieldWritePermission],
+    ) -> Result<MethodEffects, Error> {
+        if !self
+            .objects
+            .iter()
+            .any(|o| &o.path == path && matches!(o.kind, Kind::Device))
+        {
+            return Err(Error::Type);
+        }
+        check_segment(&member)?;
+        if permissions.len() > MAX_FIELD_WRITE_PERMISSIONS {
+            return Err(Error::Limit);
+        }
+        for (index, permission) in permissions.iter().enumerate() {
+            if permission.field.bytes != 1
+                || permission.field.offset >= 256
+                || permission.field.address & !0x1f0007 != 0
+            {
+                return Err(Error::Type);
+            }
+            if permissions[..index]
+                .iter()
+                .any(|previous| previous.field == permission.field)
+            {
+                return Err(Error::Duplicate);
+            }
+        }
+        let method = path.child(member)?;
+        let index = self
+            .objects
+            .iter()
+            .position(|object| object.path == method)
+            .ok_or(Error::Missing)?;
+        if !matches!(self.objects[index].kind, Kind::Method { .. }) {
+            return Err(Error::Type);
+        }
+        validate_arguments(args)?;
+        let mut steps = MAX_STEPS;
+        step(&mut steps)?;
+        let mut effects = EvaluationEffects::with_permissions(permissions);
+        let result = self.run_method(index, args, 0, &mut steps, &mut effects)?;
+        Ok(MethodEffects {
+            result,
+            writes: effects.writes,
+        })
     }
     /// Evaluate a device member, distinguishing an absent member from failure inside one.
     pub fn device_value(&self, path: &Path, member: [u8; 4]) -> Result<Option<Value>, Error> {
@@ -900,15 +1004,14 @@ impl<'a> Namespace<'a> {
         };
         self.constant(value.clone(), depth + 1).map(Some)
     }
-    fn field(
+    fn field_location(
         &self,
         region: &Name,
         bit: u64,
         bits: usize,
         flags: u8,
         depth: usize,
-    ) -> Result<Value, Error> {
-        let reader = self.reader.ok_or(Error::Unsupported(0x5b81))?;
+    ) -> Result<PciField, Error> {
         if bits != 8 || bit % 8 != 0 || flags != 1 {
             return Err(Error::Unsupported(0x5b81));
         }
@@ -959,13 +1062,27 @@ impl<'a> Namespace<'a> {
                 }
             }
         }
-        Ok(Value::Integer(
-            reader.read(PciField {
-                address: address as u32,
-                offset: offset as u16,
-                bytes: 1,
-            })? & 255,
-        ))
+        Ok(PciField {
+            address: address as u32,
+            offset: offset as u16,
+            bytes: 1,
+        })
+    }
+    fn field(
+        &self,
+        region: &Name,
+        bit: u64,
+        bits: usize,
+        flags: u8,
+        depth: usize,
+        effects: &EvaluationEffects<'_>,
+    ) -> Result<Value, Error> {
+        let field = self.field_location(region, bit, bits, flags, depth)?;
+        if let Some(write) = effects.writes.iter().rev().find(|write| write.field == field) {
+            return Ok(Value::Integer(u64::from(write.value)));
+        }
+        let reader = self.reader.ok_or(Error::Unsupported(0x5b81))?;
+        Ok(Value::Integer(reader.read(field)? & 255))
     }
     fn object(
         &self,
@@ -973,20 +1090,13 @@ impl<'a> Namespace<'a> {
         args: &[Value],
         depth: usize,
         steps: &mut usize,
+        effects: &mut EvaluationEffects<'_>,
     ) -> Result<Value, Error> {
         if depth >= MAX_DEPTH {
             return Err(Error::Limit);
         }
         step(steps)?;
-        let mut argument_bytes = 0usize;
-        for arg in args {
-            argument_bytes = argument_bytes
-                .checked_add(value_cost(arg, 0)?)
-                .ok_or(Error::Limit)?;
-            if argument_bytes > MAX_VALUE_BYTES {
-                return Err(Error::Limit);
-            }
-        }
+        validate_arguments(args)?;
         let o = &self.objects[index];
         match &o.kind {
             Kind::Alias(path) => {
@@ -995,25 +1105,11 @@ impl<'a> Namespace<'a> {
                     .iter()
                     .position(|o| &o.path == path)
                     .ok_or(Error::Missing)?;
-                self.object(target, args, depth + 1, steps)
+                self.object(target, args, depth + 1, steps, effects)
             }
             Kind::Data(v) if args.is_empty() => self.constant(v.clone(), depth + 1),
-            Kind::Method {
-                args: expected,
-                body,
-            } if *expected == args.len() => {
-                let mut frame = Frame {
-                    scope: o.path.parent(),
-                    locals: core::array::from_fn(|_| Value::Uninitialized),
-                    names: Vec::new(),
-                    fields: Vec::new(),
-                    args: core::array::from_fn(|i| match args.get(i) {
-                        Some(Value::Integer(value)) => Value::Integer(value & self.integer_mask),
-                        Some(value) => value.clone(),
-                        None => Value::Uninitialized,
-                    }),
-                };
-                self.execute(&mut Reader::new(body), &mut frame, depth + 1, steps)?
+            Kind::Method { args: expected, .. } if *expected == args.len() => {
+                self.run_method(index, args, depth, steps, effects)?
                     .ok_or(Error::NoReturn)
             }
             Kind::Field {
@@ -1021,12 +1117,47 @@ impl<'a> Namespace<'a> {
                 bit,
                 bits,
                 flags,
-            } => self.field(region, *bit, *bits, *flags, depth + 1),
+            } => self.field(region, *bit, *bits, *flags, depth + 1, effects),
             Kind::Region { .. } => Err(Error::Unsupported(0x5b80)),
             Kind::Opaque(op) => Err(Error::Unsupported(*op)),
             Kind::External => Err(Error::Missing),
             _ => Err(Error::Type),
         }
+    }
+    fn run_method(
+        &self,
+        index: usize,
+        args: &[Value],
+        depth: usize,
+        steps: &mut usize,
+        effects: &mut EvaluationEffects<'_>,
+    ) -> Result<Option<Value>, Error> {
+        if depth >= MAX_DEPTH {
+            return Err(Error::Limit);
+        }
+        let object = &self.objects[index];
+        let Kind::Method {
+            args: expected,
+            body,
+        } = &object.kind
+        else {
+            return Err(Error::Type);
+        };
+        if *expected != args.len() {
+            return Err(Error::Type);
+        }
+        let mut frame = Frame {
+            scope: object.path.parent(),
+            locals: core::array::from_fn(|_| Value::Uninitialized),
+            names: Vec::new(),
+            fields: Vec::new(),
+            args: core::array::from_fn(|i| match args.get(i) {
+                Some(Value::Integer(value)) => Value::Integer(value & self.integer_mask),
+                Some(value) => value.clone(),
+                None => Value::Uninitialized,
+            }),
+        };
+        self.execute(&mut Reader::new(body), &mut frame, depth + 1, steps, effects)
     }
     fn expr(
         &self,
@@ -1034,6 +1165,7 @@ impl<'a> Namespace<'a> {
         f: &mut Frame,
         depth: usize,
         steps: &mut usize,
+        effects: &mut EvaluationEffects<'_>,
     ) -> Result<Value, Error> {
         if depth >= MAX_DEPTH {
             return Err(Error::Limit);
@@ -1051,8 +1183,8 @@ impl<'a> Namespace<'a> {
             }
             0x70 => {
                 r.byte()?;
-                let v = self.expr(r, f, depth + 1, steps)?;
-                self.target(r, f, v.clone(), depth + 1, steps)?;
+                let v = self.expr(r, f, depth + 1, steps, effects)?;
+                self.target(r, f, v.clone(), depth + 1, steps, effects)?;
                 Ok(v)
             }
             0x75 => {
@@ -1069,12 +1201,12 @@ impl<'a> Namespace<'a> {
             }
             0x72 | 0x74 | 0x77 | 0x79..=0x80 | 0x90..=0x95 => {
                 r.byte()?;
-                let a = self.expr(r, f, depth + 1, steps)?.integer()?;
+                let a = self.expr(r, f, depth + 1, steps, effects)?.integer()?;
                 let unary = op == 0x80 || op == 0x92;
                 let b = if unary {
                     0
                 } else {
-                    self.expr(r, f, depth + 1, steps)?.integer()?
+                    self.expr(r, f, depth + 1, steps, effects)?.integer()?
                 };
                 let value = match op {
                     0x72 => a.wrapping_add(b),
@@ -1110,7 +1242,7 @@ impl<'a> Namespace<'a> {
                 };
                 let v = Value::Integer(value & self.integer_mask);
                 if op < 0x90 {
-                    self.target(r, f, v.clone(), depth + 1, steps)?;
+                    self.target(r, f, v.clone(), depth + 1, steps, effects)?;
                 }
                 Ok(v)
             }
@@ -1120,9 +1252,7 @@ impl<'a> Namespace<'a> {
                     return Ok(f.names[index].1.clone());
                 }
                 if let Some(field) = f.fields.iter().find(|field| field.name == name.path) {
-                    let Value::Buffer(bytes) = &f.names[field.buffer].1 else {
-                        return Err(Error::Type);
-                    };
+                    let bytes = f.buffer(field.source)?;
                     return Ok(Value::Integer(u64::from(u32::from_le_bytes(
                         bytes[field.offset..field.offset + 4]
                             .try_into()
@@ -1137,9 +1267,9 @@ impl<'a> Namespace<'a> {
                 };
                 let mut args = Vec::new();
                 for _ in 0..count {
-                    args.push(self.expr(r, f, depth + 1, steps)?);
+                    args.push(self.expr(r, f, depth + 1, steps, effects)?);
                 }
-                self.object(index, &args, depth + 1, steps)
+                self.object(index, &args, depth + 1, steps, effects)
             }
             _ => {
                 let v = self.data(r, &f.scope, depth + 1, steps)?;
@@ -1154,6 +1284,7 @@ impl<'a> Namespace<'a> {
         value: Value,
         depth: usize,
         steps: &mut usize,
+        effects: &mut EvaluationEffects<'_>,
     ) -> Result<(), Error> {
         if r.peek()? == 0x88 {
             step(steps)?;
@@ -1162,7 +1293,7 @@ impl<'a> Namespace<'a> {
             if !(0x60..=0x67).contains(&source) {
                 return Err(Error::Target);
             }
-            let index = usize::try_from(self.expr(r, f, depth + 1, steps)?.integer()?)
+            let index = usize::try_from(self.expr(r, f, depth + 1, steps, effects)?.integer()?)
                 .map_err(|_| Error::Limit)?;
             if r.byte()? != 0 || !matches!(value, Value::Integer(_) | Value::Package(_)) {
                 return Err(Error::Target);
@@ -1183,6 +1314,53 @@ impl<'a> Namespace<'a> {
             }
             return frame_local(f, usize::from(local - 0x60), value);
         }
+        if matches!(
+            r.peek()?,
+            b'\\' | b'^' | 0x2e | 0x2f | b'A'..=b'Z' | b'_'
+        ) {
+            let target_at = r.at;
+            let name = r.name(&f.scope)?;
+            if !f.fields.iter().any(|field| field.name == name.path)
+                && !f.names.iter().any(|(path, _)| *path == name.path)
+            {
+                let index = match self.resolve(&name) {
+                    Ok(index) => Some(index),
+                    Err(Error::Missing) => None,
+                    Err(error) => return Err(error),
+                };
+                if let Some(index) = index {
+                    match &self.objects[index].kind {
+                        Kind::Field {
+                            region,
+                            bit,
+                            bits,
+                            flags,
+                        } => {
+                            let field =
+                                self.field_location(region, *bit, *bits, *flags, depth + 1)?;
+                            let value = u8::try_from(value.integer()? & 0xff)
+                                .map_err(|_| Error::Type)?;
+                            let allowed = effects.permissions.is_some_and(|permissions| {
+                                permissions.iter().any(|permission| {
+                                    permission.field == field && permission.allows(value)
+                                })
+                            });
+                            if !allowed {
+                                return Err(Error::WriteDenied);
+                            }
+                            if effects.writes.len() >= MAX_FIELD_WRITES {
+                                return Err(Error::Limit);
+                            }
+                            effects.writes.push(PciFieldWrite { field, value });
+                            return Ok(());
+                        }
+                        Kind::Opaque(0x5b81) => return Err(Error::Unsupported(0x5b81)),
+                        _ => {}
+                    }
+                }
+            }
+            r.at = target_at;
+        }
         target(r, f, value)
     }
     fn execute(
@@ -1191,6 +1369,7 @@ impl<'a> Namespace<'a> {
         f: &mut Frame,
         depth: usize,
         steps: &mut usize,
+        effects: &mut EvaluationEffects<'_>,
     ) -> Result<Option<Value>, Error> {
         if depth >= MAX_DEPTH {
             return Err(Error::Limit);
@@ -1237,8 +1416,8 @@ impl<'a> Namespace<'a> {
                 }
                 0x8a => {
                     r.byte()?;
-                    let source = r.name(&f.scope)?;
-                    let offset = self.expr(r, f, depth + 1, steps)?.integer()?;
+                    let source = buffer_source(r, f)?;
+                    let offset = self.expr(r, f, depth + 1, steps, effects)?.integer()?;
                     let name = r.name(&f.scope)?;
                     if !name.search
                         || name.tail != 1
@@ -1248,35 +1427,28 @@ impl<'a> Namespace<'a> {
                     {
                         return Err(Error::Target);
                     }
-                    let buffer = f
-                        .names
-                        .iter()
-                        .position(|(p, _)| *p == source.path)
-                        .ok_or(Error::Target)?;
-                    let Value::Buffer(bytes) = &f.names[buffer].1 else {
-                        return Err(Error::Type);
-                    };
+                    let bytes = f.buffer(source)?;
                     let offset = usize::try_from(offset).map_err(|_| Error::Limit)?;
                     if offset.checked_add(4).is_none_or(|end| end > bytes.len()) {
                         return Err(Error::Limit);
                     }
                     f.fields.push(BufferField {
                         name: name.path,
-                        buffer,
+                        source,
                         offset,
                     });
                 }
 
                 0xa4 => {
                     r.byte()?;
-                    return Ok(Some(self.expr(r, f, depth + 1, steps)?));
+                    return Ok(Some(self.expr(r, f, depth + 1, steps, effects)?));
                 }
                 0xa0 => {
                     r.byte()?;
                     let mut p = r.package()?;
-                    let yes = self.expr(&mut p, f, depth + 1, steps)?.integer()? != 0;
+                    let yes = self.expr(&mut p, f, depth + 1, steps, effects)?.integer()? != 0;
                     if yes {
-                        if let Some(v) = self.execute(&mut p, f, depth + 1, steps)? {
+                        if let Some(v) = self.execute(&mut p, f, depth + 1, steps, effects)? {
                             return Ok(Some(v));
                         }
                     }
@@ -1284,7 +1456,7 @@ impl<'a> Namespace<'a> {
                         r.byte()?;
                         let mut no = r.package()?;
                         if !yes {
-                            if let Some(v) = self.execute(&mut no, f, depth + 1, steps)? {
+                            if let Some(v) = self.execute(&mut no, f, depth + 1, steps, effects)? {
                                 return Ok(Some(v));
                             }
                         }
@@ -1296,10 +1468,10 @@ impl<'a> Namespace<'a> {
                     loop {
                         step(steps)?;
                         let mut body = Reader::new(p.bytes);
-                        if self.expr(&mut body, f, depth + 1, steps)?.integer()? == 0 {
+                        if self.expr(&mut body, f, depth + 1, steps, effects)?.integer()? == 0 {
                             break;
                         }
-                        if let Some(v) = self.execute(&mut body, f, depth + 1, steps)? {
+                        if let Some(v) = self.execute(&mut body, f, depth + 1, steps, effects)? {
                             return Ok(Some(v));
                         }
                     }
@@ -1309,11 +1481,29 @@ impl<'a> Namespace<'a> {
                 }
                 0xa1 => return Err(Error::Package),
                 _ => {
-                    self.expr(r, f, depth + 1, steps)?;
+                    self.expr(r, f, depth + 1, steps, effects)?;
                 }
             }
         }
         Ok(None)
+    }
+}
+struct EvaluationEffects<'a> {
+    permissions: Option<&'a [PciFieldWritePermission]>,
+    writes: Vec<PciFieldWrite>,
+}
+impl<'a> EvaluationEffects<'a> {
+    fn read_only() -> Self {
+        Self {
+            permissions: None,
+            writes: Vec::new(),
+        }
+    }
+    fn with_permissions(permissions: &'a [PciFieldWritePermission]) -> Self {
+        Self {
+            permissions: Some(permissions),
+            writes: Vec::new(),
+        }
     }
 }
 struct Frame {
@@ -1323,10 +1513,64 @@ struct Frame {
     names: Vec<(Path, Value)>,
     fields: Vec<BufferField>,
 }
+#[derive(Clone, Copy)]
+enum BufferSource {
+    Local(usize),
+    Argument(usize),
+    Name(usize),
+}
 struct BufferField {
     name: Path,
-    buffer: usize,
+    source: BufferSource,
     offset: usize,
+}
+impl Frame {
+    fn buffer(&self, source: BufferSource) -> Result<&[u8], Error> {
+        let value = match source {
+            BufferSource::Local(index) => &self.locals[index],
+            BufferSource::Argument(index) => &self.args[index],
+            BufferSource::Name(index) => &self.names[index].1,
+        };
+        match value {
+            Value::Buffer(bytes) => Ok(bytes),
+            _ => Err(Error::Type),
+        }
+    }
+    fn buffer_mut(&mut self, source: BufferSource) -> Result<&mut [u8], Error> {
+        let value = match source {
+            BufferSource::Local(index) => &mut self.locals[index],
+            BufferSource::Argument(index) => &mut self.args[index],
+            BufferSource::Name(index) => &mut self.names[index].1,
+        };
+        match value {
+            Value::Buffer(bytes) => Ok(bytes),
+            _ => Err(Error::Type),
+        }
+    }
+}
+fn buffer_source(r: &mut Reader<'_>, frame: &Frame) -> Result<BufferSource, Error> {
+    let source = match r.peek()? {
+        opcode @ 0x60..=0x67 => {
+            r.byte()?;
+            BufferSource::Local(usize::from(opcode - 0x60))
+        }
+        opcode @ 0x68..=0x6e => {
+            r.byte()?;
+            BufferSource::Argument(usize::from(opcode - 0x68))
+        }
+        b'\\' | b'^' | 0x2e | 0x2f | b'A'..=b'Z' | b'_' => {
+            let name = r.name(&frame.scope)?;
+            let index = frame
+                .names
+                .iter()
+                .position(|(path, _)| *path == name.path)
+                .ok_or(Error::Target)?;
+            BufferSource::Name(index)
+        }
+        _ => return Err(Error::Target),
+    };
+    frame.buffer(source)?;
+    Ok(source)
 }
 
 // Owned package copies are permitted only in locals, with a frame-wide/depth budget.
@@ -1376,15 +1620,25 @@ fn target(r: &mut Reader<'_>, f: &mut Frame, value: Value) -> Result<(), Error> 
                 .iter()
                 .find(|field| field.name == name.path)
                 .ok_or(Error::Target)?;
-            let Value::Buffer(bytes) = &mut f.names[field.buffer].1 else {
-                return Err(Error::Type);
-            };
+            let bytes = f.buffer_mut(field.source)?;
             bytes[field.offset..field.offset + 4]
                 .copy_from_slice(&(value.integer()? as u32).to_le_bytes());
             Ok(())
         }
         _ => Err(Error::Target),
     }
+}
+fn validate_arguments(args: &[Value]) -> Result<(), Error> {
+    let mut bytes = 0usize;
+    for arg in args {
+        bytes = bytes
+            .checked_add(value_cost(arg, 0)?)
+            .ok_or(Error::Limit)?;
+        if bytes > MAX_VALUE_BYTES {
+            return Err(Error::Limit);
+        }
+    }
+    Ok(())
 }
 fn value_cost(value: &Value, depth: usize) -> Result<usize, Error> {
     if depth >= MAX_DEPTH {

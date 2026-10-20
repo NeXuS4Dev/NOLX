@@ -5,14 +5,15 @@ This checklist tracks the remaining integration work against ROADMAP.md, without
 M9 to the already implemented boot probes. Check items only with executable evidence.
 
 **Verification update (2026-10-20):** CI run [39396903926](https://github.com/NeXuS4Dev/NOLX/actions/runs/39396903926)
-on `2534496` passed all 19 jobs. It includes the host-tested ACPI link-route preflight alongside
-the shared dynamic-vector changes, e1000 shared-INTx remask quarantine, virtio-net MSI-X recovery,
-xHCI IRQ/lifecycle recovery, kernel build, formatting, Clippy, unsafe audit, image/layout and
-conformance checks. The link preflight only returns a candidate `_SRS` buffer; it does not invoke
-firmware or write hardware. The segment-qualified PCI host tests also ran, but no nonzero-segment
-QEMU/native-binding fixture ran, so native binding remains unverified. This is host/QEMU CI
-evidence, not physical-hardware verification. General `_PRT`/link `_SRS` programming and the
-broader open M9 gates below remain incomplete.
+on `2534496` passed all 19 jobs, including the original host-tested ACPI link-route selector,
+shared dynamic-vector changes, kernel build, formatting, Clippy, unsafe audit, image/layout and
+conformance checks. This is evidence for that revision, not the `_SRS` effects planner added
+here; exact-revision verification for that planner is pending. The planner software-evaluates
+selected AML into caller-authorized PCI field-write intents; it does not commit hardware writes or
+publish a route. The segment-qualified PCI host
+tests also ran, but no nonzero-segment QEMU/native-binding fixture ran, so native binding remains
+unverified. This is host/QEMU CI evidence, not physical-hardware verification. General `_PRT`/link
+`_SRS` programming and the broader open M9 gates below remain incomplete.
 
 ## PCI and driver plumbing
 
@@ -668,11 +669,14 @@ Line or that all operation-region/link evaluation is unwired. It does not comple
   available current `_CRS` route, otherwise chooses an available level/shared `_PRS` option after
   caller-supplied ISA-to-GSI mapping, checks that `_SRS` has one argument when a reprogramming
   candidate is needed, and returns the candidate buffer. These host tests passed in CI [39396903926](https://github.com/NeXuS4Dev/NOLX/actions/runs/39396903926).
-  This is a preflight planner only: it is not connected to kernel route publication and does not
-  invoke `_SRS` or write hardware. The AML interpreter still has a read-only `FieldReader` and
-  refuses operation-region writes; a whitelisted write provider, masked/readback-verified route
-  transaction, and post-`_SRS` `_CRS` re-evaluation remain prerequisites. General link
-  reprogramming stays open.
+  `plan_link_srs` software-evaluates the selected `_SRS` body in a bounded AML frame and returns
+  an ordered journal only for exact, caller-permitted PCI-config byte fields (ByteAcc, Preserve,
+  aligned, 8-bit fields on the bounded segment-zero/root-bus-zero profile). It refuses other field
+  shapes and all unpermitted values; failed evaluation returns no partial journal. Ordinary
+  `Namespace::evaluate` remains read-only. The journal is not applied to hardware, and this
+  preflight is not connected to kernel route publication. A chipset-specific write transaction
+  with verified snapshot/rollback/readback, actual firmware `_SRS` execution, and post-execution
+  `_CRS` re-evaluation remain prerequisites. General link reprogramming stays open.
 - Select the validated `_PIC(Arg0)` Store-to-integer subset **before** root resources and routes;
   Q35 takes the actual APIC table. Unknown/unsupported `_PIC` is a routing refusal, not PIC fallback.
 - Snapshot only verified PIIX/ICH9 root-bus PIRQ bytes; support read-only ByteAccess PCI fields

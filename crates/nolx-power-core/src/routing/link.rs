@@ -7,7 +7,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use crate::aml::{Namespace, Path, Value};
+use crate::aml::{MethodEffects, Namespace, Path, PciFieldWritePermission, Value};
 
 use super::{Error, Interrupt};
 
@@ -253,6 +253,42 @@ pub fn select_link_route(
         });
     }
     Err(Error::NoRoute)
+}
+
+/// Execute a selected link's `_SRS` bytecode in the bounded interpreter and return an authorized
+/// PCI-config write journal. The journal is only a plan: this function never writes hardware,
+/// commits AML global state, or publishes the selected route.
+pub fn plan_link_srs(
+    namespace: &Namespace<'_>,
+    link: &Path,
+    selection: &LinkRouteSelection,
+    permissions: &[PciFieldWritePermission],
+) -> Result<MethodEffects, Error> {
+    let srs_argument = selection.srs_argument.as_deref().ok_or(Error::Invalid)?;
+    let options = possible_interrupts(srs_argument)?;
+    if options.len() != 1
+        || options[0] != selection.option
+        || !selection.option.level
+        || !selection.option.shared
+        || selection.interrupt.active_low != selection.option.active_low
+        || selection.interrupt.level != selection.option.level
+        || selection.interrupt.shared != selection.option.shared
+        || matches!(selection.option.number, LinkIrqNumber::Gsi(gsi) if gsi != selection.interrupt.gsi)
+    {
+        return Err(Error::Invalid);
+    }
+    let (status, _) = namespace.device_status(link)?;
+    if !crate::is_usable(status) || namespace.device_method_arity(link, *b"_SRS")? != Some(1) {
+        return Err(Error::Invalid);
+    }
+    namespace
+        .plan_device_method(
+            link,
+            *b"_SRS",
+            &[Value::Buffer(srs_argument.to_vec())],
+            permissions,
+        )
+        .map_err(Error::from)
 }
 
 fn mapped_pci_interrupt(

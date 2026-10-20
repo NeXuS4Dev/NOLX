@@ -1,9 +1,11 @@
 use super::alloc::vec;
 use super::alloc::vec::Vec;
 use super::{
-    build_srs_template, link_possible_interrupts, link_srs_template, possible_interrupts,
-    select_link_route, Error, LinkIrqNumber, LinkIrqOption, Namespace, Path, MAX_TEMPLATE_BYTES,
+    build_srs_template, link_possible_interrupts, link_srs_template, plan_link_srs,
+    possible_interrupts, select_link_route, Error, LinkIrqNumber, LinkIrqOption, Namespace, Path,
+    MAX_TEMPLATE_BYTES,
 };
+use crate::aml::{PciField, PciFieldWrite, PciFieldWritePermission, Value};
 
 fn template(mut descriptors: Vec<u8>, checksum: bool) -> Vec<u8> {
     descriptors.push(0x79);
@@ -52,6 +54,45 @@ fn link_aml_with_srs_arity(prs: &[u8], crs: &[u8], status: Option<u8>, srs_arity
     }
     aml.extend(body);
     aml
+}
+
+fn aml_package(opcode: &[u8], body: Vec<u8>) -> Vec<u8> {
+    let mut package = opcode.to_vec();
+    let length = body.len() + 1;
+    if length < 64 {
+        package.push(length as u8);
+    } else {
+        let length = body.len() + 2;
+        package.extend_from_slice(&[
+            0x40 | (length & 0x0f) as u8,
+            (length >> 4) as u8,
+        ]);
+    }
+    package.extend(body);
+    package
+}
+
+fn link_with_pci_field(prs: &[u8], crs: &[u8], field_flags: u8, srs_body: &[u8]) -> Vec<u8> {
+    let mut link = b"LNK0".to_vec();
+    link.extend_from_slice(&[0x08, b'_', b'A', b'D', b'R', 0x0c, 0, 0, 1, 0]);
+    link.extend_from_slice(&[0x5b, 0x80, b'P', b'C', b'F', b'G', 2, 0x0a, 0x60, 0x0a, 1]);
+    link.extend(aml_package(
+        &[0x5b, 0x81],
+        [b"PCFG".to_vec(), vec![field_flags], b"PRQ0".to_vec(), vec![8]].concat(),
+    ));
+    link.extend(name_buffer(b"_PRS", prs));
+    link.extend(name_buffer(b"_CRS", crs));
+    let mut method = b"_SRS".to_vec();
+    method.push(1);
+    method.extend_from_slice(srs_body);
+    link.extend(aml_package(&[0x14], method));
+    let link = aml_package(&[0x5b, 0x82], link);
+
+    let mut root = b"PCI0".to_vec();
+    root.extend_from_slice(&[0x08, b'_', b'H', b'I', b'D', 0x0d]);
+    root.extend_from_slice(b"PNP0A03\0");
+    root.extend(link);
+    aml_package(&[0x5b, 0x82], root)
 }
 
 fn small_link_template() -> Vec<u8> {
@@ -262,6 +303,142 @@ fn link_selector_handles_extended_gsi_choices_and_builds_srs() {
     assert_eq!(selected.interrupt.gsi, 21);
     let srs = selected.srs_argument.unwrap();
     assert_eq!(possible_interrupts(&srs).unwrap(), vec![selected.option]);
+}
+
+#[test]
+fn link_srs_planning_executes_only_authorized_field_writes_without_hardware_access() {
+    let possible = small_link_template();
+    let current = small_current_template();
+    let srs_body = [
+        vec![0x8a, 0x68, 0x0a, 9],
+        b"TMP0".to_vec(),
+        vec![0x70],
+        b"TMP0".to_vec(),
+        b"PRQ0".to_vec(),
+        vec![0xa4],
+        b"PRQ0".to_vec(),
+    ]
+    .concat();
+    let aml = link_with_pci_field(&possible, &current, 1, &srs_body);
+    let mut namespace = Namespace::new();
+    namespace.load(&aml).unwrap();
+    let link = Path::parse("\\PCI0.LNK0").unwrap();
+    let selection = select_link_route(
+        &namespace,
+        &link,
+        |irq| Some(u32::from(irq) + 16),
+        |interrupt| interrupt.gsi == 21,
+    )
+    .unwrap();
+    assert_eq!(selection.option.number, LinkIrqNumber::Isa(5));
+    let field = PciField {
+        address: 0x0001_0000,
+        offset: 0x60,
+        bytes: 1,
+    };
+    let permission = PciFieldWritePermission::from_values(field, &[0x20]).unwrap();
+
+    let plan = plan_link_srs(&namespace, &link, &selection, &[permission]).unwrap();
+    assert_eq!(plan.result, Some(Value::Integer(0x20)));
+    assert_eq!(plan.writes, vec![PciFieldWrite { field, value: 0x20 }]);
+
+    // Ordinary evaluation remains read-only and refuses the same field target.
+    let method = Path::parse("\\PCI0.LNK0._SRS").unwrap();
+    assert_eq!(
+        namespace.evaluate(
+            &method,
+            &[Value::Buffer(selection.srs_argument.clone().unwrap())]
+        ),
+        Err(crate::aml::Error::WriteDenied)
+    );
+    assert_eq!(
+        plan_link_srs(&namespace, &link, &selection, &[]),
+        Err(Error::Aml(crate::aml::Error::WriteDenied))
+    );
+    let wrong_value = PciFieldWritePermission::from_values(field, &[0x21]).unwrap();
+    assert_eq!(
+        plan_link_srs(&namespace, &link, &selection, &[wrong_value]),
+        Err(Error::Aml(crate::aml::Error::WriteDenied))
+    );
+}
+
+#[test]
+fn link_srs_planning_accepts_void_firmware_methods() {
+    let possible = small_link_template();
+    let current = small_current_template();
+    let srs_body = [vec![0x70, 0x0a, 0x20], b"PRQ0".to_vec()].concat();
+    let aml = link_with_pci_field(&possible, &current, 1, &srs_body);
+    let mut namespace = Namespace::new();
+    namespace.load(&aml).unwrap();
+    let link = Path::parse("\\PCI0.LNK0").unwrap();
+    let selection = select_link_route(
+        &namespace,
+        &link,
+        |irq| Some(u32::from(irq) + 16),
+        |interrupt| interrupt.gsi == 21,
+    )
+    .unwrap();
+    let field = PciField {
+        address: 0x0001_0000,
+        offset: 0x60,
+        bytes: 1,
+    };
+    let permission = PciFieldWritePermission::from_values(field, &[0x20]).unwrap();
+    let plan = plan_link_srs(&namespace, &link, &selection, &[permission]).unwrap();
+    assert_eq!(plan.result, None);
+    assert_eq!(plan.writes, vec![PciFieldWrite { field, value: 0x20 }]);
+}
+
+#[test]
+fn link_srs_write_journal_is_bounded_and_discards_partial_plans() {
+    let possible = small_link_template();
+    let current = small_current_template();
+    let mut srs_body = Vec::new();
+    for _ in 0..65 {
+        srs_body.extend_from_slice(&[0x70, 0x0a, 0x20]);
+        srs_body.extend_from_slice(b"PRQ0");
+    }
+    let aml = link_with_pci_field(&possible, &current, 1, &srs_body);
+    let mut namespace = Namespace::new();
+    namespace.load(&aml).unwrap();
+    let link = Path::parse("\\PCI0.LNK0").unwrap();
+    let selection = select_link_route(
+        &namespace,
+        &link,
+        |irq| Some(u32::from(irq) + 16),
+        |interrupt| interrupt.gsi == 21,
+    )
+    .unwrap();
+    let field = PciField {
+        address: 0x0001_0000,
+        offset: 0x60,
+        bytes: 1,
+    };
+    let permission = PciFieldWritePermission::from_values(field, &[0x20]).unwrap();
+    assert_eq!(
+        plan_link_srs(&namespace, &link, &selection, &[permission]),
+        Err(Error::Aml(crate::aml::Error::Limit))
+    );
+}
+
+#[test]
+fn link_srs_plan_requires_a_reprogramming_candidate() {
+    let possible = small_link_template();
+    let current = small_current_template();
+    let srs_body = [0xa3];
+    let aml = link_with_pci_field(&possible, &current, 1, &srs_body);
+    let mut namespace = Namespace::new();
+    namespace.load(&aml).unwrap();
+    let link = Path::parse("\\PCI0.LNK0").unwrap();
+    let selection = select_link_route(
+        &namespace,
+        &link,
+        |irq| Some(u32::from(irq) + 16),
+        |interrupt| interrupt.gsi == 19,
+    )
+    .unwrap();
+    assert!(selection.srs_argument.is_none());
+    assert_eq!(plan_link_srs(&namespace, &link, &selection, &[]), Err(Error::Invalid));
 }
 
 #[test]
