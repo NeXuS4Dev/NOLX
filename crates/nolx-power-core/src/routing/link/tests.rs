@@ -63,10 +63,7 @@ fn aml_package(opcode: &[u8], body: Vec<u8>) -> Vec<u8> {
         package.push(length as u8);
     } else {
         let length = body.len() + 2;
-        package.extend_from_slice(&[
-            0x40 | (length & 0x0f) as u8,
-            (length >> 4) as u8,
-        ]);
+        package.extend_from_slice(&[0x40 | (length & 0x0f) as u8, (length >> 4) as u8]);
     }
     package.extend(body);
     package
@@ -78,7 +75,13 @@ fn link_with_pci_field(prs: &[u8], crs: &[u8], field_flags: u8, srs_body: &[u8])
     link.extend_from_slice(&[0x5b, 0x80, b'P', b'C', b'F', b'G', 2, 0x0a, 0x60, 0x0a, 1]);
     link.extend(aml_package(
         &[0x5b, 0x81],
-        [b"PCFG".to_vec(), vec![field_flags], b"PRQ0".to_vec(), vec![8]].concat(),
+        [
+            b"PCFG".to_vec(),
+            vec![field_flags],
+            b"PRQ0".to_vec(),
+            vec![8],
+        ]
+        .concat(),
     ));
     link.extend(name_buffer(b"_PRS", prs));
     link.extend(name_buffer(b"_CRS", crs));
@@ -438,7 +441,10 @@ fn link_srs_plan_requires_a_reprogramming_candidate() {
     )
     .unwrap();
     assert!(selection.srs_argument.is_none());
-    assert_eq!(plan_link_srs(&namespace, &link, &selection, &[]), Err(Error::Invalid));
+    assert_eq!(
+        plan_link_srs(&namespace, &link, &selection, &[]),
+        Err(Error::Invalid)
+    );
 }
 
 #[test]

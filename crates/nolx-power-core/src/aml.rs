@@ -1078,7 +1078,12 @@ impl<'a> Namespace<'a> {
         effects: &EvaluationEffects<'_>,
     ) -> Result<Value, Error> {
         let field = self.field_location(region, bit, bits, flags, depth)?;
-        if let Some(write) = effects.writes.iter().rev().find(|write| write.field == field) {
+        if let Some(write) = effects
+            .writes
+            .iter()
+            .rev()
+            .find(|write| write.field == field)
+        {
             return Ok(Value::Integer(u64::from(write.value)));
         }
         let reader = self.reader.ok_or(Error::Unsupported(0x5b81))?;
@@ -1108,10 +1113,9 @@ impl<'a> Namespace<'a> {
                 self.object(target, args, depth + 1, steps, effects)
             }
             Kind::Data(v) if args.is_empty() => self.constant(v.clone(), depth + 1),
-            Kind::Method { args: expected, .. } if *expected == args.len() => {
-                self.run_method(index, args, depth, steps, effects)?
-                    .ok_or(Error::NoReturn)
-            }
+            Kind::Method { args: expected, .. } if *expected == args.len() => self
+                .run_method(index, args, depth, steps, effects)?
+                .ok_or(Error::NoReturn),
             Kind::Field {
                 region,
                 bit,
@@ -1157,7 +1161,13 @@ impl<'a> Namespace<'a> {
                 None => Value::Uninitialized,
             }),
         };
-        self.execute(&mut Reader::new(body), &mut frame, depth + 1, steps, effects)
+        self.execute(
+            &mut Reader::new(body),
+            &mut frame,
+            depth + 1,
+            steps,
+            effects,
+        )
     }
     fn expr(
         &self,
@@ -1314,10 +1324,7 @@ impl<'a> Namespace<'a> {
             }
             return frame_local(f, usize::from(local - 0x60), value);
         }
-        if matches!(
-            r.peek()?,
-            b'\\' | b'^' | 0x2e | 0x2f | b'A'..=b'Z' | b'_'
-        ) {
+        if matches!(r.peek()?, b'\\' | b'^' | 0x2e | 0x2f | b'A'..=b'Z' | b'_') {
             let target_at = r.at;
             let name = r.name(&f.scope)?;
             if !f.fields.iter().any(|field| field.name == name.path)
@@ -1338,8 +1345,8 @@ impl<'a> Namespace<'a> {
                         } => {
                             let field =
                                 self.field_location(region, *bit, *bits, *flags, depth + 1)?;
-                            let value = u8::try_from(value.integer()? & 0xff)
-                                .map_err(|_| Error::Type)?;
+                            let value =
+                                u8::try_from(value.integer()? & 0xff).map_err(|_| Error::Type)?;
                             let allowed = effects.permissions.is_some_and(|permissions| {
                                 permissions.iter().any(|permission| {
                                     permission.field == field && permission.allows(value)
@@ -1468,7 +1475,11 @@ impl<'a> Namespace<'a> {
                     loop {
                         step(steps)?;
                         let mut body = Reader::new(p.bytes);
-                        if self.expr(&mut body, f, depth + 1, steps, effects)?.integer()? == 0 {
+                        if self
+                            .expr(&mut body, f, depth + 1, steps, effects)?
+                            .integer()?
+                            == 0
+                        {
                             break;
                         }
                         if let Some(v) = self.execute(&mut body, f, depth + 1, steps, effects)? {
@@ -1615,14 +1626,14 @@ fn target(r: &mut Reader<'_>, f: &mut Frame, value: Value) -> Result<(), Error> 
         b'\\' | b'^' | 0x2e | 0x2f | b'A'..=b'Z' | b'_' => {
             r.at -= 1;
             let name = r.name(&f.scope)?;
-            let field = f
+            let (source, offset) = f
                 .fields
                 .iter()
                 .find(|field| field.name == name.path)
+                .map(|field| (field.source, field.offset))
                 .ok_or(Error::Target)?;
-            let bytes = f.buffer_mut(field.source)?;
-            bytes[field.offset..field.offset + 4]
-                .copy_from_slice(&(value.integer()? as u32).to_le_bytes());
+            let bytes = f.buffer_mut(source)?;
+            bytes[offset..offset + 4].copy_from_slice(&(value.integer()? as u32).to_le_bytes());
             Ok(())
         }
         _ => Err(Error::Target),
@@ -1631,9 +1642,7 @@ fn target(r: &mut Reader<'_>, f: &mut Frame, value: Value) -> Result<(), Error> 
 fn validate_arguments(args: &[Value]) -> Result<(), Error> {
     let mut bytes = 0usize;
     for arg in args {
-        bytes = bytes
-            .checked_add(value_cost(arg, 0)?)
-            .ok_or(Error::Limit)?;
+        bytes = bytes.checked_add(value_cost(arg, 0)?).ok_or(Error::Limit)?;
         if bytes > MAX_VALUE_BYTES {
             return Err(Error::Limit);
         }
