@@ -4,16 +4,17 @@ M9 is **not complete**. Passing the current CI suite proves only the assertions 
 This checklist tracks the remaining integration work against ROADMAP.md, without shrinking
 M9 to the already implemented boot probes. Check items only with executable evidence.
 
-**Verification update (2026-10-20):** Exact-revision CI run [39420993249](https://github.com/NeXuS4Dev/NOLX/actions/runs/39420993249)
-on `6749beaaff10e0014aae5767ff702d96be1e4131` passed all 19 jobs, including host tests for the
-bounded `_SRS` effects planner, planning read-set, and portable byte-write transaction, plus the
-kernel build, formatting, Clippy, unsafe audit, image/layout and conformance checks. The helper
-validates authorized writes, snapshots, byte readback, rollback, and a caller postcondition, but no
-production kernel backend applies writes to hardware; live `_CRS` re-evaluation and route
-publication remain unimplemented. The segment-qualified PCI host tests also ran; no nonzero-segment
+**Verification update (2026-10-20):** Exact-revision CI run [39462936440](https://github.com/NeXuS4Dev/NOLX/actions/runs/39462936440)
+on `ee0253b36a8383377f2794e49fe61d0ee4bcc9d0` passed all 19 jobs, including the new audited
+kernel `_SRS` backend, its host tests, and the disabled-link QEMU fixture (checkpoint at the end
+of this file), plus the kernel build, formatting, Clippy, unsafe audit, image/layout and
+conformance checks. A production kernel backend now applies planned link `_SRS` writes to the
+whitelisted PIRQ bytes, re-evaluates live `_CRS` as the transaction postcondition, and publishes
+routes only from a fresh discovery; on Q35 the same preflight retains the fixed GSIA..GSIH
+routes with zero writes. The segment-qualified PCI host tests also ran; no nonzero-segment
 QEMU/native-binding fixture ran, so native binding remains unverified. This is host/QEMU CI
-evidence, not physical-hardware verification. General `_PRT`/link `_SRS` programming and the
-broader open M9 gates below remain incomplete.
+evidence, not physical-hardware verification. `_PRT`/link reprogramming beyond the verified
+segment-zero board profile and the broader open M9 gates below remain incomplete.
 
 ## PCI and driver plumbing
 
@@ -27,8 +28,10 @@ broader open M9 gates below remain incomplete.
       independent virtio-net MSI-X completions; 82540EM does not support MSI.
 - [ ] Discover/reroute PCI interrupts using evaluated ACPI `_PRT`/link devices rather
       than relying on the legacy PCI Interrupt Line value. Bounded PC/Q35 current-route
-      discovery/programming is now verified (checkpoint below); arbitrary link reprogramming
-      and unsupported root/topology/source models remain open.
+      discovery/programming is verified, and unavailable current routes on the steerable
+      PIIX profile are now reprogrammed through the audited `_SRS` backend (checkpoints
+      below); link reprogramming beyond that verified ByteAcc/PIRQ-byte profile and
+      unsupported root/topology/source models remain open.
 - [x] Assign missing memory32/memory64/I/O BARs and closed type-1 memory/I/O bridge
       windows on the bounded PC/Q35 segment-zero profile, with readback and rollback.
 - [x] Consume evaluated host-bridge `_CRS` producer apertures for bounded PC/Q35 missing
@@ -113,10 +116,15 @@ broader open M9 gates below remain incomplete.
 - [x] Publish a status-gated firmware-device/resource catalog without retaining interpreter heap.
 - [ ] Complete hardware-field/operation-region providers and the remaining AML operations
       needed by PCI host-bridge/link-device methods; do not mistake a partial catalog for discovery.
+      The read snapshot plus the `_SRS` byte-write backend now cover the verified PIIX/ICH9
+      PIRQ fields on segment zero/root bus zero; general providers remain open.
 - [x] Replace the fixed memory allocation aperture with evaluated root `_CRS` windows on
       the bounded PC/Q35 profile; ACPI refusal never selects the no-ACPI board fallback.
 - [ ] Consume evaluated link resources for PCI interrupt routing and complete general
-      device binding, replacing the firmware Interrupt Line fallback.
+      device binding, replacing the firmware Interrupt Line fallback. Current `_CRS`
+      resources and, when a current route is unavailable on the bounded PIIX profile,
+      `_PRS`-selected `_SRS` reprogramming are consumed with live `_CRS` confirmation;
+      general device binding beyond evaluated PCI INTx remains open.
 - [ ] Complete device power-state/quiesce policy and S3 save/resume path.
       BSP device-level shutdown freeze/flush/stop and fail-closed S5 gates now have six-driver
       PC/Q35 evidence; higher-layer cache/user-task/SMP orchestration and S3 remain open.
@@ -1491,3 +1499,72 @@ completion evidence. General `_PRT`/link `_SRS` programming, native nonzero-segm
 missing vector-exhaustion fixtures, USB hub/SuperSpeed/hotplug, Executive/input-object,
 remaining AML, power-policy/S3 and final cross-document evidence gates remain open.
 **M9 remains incomplete.**
+
+
+## Audited ACPI link `_SRS` reprogramming checkpoint (2026-10-20)
+
+This supersedes the earlier statements that the `_SRS` selector, effects planner and
+byte-write transaction had no production kernel backend or route-publication caller
+(PCI-033/034/035). It does not complete M9.
+
+The portable layer first learned what a disabled link looks like. SeaBIOS reports a PIRQ
+link whose steering byte has its disable bit set as `_STA 0x9` (present and functioning,
+not enabled) with a zero Small IRQ mask or an empty `_CRS` template; the selector
+refused all three shapes, and the first CI round of this checkpoint
+([39457923262](https://github.com/NeXuS4Dev/NOLX/actions/runs/39457923262) on `f5e6e13`)
+showed exactly that refusal on the PC fixture. Current-template parsing now accepts the
+disabled encodings (a zero-mask descriptor is patched in place; an empty template
+derives the candidate from a single-descriptor `_PRS`, shrinking multi-GSI Extended IRQ
+descriptors to the selected interrupt), while `_PRS` parsing stays strict. Selection and
+`_SRS` planning require present+functioning rather than the enabled bit — enabling the
+link is `_SRS`'s job — and publication keeps the stricter `is_usable` gate, which the
+steering write itself satisfies. `plan_link_reprogramming` preflights every
+`_PRT`-referenced link under the same structural limits as `discover`, commits
+direct-GSI rows and earlier selections before a later link may share a GSI, and accounts
+for every evaluated link as either retained or to-be-reprogrammed. Nine new host tests
+pin the disabled/empty candidate construction, the 0x9 status, and the retention,
+sharing, conflict and refusal rules.
+
+The kernel runs that preflight before route publication on the APIC profile. Current
+routes are judged against the real IOAPIC route table (GSIs the initialization pass
+actually retained), with ISA choices mapped only through identity-preserving MADT
+overrides. Each unavailable link is planned by `plan_link_srs` and applied through a
+`ConfigAccess` backend that refuses every field outside the snapshot's verified PIRQ
+bytes; permissions name those bytes and exactly the selected route's encoded value, so
+the firmware method may choose which link byte to steer but never what to write into
+it. The PIRQ snapshot becomes explicitly refreshable for this one transaction: the
+postcondition refreshes it, re-evaluates `_CRS`, and requires the selected interrupt
+exactly. Routes then publish only from a fresh current-route discovery, never from the
+plan. Any refusal revokes every route; there is no Interrupt Line downgrade. If an
+earlier link was already reprogrammed when a later one refuses, firmware steering stays
+changed but nothing publishes — the same fail-closed outcome a refused current route
+produced before.
+
+The two QEMU machine profiles turned out to exercise opposite halves of the policy, and
+the fixture now asserts both rather than assuming one. On PC the PIIX links are
+steerable: with every PIRQ byte disabled by the `hal-pci-link-srs-test` hook and every
+Interrupt Line byte poisoned, the direct/shared/bridged fixtures recover through real
+`_SRS` transactions and carry captured e1000 ARP exchanges on the selected GSIs. On Q35
+the APIC-mode `_PRT` references GSIA..GSIH devices whose evaluated `_CRS` reports
+hardwired GSIs 16..23; the LPC PIRQ bytes only steer PIC-mode delivery there, so the
+correct behavior is to retain all eight routes and write nothing, which the retained-link
+lines added after run [39461714857](https://github.com/NeXuS4Dev/NOLX/actions/runs/39461714857)
+made directly observable. Exact-revision CI
+[39462936440](https://github.com/NeXuS4Dev/NOLX/actions/runs/39462936440) on `ee0253b`
+passed **all nineteen jobs**, including the new
+`scripts/check-network-multi.py --link-srs-only` step, the preceding intx-routing,
+multi-adapter, storage, USB, AML, PCI-resource, S5 and boot regressions, fmt/Clippy and
+the unsafe audit. PCI-036 is `tested-T1`, PCI-037 is `tested-T2`; the conformance
+database has 406 assertions. Local verification in this environment was limited to the
+conformance tooling and Python syntax checks, since it has no Rust or QEMU binaries.
+
+**Limits:** segment zero and root bus zero only, ByteAcc/Preserve single-byte PCI-config
+fields on the verified PIIX/ICH9 snapshot whitelist, one selected value per link, at most
+64 evaluated links, APIC profile only (PIC boots keep the previous current-route
+publication and refuse INTx consumers elsewhere). Renumbering MADT overrides, dependent
+function resource alternatives, `_SRS` bodies outside the bounded AML subset and boards
+whose link steering is not a whitelisted PIRQ byte all refuse rather than guess. This is
+QEMU evidence, including deliberately disabled steering bytes, not physical-board
+verification. Nonzero-segment binding, general multi-root resources, USB hubs and
+endpoint recovery, Executive input bindings, remaining AML providers and device
+power/S3 remain open. **M9 is not complete.**
