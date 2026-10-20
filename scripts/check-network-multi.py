@@ -210,20 +210,40 @@ def main():
                     'fixture did not disable the firmware PIRQ routes first:\n' + text
                 assert text.count('INTx line poisoned to ff') == 2, text
                 preflight = re.findall(r'ACPI link preflight: (\d+) link\(s\), (\d+) require _SRS', text)
-                assert len(preflight) == 1 and int(preflight[0][1]) >= 1, \
-                    f'no link needed _SRS after every PIRQ route was disabled: {preflight}\n{text}'
-                applied = re.findall(r'ACPI link (\S+) reprogrammed via _SRS: GSI (\d+)', text)
-                assert len(applied) == int(preflight[0][1]), \
-                    f'preflight/applied _SRS counts disagree: {preflight} vs {applied}\n{text}'
+                assert len(preflight) == 1, f'preflight summary missing or repeated: {preflight}\n{text}'
                 assert 'evaluated ACPI INTx routing authorized:' in text, text
+                assert 'ACPI INTx evaluation refused:' not in text, text
                 routes = re.findall(
                     r'e1000: instance \d+, PCI \S+, mac \[[^]]+\], GSI (\d+), vector (0x[0-9a-f]+)',
                     text,
                 )
                 assert len(routes) == 2, text
-                assert {gsi for gsi, _ in routes} <= {gsi for _, gsi in applied}, \
-                    f'e1000 traffic used a GSI no _SRS reprogramming selected: routes={routes} applied={applied}'
-                assert 'ACPI INTx evaluation refused:' not in text, text
+                if machine == 'q35':
+                    # ICH9 in APIC mode routes through GSIA..GSIH link devices whose
+                    # _CRS reports hardwired GSIs 16..23, as the retained-link lines in
+                    # CI run 39461714857 show. The LPC PIRQ bytes this fixture disabled
+                    # only steer PIC-mode delivery, so the audited preflight must
+                    # retain every current route and perform no firmware write at all.
+                    assert preflight[0] == ('8', '0'), f'Q35 preflight changed shape: {preflight}\n{text}'
+                    retained = re.findall(r'link test: retained (\\_SB_\.GSI[A-H]) at GSI (\d+)', text)
+                    assert len(retained) == 8, f'Q35 retained links incomplete: {retained}\n{text}'
+                    assert {gsi for _, gsi in retained} == {str(gsi) for gsi in range(16, 24)}, retained
+                    assert 'reprogrammed via _SRS' not in text, \
+                        'Q35 fixed APIC routes were reprogrammed unnecessarily:\n' + text
+                    assert {gsi for gsi, _ in routes} <= {gsi for _, gsi in retained}, \
+                        f'e1000 traffic used a GSI outside the retained routes: routes={routes} retained={retained}'
+                else:
+                    # PIIX links are steerable: with every PIRQ route disabled, the
+                    # preflight must select _PRS alternatives and the kernel must
+                    # apply exactly that many _SRS transactions before authorizing
+                    # routes, and the captured traffic must ride the selected GSIs.
+                    assert int(preflight[0][1]) >= 1, \
+                        f'no link needed _SRS after every PIRQ route was disabled: {preflight}\n{text}'
+                    applied = re.findall(r'ACPI link (\S+) reprogrammed via _SRS: GSI (\d+)', text)
+                    assert len(applied) == int(preflight[0][1]), \
+                        f'preflight/applied _SRS counts disagree: {preflight} vs {applied}\n{text}'
+                    assert {gsi for gsi, _ in routes} <= {gsi for _, gsi in applied}, \
+                        f'e1000 traffic used a GSI no _SRS reprogramming selected: routes={routes} applied={applied}'
         return
     if args.intx_routing_only:
         for machine in ['pc', 'q35']:
