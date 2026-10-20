@@ -11,13 +11,13 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | Status | Assertions | Cumulative verified at or above status |
 |---|---|---|
 | `unimplemented` | 0 | 100.0% |
-| `implemented` | 7 | 100.0% |
-| `tested-T1` | 275 | 98.0% |
+| `implemented` | 6 | 100.0% |
+| `tested-T1` | 276 | 98.3% |
 | `pending-T2` | 1 | — |
 | `tested-T2` | 120 | 29.8% |
 | `tested-T3` | 0 | 0.0% |
 
-**395 of 403 assertions have a passing automated test; 1 are awaiting T2 results.**
+**396 of 403 assertions have a passing automated test; 1 are awaiting T2 results.**
 
 ## By area
 
@@ -38,7 +38,7 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 | nvme | 15 | 15 | 10 | 0 | 5 | 0 |
 | nxfs | 15 | 15 | 14 | 0 | 1 | 0 |
 | obj | 14 | 14 | 9 | 0 | 5 | 0 |
-| pci | 34 | 34 | 22 | 1 | 9 | 0 |
+| pci | 34 | 34 | 23 | 1 | 9 | 0 |
 | power | 21 | 21 | 14 | 0 | 7 | 0 |
 | ps2 | 10 | 10 | 9 | 0 | 1 | 0 |
 | usb | 31 | 31 | 15 | 0 | 16 | 0 |
@@ -48,7 +48,7 @@ This dashboard is a coverage record, not a conformance certificate. It includes 
 
 None.
 
-## Implemented but untested (7)
+## Implemented but untested (6)
 
 | ID | Specification reference |
 |---|---|
@@ -58,7 +58,6 @@ None.
 | HAL-020 | HPET clocksource: 32-bit MMIO reads and wrap extension produce monotonic nanoseconds |
 | HAL-021 | I/O APIC routes: GSI windows and ISA overrides are validated, redirections start masked, and NMI sources use MADT polarity/trigger flags |
 | PCI-032 | NOLX M9 Segment-qualified PCI identity: equal bus/device/function tuples remain distinct across segments; ECAM and segment-zero-only routing/resource APIs reject mismatches or mixed-segment input; multiple declared root ranges scan each bus and refused bridge once |
-| PCI-034 | NOLX M9 Bounded `_SRS` effects planning: pass the selected candidate as AML Arg0, evaluate bounded DWord-buffer-field access, stage at most 64 exact PCI-config ByteAcc/Preserve byte writes under caller-provided field/value grants, shadow staged reads, and refuse unsupported/global/unpermitted side effects without exposing partial plans |
 
 ## Pending T2 verification (1)
 
@@ -367,7 +366,7 @@ None.
 | PCI-031 | pci | NOLX M9 An exhausted vector pool is refused: with every candidate of a kind occupied, a driver refuses to start without sharing a vector, mapping or ownership leak and can start again after release | `pending-T2` | The eight shared-rule host tests, including all-kind exhaustion, passed in the host-test job of CI [39391895780](https://github.com/NeXuS4Dev/NOLX/actions/runs/39391895780); existing storage exhaustion fixtures (`scripts/check-ahci-nvme-recovery.py`, `scripts/check-virtio-blk-recovery.py`) also ran there. End-to-end exhaustion fixtures for xHCI and network sources remain to be added; keep the broader driver refusal/reacquisition assertion pending |
 | PCI-032 | pci | NOLX M9 Segment-qualified PCI identity: equal bus/device/function tuples remain distinct across segments; ECAM and segment-zero-only routing/resource APIs reject mismatches or mixed-segment input; multiple declared root ranges scan each bus and refused bridge once | `implemented` | `nolx-pci-core` adds `Bdf::in_segment`, `Bdf::packed_id`, `enumerate_ranges`, mismatch/resource/routing tests; kernel `pci::enumerate_native` groups mapped MCFG allocations by segment. Host tests ran in CI [39391895780](https://github.com/NeXuS4Dev/NOLX/actions/runs/39391895780), but no multi-segment QEMU/native fixture or end-to-end nonzero-segment binding test ran; native binding remains unverified. |
 | PCI-033 | pci | NOLX M9 ACPI link-route preflight: retain an available current `_CRS` route or select an available compatible level/shared `_PRS` alternative using caller-provided ISA-to-GSI and availability policy; refuse unusable links or reprogramming candidates whose `_SRS` method does not take one argument; preserve descriptor shape in the candidate `_SRS` buffer without firmware or hardware side effects | `tested-T1` | `nolx-power-core` `routing::select_link_route`, link-selector fixtures, and AML method-arity tests; exact-revision CI [39396903926](https://github.com/NeXuS4Dev/NOLX/actions/runs/39396903926) passed all 19 jobs. Selector is plan-only and is not wired into kernel `_PRT` route publication. |
-| PCI-034 | pci | NOLX M9 Bounded `_SRS` effects planning: pass the selected candidate as AML Arg0, evaluate bounded DWord-buffer-field access, stage at most 64 exact PCI-config ByteAcc/Preserve byte writes under caller-provided field/value grants, shadow staged reads, and refuse unsupported/global/unpermitted side effects without exposing partial plans | `implemented` | `nolx-power-core` `routing::plan_link_srs` plus AML/link tests for candidate-buffer access, allowed and denied writes, read-after-write, void methods, and journal exhaustion. No write provider or kernel route publication consumes the journal; exact-revision CI is pending. |
+| PCI-034 | pci | NOLX M9 Bounded `_SRS` effects planning: pass the selected candidate as AML Arg0, evaluate bounded DWord-buffer-field access, stage at most 64 exact PCI-config ByteAcc/Preserve byte writes under caller-provided field/value grants, shadow staged reads, and refuse unsupported/global/unpermitted side effects without exposing partial plans | `tested-T1` | `nolx-power-core` `routing::plan_link_srs` plus AML/link tests for candidate-buffer access, allowed and denied writes, read-after-write, void methods, and journal exhaustion; exact-revision CI [39406985079](https://github.com/NeXuS4Dev/NOLX/actions/runs/39406985079) passed all 19 jobs. No write provider or kernel route publication consumes the journal. |
 | PN-001 | vfs | XBD 4.12 Pathname Resolution: a pathname beginning with a slash resolves against the root | `tested-T1` | crates/nolx-vfs path::tests::leading_slash_ignores_the_start_node |
 | PN-002 | vfs | XBD 4.12 Pathname Resolution: the empty pathname is invalid | `tested-T1` | crates/nolx-vfs path::tests::empty_path_is_enoent |
 | PN-003 | vfs | XBD 4.12 Pathname Resolution: the last component may be empty, and then refers to the directory itself | `tested-T1` | crates/nolx-vfs path::tests::trailing_slash_requires_a_directory |
