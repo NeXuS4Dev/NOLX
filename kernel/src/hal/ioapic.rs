@@ -1,9 +1,9 @@
 //! I/O APIC setup for the legacy IRQ lines described by the ACPI MADT.
 
 use core::ptr;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 #[cfg(feature = "hal-e1000-recovery-test")]
 use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::sync::IrqLock;
 use nolx_hal_core::acpi::{
