@@ -1,8 +1,9 @@
-//! Portable parsing and construction of simple ACPI link-device IRQ resources.
+//! Portable planning for simple ACPI link-device IRQ resources.
 //!
-//! This module only evaluates `_PRS`/`_CRS` buffers and constructs a candidate `_SRS` argument. It
-//! deliberately does not invoke `_SRS` or access hardware: AML side effects and chipset/IOAPIC
-//! programming require a separate, audited transaction provider.
+//! This module parses `_PRS`/`_CRS`, constructs a candidate `_SRS` argument, and can software-evaluate
+//! `_SRS` bytecode into a caller-authorized PCI-config write journal. It never applies that journal
+//! to hardware or programs an interrupt controller; those effects require a separate, audited
+//! transaction provider.
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -255,9 +256,9 @@ pub fn select_link_route(
     Err(Error::NoRoute)
 }
 
-/// Execute a selected link's `_SRS` bytecode in the bounded interpreter and return an authorized
-/// PCI-config write journal. The journal is only a plan: this function never writes hardware,
-/// commits AML global state, or publishes the selected route.
+/// Software-evaluate a selected link's `_SRS` bytecode in the bounded interpreter and return an
+/// authorized PCI-config write journal. The journal is only a plan: this function never writes
+/// hardware, commits AML global state, or publishes the selected route.
 pub fn plan_link_srs(
     namespace: &Namespace<'_>,
     link: &Path,

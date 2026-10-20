@@ -8,11 +8,11 @@ M9 to the already implemented boot probes. Check items only with executable evid
 on `ab2a8d05e5ee831dc934fd106f3a1a4757685e7a` passed all 19 jobs, including the bounded `_SRS`
 effects-planner host tests, kernel build, formatting, Clippy, unsafe audit, image/layout and
 conformance checks. The planner software-evaluates selected AML into caller-authorized PCI
-field-write intents; it does not execute firmware `_SRS`, commit hardware writes, re-evaluate
-`_CRS`, or publish a route. The segment-qualified PCI host tests also ran, but no nonzero-segment
-QEMU/native-binding fixture ran, so native binding remains unverified. This is host/QEMU CI
-evidence, not physical-hardware verification. General `_PRT`/link `_SRS` programming and the
-broader open M9 gates below remain incomplete.
+field-write intents; it does not apply those writes to hardware, perform a hardware-backed `_SRS`
+transaction, re-evaluate `_CRS`, or publish a route. The segment-qualified PCI host tests also ran;
+no nonzero-segment QEMU/native-binding fixture ran, so native binding remains unverified. This is
+host/QEMU CI evidence, not physical-hardware verification. General `_PRT`/link `_SRS` programming
+and the broader open M9 gates below remain incomplete.
 
 ## PCI and driver plumbing
 
@@ -672,12 +672,12 @@ Line or that all operation-region/link evaluation is unwired. It does not comple
   DWord buffer fields sourced from the candidate `Arg0`, AML locals, or method-private named
   buffers, and returns an ordered journal only for exact, caller-permitted PCI-config byte fields
   (ByteAcc, Preserve, aligned 8-bit fields on the bounded segment-zero/root-bus-zero profile).
-  It refuses other field
-  shapes and all unpermitted values; failed evaluation returns no partial journal. Ordinary
+  Other field shapes and unpermitted values are refused; failed evaluation returns no partial
+  journal. Ordinary
   `Namespace::evaluate` remains read-only. The journal is not applied to hardware, and this
-  preflight is not connected to kernel route publication. A chipset-specific write transaction
-  with verified snapshot/rollback/readback, actual firmware `_SRS` execution, and post-execution
-  `_CRS` re-evaluation remain prerequisites. General link reprogramming stays open.
+  preflight is not connected to kernel route publication. A chipset-specific transaction that
+  applies the journal with verified snapshot/rollback/readback, then re-evaluates `_CRS` before
+  publishing the route, remains a prerequisite. General link reprogramming stays open.
 - Select the validated `_PIC(Arg0)` Store-to-integer subset **before** root resources and routes;
   Q35 takes the actual APIC table. Unknown/unsupported `_PIC` is a routing refusal, not PIC fallback.
 - Snapshot only verified PIIX/ICH9 root-bus PIRQ bytes; support read-only ByteAccess PCI fields
