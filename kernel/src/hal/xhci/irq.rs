@@ -28,14 +28,6 @@ static VECTORS: [AtomicU8; driver_start::DEVICES] =
 ))]
 static LAST_VECTOR: [AtomicU8; driver_start::DEVICES] =
     [const { AtomicU8::new(NO_VECTOR) }; driver_start::DEVICES];
-#[cfg(any(
-    feature = "hal-xhci-lifecycle-test",
-    feature = "hal-xhci-recovery-test",
-    feature = "hal-xhci-transfer-fault-test"
-))]
-pub(super) fn vector(dev: usize) -> u8 {
-    VECTORS[dev].load(Ordering::Acquire)
-}
 pub(super) fn count(dev: usize) -> usize {
     DELIVERED[dev].load(Ordering::Acquire)
 }
@@ -326,7 +318,7 @@ pub(super) fn finish(dev: usize, more: bool) -> Result<(), Failure> {
 pub(super) fn detached_test(dev: usize, retained: bool) {
     assert!(SOURCES[dev].lock().is_none());
     assert!(!WORK[dev].load(Ordering::Acquire));
-    let current = vector(dev);
+    let current = VECTORS[dev].load(Ordering::Acquire);
     let retired = if current != NO_VECTOR {
         current
     } else if retained {

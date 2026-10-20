@@ -37,12 +37,7 @@ fn handle(info: Info) -> usize {
     };
     BINDINGS
         .iter()
-        .position(|b| {
-            b.lock()
-                .bdf
-                .map(Bdf::packed_id)
-                == Some(controller)
-        })
+        .position(|b| b.lock().bdf.map(Bdf::packed_id) == Some(controller))
         .unwrap()
 }
 fn refused(dev: usize, console: &mut dyn HalConsole) {
