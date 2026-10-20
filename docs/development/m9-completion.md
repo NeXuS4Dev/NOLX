@@ -4,14 +4,15 @@ M9 is **not complete**. Passing the current CI suite proves only the assertions 
 This checklist tracks the remaining integration work against ROADMAP.md, without shrinking
 M9 to the already implemented boot probes. Check items only with executable evidence.
 
-**Verification update (2026-10-20):** CI run [39391895780](https://github.com/NeXuS4Dev/NOLX/actions/runs/39391895780)
-on `82b414c` passed all 19 jobs. It compiled the shared dynamic-vector changes and exercised
-e1000 shared-INTx remask quarantine, virtio-net MSI-X recovery, xHCI IRQ/lifecycle recovery,
-host tests, the kernel build, formatting, Clippy, unsafe audit, image/layout and conformance
-checks. The segment-qualified PCI host tests also ran in the host-test job. No nonzero-segment
-QEMU/native-binding fixture ran, so native nonzero-segment binding remains unverified. This is
-host/QEMU CI evidence, not physical-hardware verification. General `_PRT`/link `_SRS`
-programming and the broader open M9 gates below remain incomplete.
+**Verification update (2026-10-20):** CI run [39396903926](https://github.com/NeXuS4Dev/NOLX/actions/runs/39396903926)
+on `2534496` passed all 19 jobs. It includes the host-tested ACPI link-route preflight alongside
+the shared dynamic-vector changes, e1000 shared-INTx remask quarantine, virtio-net MSI-X recovery,
+xHCI IRQ/lifecycle recovery, kernel build, formatting, Clippy, unsafe audit, image/layout and
+conformance checks. The link preflight only returns a candidate `_SRS` buffer; it does not invoke
+firmware or write hardware. The segment-qualified PCI host tests also ran, but no nonzero-segment
+QEMU/native-binding fixture ran, so native binding remains unverified. This is host/QEMU CI
+evidence, not physical-hardware verification. General `_PRT`/link `_SRS` programming and the
+broader open M9 gates below remain incomplete.
 
 ## PCI and driver plumbing
 
@@ -125,7 +126,7 @@ programming and the broader open M9 gates below remain incomplete.
 ## Final verification
 
 - [x] Host tests and negative/malformed-input tests for new portable contracts (CI run
-      [39391895780](https://github.com/NeXuS4Dev/NOLX/actions/runs/39391895780)).
+      [39396903926](https://github.com/NeXuS4Dev/NOLX/actions/runs/39396903926)).
 - [x] Kernel build, formatting, Clippy, unsafe audit, image/layout/conformance checks (same
       19-job CI run).
 - [ ] Dedicated boot tests for each new hardware path, including absent-device fallbacks;
@@ -660,14 +661,18 @@ Line or that all operation-region/link evaluation is unwired. It does not comple
   trigger and sharing flags from single current Small IRQ/Extended IRQ descriptors. Direct
   GSIs retain PCI defaults. Current route discovery uses no `_PRS` guesses, `_SRS`, general
   firmware writes or link allocation.
-- A portable helper now parses one simple `_PRS` IRQ descriptor: Small/Extended IRQs, including
+- A portable helper parses one simple `_PRS` IRQ descriptor: Small/Extended IRQs, including
   Small IRQ wake bit 5 and legal mode/polarity combinations, plus Extended IRQ producer/consumer
   usage. It builds a candidate `_SRS` buffer from `_CRS`, preserving descriptor order/type/length,
-  ignored Small IRQ bits, and recalculating a present checksum.
-  This code is not connected to kernel routing and is uncompiled/untested. The AML interpreter
-  has a read-only `FieldReader`, refuses operation-region writes, and its namespace is temporary;
-  a whitelistable hardware-write provider plus a masked, readback-verified route transaction and
-  `_CRS` re-evaluation are still prerequisites. General link reprogramming remains open.
+  ignored Small IRQ bits, and recalculating a present checksum. `select_link_route` prefers an
+  available current `_CRS` route, otherwise chooses an available level/shared `_PRS` option after
+  caller-supplied ISA-to-GSI mapping, checks that `_SRS` has one argument when a reprogramming
+  candidate is needed, and returns the candidate buffer. These host tests passed in CI [39396903926](https://github.com/NeXuS4Dev/NOLX/actions/runs/39396903926).
+  This is a preflight planner only: it is not connected to kernel route publication and does not
+  invoke `_SRS` or write hardware. The AML interpreter still has a read-only `FieldReader` and
+  refuses operation-region writes; a whitelisted write provider, masked/readback-verified route
+  transaction, and post-`_SRS` `_CRS` re-evaluation remain prerequisites. General link
+  reprogramming stays open.
 - Select the validated `_PIC(Arg0)` Store-to-integer subset **before** root resources and routes;
   Q35 takes the actual APIC table. Unknown/unsupported `_PIC` is a routing refusal, not PIC fallback.
 - Snapshot only verified PIIX/ICH9 root-bus PIRQ bytes; support read-only ByteAccess PCI fields
