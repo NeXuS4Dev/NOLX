@@ -47,17 +47,12 @@ fn owner(info: Info) -> usize {
     };
     BINDINGS
         .iter()
-        .position(|b| {
-            b.lock()
-                .bdf
-                .map(|b| u32::from(b.bus) << 16 | u32::from(b.device) << 8 | u32::from(b.function))
-                == Some(controller)
-        })
+        .position(|b| b.lock().bdf.map(Bdf::packed_id) == Some(controller))
         .unwrap()
 }
 fn quarantined(t: &Test, pages: usize, mappings: usize, console: &mut dyn HalConsole) {
     assert_eq!(driver_start::state(t.dev), Ok(State::Failed));
-    irq::detached_test(t.dev);
+    irq::detached_test(t.dev, true);
     assert_eq!(driver_start::state(t.peer), Ok(State::Started));
     assert_eq!(dma::live_pages(), pages);
     assert_eq!(mmio::live_mappings(), mappings);
@@ -182,7 +177,7 @@ fn terminal(info: Info, reader: ReaderId, usage: Option<u8>) {
 }
 fn recover_restart(t: &mut Test, console: &mut dyn HalConsole) {
     driver_start::recover(t.dev).unwrap();
-    irq::detached_test(t.dev);
+    irq::detached_test(t.dev, false);
     assert_eq!(driver_start::state(t.dev), Ok(State::Stopped));
     assert_eq!(driver_start::recover(t.dev), Err(Error::BadState));
     assert_eq!(dma::live_pages(), 8);

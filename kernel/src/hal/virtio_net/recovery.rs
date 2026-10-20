@@ -40,15 +40,27 @@ fn refused(dev: usize) {
     ));
     assert!(matches!(receive_frame_on(dev), Err(Failure::NoDevice)));
 }
-fn detached(dev: usize, _vector: u8) {
+fn detached(dev: usize, vectors: (u8, u8), retained: bool) {
     assert!(!LIVE[dev].load(Ordering::Acquire));
     let before = interrupt_counts(dev);
-    let (rx, tx) = vectors(dev);
-    on_interrupt(rx);
-    on_interrupt(tx);
+    for (vector, kind) in [(vectors.0, RX_KIND), (vectors.1, TX_KIND)] {
+        assert_eq!(
+            irq_vectors::owner(vector),
+            if retained { Some((kind, dev)) } else { None },
+            "vector ownership did not follow checked-stop proof"
+        );
+        on_interrupt(vector);
+    }
     assert_eq!(interrupt_counts(dev), before);
 }
-fn pinned(dev: usize, peer: usize, region: Region, mappings: usize, vector: u8, master: bool) {
+fn pinned(
+    dev: usize,
+    peer: usize,
+    region: Region,
+    mappings: usize,
+    vector: (u8, u8),
+    master: bool,
+) {
     assert_eq!(driver_start::state(dev), Ok(FrameworkState::Failed));
     assert_eq!(driver_start::state(peer), Ok(FrameworkState::Started));
     assert_eq!(super::super::dma::live_pages(), 8);
@@ -69,19 +81,19 @@ fn pinned(dev: usize, peer: usize, region: Region, mappings: usize, vector: u8, 
     assert_eq!(command & 4 != 0, master);
     assert_ne!(command & (1 << 10), 0);
     assert!(messages_disabled(BDFS[dev].lock().unwrap()));
-    detached(dev, vector);
+    detached(dev, vector, true);
     refused(dev);
     assert_eq!(driver_start::start(dev), Err(Error::BadState));
     assert_eq!(driver_start::remove(dev), Err(Error::Busy));
 }
-fn recovered(dev: usize, region: Region, mappings: usize, vector: u8) {
+fn recovered(dev: usize, region: Region, mappings: usize, vector: (u8, u8)) {
     driver_start::recover(dev).unwrap();
     assert_eq!(driver_start::state(dev), Ok(FrameworkState::Stopped));
     assert!(removable(dev));
     assert_eq!(super::super::dma::live_pages(), 4);
     assert_eq!(mmio::live_mappings() + 5, mappings);
     assert!(region.read32(0).is_err());
-    detached(dev, vector);
+    detached(dev, vector, false);
     refused(dev);
 }
 fn exchange(dev: usize, sequence: u8, expected: [u8; 6], console: &mut dyn HalConsole) {
@@ -120,31 +132,44 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     assert_eq!(peer_mac, [2, 0, 0, 0, 0, 0x21]);
     let mappings = mmio::live_mappings();
     let mut region = COMMON[dev].lock().unwrap();
-    let vector = vectors(dev).0;
-    assert_ne!(vectors(dev), vectors(peer));
-    pinned(dev, peer, region, mappings, vector, true);
+    let target_vectors = vectors(dev).expect("target started with two owned vectors");
+    let peer_vectors = vectors(peer).expect("peer started with two owned vectors");
+    assert_ne!(target_vectors.0, target_vectors.1);
+    assert_ne!(peer_vectors.0, peer_vectors.1);
+    assert_ne!(target_vectors.0, peer_vectors.0);
+    assert_ne!(target_vectors.0, peer_vectors.1);
+    assert_ne!(target_vectors.1, peer_vectors.0);
+    assert_ne!(target_vectors.1, peer_vectors.1);
+    pinned(dev, peer, region, mappings, target_vectors, true);
     assert_eq!(driver_start::recover(peer), Err(Error::BadState));
     assert_eq!(
         driver_start::recover(driver_start::DEVICES),
         Err(Error::UnknownDevice)
     );
     assert_eq!(driver_start::recover(dev), Err(Error::OpFailed));
-    pinned(dev, peer, region, mappings, vector, true);
+    pinned(dev, peer, region, mappings, target_vectors, true);
     probe(console); // A retained failed BDF must not bind a second owner.
-    pinned(dev, peer, region, mappings, vector, true);
+    pinned(dev, peer, region, mappings, target_vectors, true);
     exchange(peer, 0, peer_mac, console);
-    recovered(dev, region, mappings, vector);
+    recovered(dev, region, mappings, target_vectors);
     driver_start::start(dev).unwrap();
     assert!(LIVE[dev].load(Ordering::Acquire));
-    let alias = 0xb0 + 2 * dev as u8;
-    assert_ne!(alias, vectors(dev).0);
+    assert_eq!(vectors(dev), Some(target_vectors));
+    let _ = writeln!(
+        console,
+        "virtio-net-recovery: vectors {:#x}/{:#x} released after checked stop and reclaimed on restart",
+        target_vectors.0,
+        target_vectors.1
+    );
+    let unowned = (0x50..=0xdf)
+        .find(|vector| irq_vectors::owner(*vector).is_none())
+        .expect("the bounded vector domain must have an unowned vector");
     let before = interrupt_counts(dev);
-    on_interrupt(alias);
-    on_interrupt(alias + 1);
+    on_interrupt(unowned);
     assert_eq!(
         interrupt_counts(dev),
         before,
-        "unused primary aliases must not claim live queues"
+        "an unowned vector reached a live queue"
     );
     exchange(dev, 1, target_mac, console);
     exchange(peer, 2, peer_mac, console);
@@ -153,11 +178,11 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     region = COMMON[dev].lock().unwrap();
     REFUSALS.store(2, Ordering::Release);
     assert_eq!(driver_start::stop(dev), Err(Error::OpFailed));
-    pinned(dev, peer, region, mappings, vector, true);
+    pinned(dev, peer, region, mappings, target_vectors, true);
     assert_eq!(driver_start::recover(dev), Err(Error::OpFailed));
-    pinned(dev, peer, region, mappings, vector, true);
+    pinned(dev, peer, region, mappings, target_vectors, true);
     exchange(peer, 3, peer_mac, console);
-    recovered(dev, region, mappings, vector);
+    recovered(dev, region, mappings, target_vectors);
     driver_start::start(dev).unwrap();
     exchange(dev, 4, target_mac, console);
     exchange(peer, 5, peer_mac, console);
@@ -185,11 +210,11 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     MODE.store(2, Ordering::Release);
     assert_eq!(driver_start::start(dev), Err(Error::OpFailed));
     region = COMMON[dev].lock().unwrap();
-    pinned(dev, peer, region, mappings, vector, false);
+    pinned(dev, peer, region, mappings, target_vectors, false);
     assert_eq!(driver_start::recover(dev), Err(Error::OpFailed));
-    pinned(dev, peer, region, mappings, vector, false);
+    pinned(dev, peer, region, mappings, target_vectors, false);
     exchange(peer, 7, peer_mac, console);
-    recovered(dev, region, mappings, vector);
+    recovered(dev, region, mappings, target_vectors);
     driver_start::start(dev).unwrap();
     exchange(dev, 8, target_mac, console);
     let _ = writeln!(
@@ -200,16 +225,16 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     region = COMMON[dev].lock().unwrap();
     PCI_PROOF.store(true, Ordering::Release);
     assert_eq!(driver_start::stop(dev), Err(Error::OpFailed));
-    pinned(dev, peer, region, mappings, vector, false);
+    pinned(dev, peer, region, mappings, target_vectors, false);
     exchange(peer, 9, peer_mac, console);
-    recovered(dev, region, mappings, vector);
+    recovered(dev, region, mappings, target_vectors);
     driver_start::start(dev).unwrap();
     exchange(dev, 10, target_mac, console);
     let _=writeln!(console,"virtio-net-recovery: deliberately withheld PCI exclusion proof pinned DMA despite actual bus-master disable");
     driver_start::stop(dev).unwrap();
     driver_start::stop(peer).unwrap();
-    detached(dev, vector);
-    detached(peer, vector);
+    detached(dev, target_vectors, false);
+    detached(peer, peer_vectors, false);
     assert_eq!(super::super::dma::live_pages(), 0);
     assert_eq!(mmio::live_mappings() + 10, mappings);
     driver_start::remove(dev).unwrap();

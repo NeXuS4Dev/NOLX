@@ -616,7 +616,7 @@ jobs:
       - name: Assert e1000 receive and interrupt delivery
         run: |
           grep -F 'e1000: received ARP reply from 10.0.2.2' build/serial.log
-          grep -E 'descriptor recycled, INTx vector 0x(2[3-9a-f]|3[0-7]), interrupts [1-9][0-9]*' build/serial.log
+          grep -E 'descriptor recycled, INTx vector 0x(5[0-9a-f]|[6-9a-c][0-9a-f]|d[0-9a-f]), interrupts [1-9][0-9]*' build/serial.log
 
       - name: Assert AHCI MSI completions
         run: |
@@ -704,7 +704,7 @@ jobs:
         run: python3 scripts/check-network-multi.py --storage-fixture-only 2>&1 | tee -a /tmp/job.log
       - name: Build checked e1000 failed-controller recovery fixture
         run: make kernel KERNEL_FEATURES=hal-e1000-recovery-test 2>&1 | tee -a /tmp/job.log
-      - name: Verify partial startup, failed-stop quarantine and fresh captured peer traffic
+      - name: Verify partial startup, shared-INTx remask quarantine and fresh captured peer traffic
         run: python3 scripts/check-e1000-recovery.py 2>&1 | tee -a /tmp/job.log
       - name: Build checked virtio-net failed-controller recovery fixture
         run: make kernel KERNEL_FEATURES=hal-virtio-net-recovery-test 2>&1 | tee -a /tmp/job.log

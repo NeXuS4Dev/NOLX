@@ -30,6 +30,7 @@ use nolx_e1000_core::{self as e1000, DEVICE_82540EM, VENDOR_INTEL};
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
 use nolx_pci_core::{Bdf, ConfigSpace};
+use nolx_power_core::routing::Interrupt;
 
 use super::pci::ConfigAccess;
 use super::{dma::Dma, driver_start};
@@ -38,6 +39,9 @@ use crate::sync::IrqMutex;
 
 static RX_VECTOR: [AtomicU8; driver_start::DEVICES] =
     [const { AtomicU8::new(0) }; driver_start::DEVICES];
+static PCI_ROUTE: [IrqMutex<Option<(Interrupt, u8)>>; driver_start::DEVICES] =
+    [const { IrqMutex::new(None) }; driver_start::DEVICES];
+const INTX_KIND: super::irq_vectors::VectorKind = super::irq_vectors::VectorKind::E1000Intx;
 static RX_INTERRUPTS: [AtomicUsize; driver_start::DEVICES] =
     [const { AtomicUsize::new(0) }; driver_start::DEVICES];
 static RECEIVE: [IrqMutex<Option<Receive>>; driver_start::DEVICES] =
@@ -51,18 +55,18 @@ struct Receive {
     frames: FrameQueue<8>,
 }
 
-/// Whether this vector names the firmware-assigned, level-triggered INTx route.
+/// Whether this dynamically owned vector names a shared e1000 INTx GSI route.
 pub fn handles_vector(vector: u8) -> bool {
-    vector >= 32
-        && RX_VECTOR
-            .iter()
-            .any(|route| route.load(Ordering::Acquire) == vector)
+    matches!(super::irq_vectors::owner(vector), Some((kind, _)) if kind == INTX_KIND)
 }
 
 /// Acknowledge interrupt causes and recycle completed receive descriptors into a bounded FIFO.
 /// This path never allocates, prints, or acquires the framework state lock.
 pub fn on_interrupt(vector: u8) {
-    // Shared INTx: service every matching controller before the one local APIC EOI.
+    if !handles_vector(vector) {
+        return;
+    }
+    // A GSI route may be shared: service every active adapter on that vector before one EOI.
     for (dev, route) in RX_VECTOR.iter().enumerate() {
         if route.load(Ordering::Acquire) == vector {
             service_interrupt(dev);
@@ -212,7 +216,7 @@ const DISPATCH: Dispatch = Dispatch {
 /// Probe for an e1000, register the driver with the framework, bind and start the device, and
 /// report the result. Failure is reported on the console and does not stop boot.
 pub fn probe(console: &mut dyn HalConsole) {
-    let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
+    let inventory = super::pci::enumerate_native();
     let mut found = false;
     for info in inventory
         .as_slice()
@@ -220,6 +224,14 @@ pub fn probe(console: &mut dyn HalConsole) {
         .filter(|info| info.vendor_id == VENDOR_INTEL && info.device_id == DEVICE_82540EM)
     {
         found = true;
+        if info.bdf.segment != 0 {
+            let _ = writeln!(
+                console,
+                "e1000: segment {} skipped; native INTx routing is segment-zero only",
+                info.bdf.segment
+            );
+            continue;
+        }
         if STATE.iter().any(|state| state.lock().bdf == Some(info.bdf)) {
             let _ = writeln!(console, "e1000: duplicate PCI binding refused");
             continue;
@@ -283,14 +295,18 @@ pub fn probe(console: &mut dyn HalConsole) {
                     );
                     let _ = writeln!(console, "e1000: received ARP reply from 10.0.2.2, peer {:02x?}, descriptor recycled, INTx vector {:#x}, interrupts {}", report.peer_mac, RX_VECTOR[dev].load(Ordering::Acquire), report.interrupts);
                     let _ = writeln!(console, "e1000: bound and started through nolx-df");
+                    let (irq, vector) = { *PCI_ROUTE[dev].lock() }
+                        .expect("started e1000 owns its shared INTx route");
                     let _ = writeln!(
                         console,
-                        "e1000: instance {dev}, PCI {:02x}:{:02x}.{}, mac {:02x?}, vector {:#x}",
+                        "e1000: instance {dev}, PCI {:02x}:{:02x}.{}, mac {:02x?}, GSI {}, vector {:#x}, segment {}",
                         report.bdf.bus,
                         report.bdf.device,
                         report.bdf.function,
                         report.mac,
-                        RX_VECTOR[dev].load(Ordering::Acquire)
+                        irq.gsi,
+                        vector,
+                        report.bdf.segment
                     );
                 }
                 (None, Some(error)) => {
@@ -345,7 +361,6 @@ fn stop_device(dev: usize) -> bool {
     let Some(bdf) = bdf else {
         return false;
     };
-    RX_VECTOR[dev].store(0, Ordering::Release);
     let reset = (|| -> Result<(), Failure> {
         let command = ConfigAccess.read_u32(bdf, PCI_COMMAND) & 0xffff;
         ConfigAccess.write_u32(bdf, PCI_COMMAND, command | (1 << 10));
@@ -357,6 +372,9 @@ fn stop_device(dev: usize) -> bool {
             if regs.read32(e1000::REG_IMS)? != 0 {
                 return Err(Failure::Interrupt);
             }
+            // Keep the source routable until its device mask and PCI INTx-disable bit both
+            // read back. An early failure must not strand an asserted shared line.
+            RX_VECTOR[dev].store(0, Ordering::Release);
             #[cfg(feature = "hal-e1000-recovery-test")]
             if recovery::refuse_stop(dev) {
                 return Err(Failure::Timeout("injected quiescence refusal"));
@@ -380,8 +398,11 @@ fn stop_device(dev: usize) -> bool {
             )?;
             regs.write32(0x00d8, u32::MAX)?;
             let _ = regs.read32(e1000::REG_ICR)?;
-        } else if STATE[dev].lock().rings.is_some() || RECEIVE[dev].lock().is_some() {
-            return Err(Failure::Busy);
+        } else {
+            if STATE[dev].lock().rings.is_some() || RECEIVE[dev].lock().is_some() {
+                return Err(Failure::Busy);
+            }
+            RX_VECTOR[dev].store(0, Ordering::Release);
         }
         let command = ConfigAccess.read_u32(bdf, PCI_COMMAND) & 0xffff;
         ConfigAccess.write_u32(
@@ -411,6 +432,13 @@ fn stop_device(dev: usize) -> bool {
     })();
     if reset.is_err() {
         return false;
+    }
+    let route = { *PCI_ROUTE[dev].lock() };
+    if let Some((irq, vector)) = route {
+        if !super::ioapic::release_pci_route(irq, vector) {
+            return false;
+        }
+        *PCI_ROUTE[dev].lock() = None;
     }
     let receive = RECEIVE[dev].lock().take();
     let rings = {
@@ -546,15 +574,19 @@ fn bring_up(dev: usize) -> Result<Report, Failure> {
     if !super::apic::is_enabled() || irq.gsi >= 24 {
         return Err(Failure::Interrupt);
     }
-    RX_VECTOR[dev].store(32 + irq.gsi as u8, Ordering::Release);
-    // Clear stale causes, enable receive timer interrupts, then unmask the level route.
+    // Keep local interrupts masked across route acquisition and publication of the source
+    // identity. The GSI may already be shared and unmasked for a peer adapter.
+    let _interrupts = super::cpu::InterruptGuard::disable();
+    let vector = super::ioapic::acquire_pci_route(irq).ok_or(Failure::Interrupt)?;
+    *PCI_ROUTE[dev].lock() = Some((irq, vector));
+    RX_VECTOR[dev].store(vector, Ordering::Release);
+    // Clear stale causes, enable the NIC source and PCI INTx only after the shared vector is
+    // owned and its per-device dispatch identity is visible.
     let _ = regs.read32(e1000::REG_ICR)?;
     regs.write32(e1000::REG_IMS, e1000::ICR_RXT0)?;
-    if super::ioapic::unmask_pci_route(irq) != Some(32 + irq.gsi as u8) {
-        return Err(Failure::Interrupt);
-    }
     pci_access(bdf, true, true)?;
     regs.write32(e1000::REG_RCTL, e1000::rctl_enable(true))?;
+    drop(_interrupts);
     #[cfg(feature = "hal-e1000-recovery-test")]
     if recovery::fail(dev, 2) {
         return Err(Failure::Timeout("injected RX-only start failure"));
@@ -826,6 +858,7 @@ pub(crate) fn removable(dev: usize) -> bool {
         && s.rings.is_none()
         && s.report.is_none()
         && RECEIVE[dev].lock().is_none()
+        && PCI_ROUTE[dev].lock().is_none()
         && RX_VECTOR[dev].load(Ordering::Acquire) == 0
 }
 #[cfg(feature = "hal-e1000-recovery-test")]

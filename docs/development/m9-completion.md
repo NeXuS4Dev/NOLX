@@ -4,6 +4,17 @@ M9 is **not complete**. Passing the current CI suite proves only the assertions 
 This checklist tracks the remaining integration work against ROADMAP.md, without shrinking
 M9 to the already implemented boot probes. Check items only with executable evidence.
 
+**Verification update (2026-10-20):** Exact-revision CI run [39420993249](https://github.com/NeXuS4Dev/NOLX/actions/runs/39420993249)
+on `6749beaaff10e0014aae5767ff702d96be1e4131` passed all 19 jobs, including host tests for the
+bounded `_SRS` effects planner, planning read-set, and portable byte-write transaction, plus the
+kernel build, formatting, Clippy, unsafe audit, image/layout and conformance checks. The helper
+validates authorized writes, snapshots, byte readback, rollback, and a caller postcondition, but no
+production kernel backend applies writes to hardware; live `_CRS` re-evaluation and route
+publication remain unimplemented. The segment-qualified PCI host tests also ran; no nonzero-segment
+QEMU/native-binding fixture ran, so native binding remains unverified. This is host/QEMU CI
+evidence, not physical-hardware verification. General `_PRT`/link `_SRS` programming and the
+broader open M9 gates below remain incomplete.
+
 ## PCI and driver plumbing
 
 - [x] Select ECAM for driver configuration reads/writes when MCFG mappings are usable;
@@ -16,8 +27,8 @@ M9 to the already implemented boot probes. Check items only with executable evid
       independent virtio-net MSI-X completions; 82540EM does not support MSI.
 - [ ] Discover/reroute PCI interrupts using evaluated ACPI `_PRT`/link devices rather
       than relying on the legacy PCI Interrupt Line value. Bounded PC/Q35 current-route
-      discovery/programming is now verified (checkpoint below); arbitrary link reprogramming,
-      unsupported root/topology/source models and dynamic vector ownership remain open.
+      discovery/programming is now verified (checkpoint below); arbitrary link reprogramming
+      and unsupported root/topology/source models remain open.
 - [x] Assign missing memory32/memory64/I/O BARs and closed type-1 memory/I/O bridge
       windows on the bounded PC/Q35 segment-zero profile, with readback and rollback.
 - [x] Consume evaluated host-bridge `_CRS` producer apertures for bounded PC/Q35 missing
@@ -27,7 +38,12 @@ M9 to the already implemented boot probes. Check items only with executable evid
 - [x] Bind multiple virtio-blk/AHCI/NVMe PCI controllers on segment zero, including
       secondary buses, with per-controller queues, interrupts and independent lifecycle.
 - [x] Multi-adapter native e1000/virtio-net contexts with exact-handle public RX/TX.
-- [ ] Native nonzero-segment binding.
+- [ ] Native nonzero-segment binding. The segment-qualified `Bdf` identity and native scan
+      grouping for successfully mapped MCFG allocations compile, and the host tests pass in
+      CI run [39391895780](https://github.com/NeXuS4Dev/NOLX/actions/runs/39391895780). There is
+      still no multi-segment QEMU/native fixture or end-to-end nonzero-segment binding evidence.
+      Nonzero-segment `_PRT`/e1000 INTx and BAR/bridge resource assignment remain refused or
+      unsupported, so this gate stays open.
 - [x] Persistent system registry; retain native storage/network state past probe return;
       healthy stop/restart/removal with hardware quiescence and exact DMA reclamation.
 - [x] Serialized, reusable, generation-checked MMIO windows with partial-map rollback
@@ -39,14 +55,14 @@ M9 to the already implemented boot probes. Check items only with executable evid
 - [x] Checked modern/transitional virtio-blk partial-start/failed-stop recovery, including
       published-request quarantine, independent durable peer I/O and unchanged-media reboot.
 - [ ] Complete failed-start/failed-stop recovery for remaining native drivers and general
-      interrupt-resource reclamation;
-      all six native driver kinds (xHCI, e1000, virtio-net, virtio-blk, AHCI, NVMe) now have
-      checked failed-start/failed-stop recovery, and the three storage transports now own
-      their interrupt vectors dynamically and release them after a proven stop; the xHCI,
-      virtio-net and e1000 vectors are still statically assigned, the pools are bounded per
-      driver kind rather than shared by all of them, and the PS/2 and input-object paths have
-      no framework recovery contract at all;
-      remaining segment binding and firmware routing are tracked separately above.
+      interrupt-resource reclamation. All six native driver kinds (xHCI, e1000, virtio-net,
+      virtio-blk, AHCI, NVMe) have checked recovery; the shared dynamic allocator now covers
+      xHCI, virtio-net and e1000 as well as storage, including shared-GSI e1000 references and
+      APIC acknowledgment of unowned managed vectors. CI run [39391895780](https://github.com/NeXuS4Dev/NOLX/actions/runs/39391895780)
+      passed the changed recovery/build checks. This bounded checkpoint does not close general
+      interrupt-resource reclamation or every exhaustion case. PS/2/input-object paths still
+      have no framework recovery contract; remaining segment binding and firmware routing are
+      tracked separately above.
 
 ## Storage integration
 
@@ -110,10 +126,13 @@ M9 to the already implemented boot probes. Check items only with executable evid
 
 ## Final verification
 
-- [ ] Host tests and negative/malformed-input tests for new portable contracts.
-- [ ] Kernel build, formatting, Clippy, unsafe audit, image/layout/conformance checks.
-- [ ] Dedicated boot tests for each new hardware path, including absent-device fallbacks.
-- [ ] Separate virtio/AHCI/NVMe disk boots with persistent file checksums.
+- [x] Host tests and negative/malformed-input tests for new portable contracts (CI run
+      [39406985079](https://github.com/NeXuS4Dev/NOLX/actions/runs/39406985079)).
+- [x] Kernel build, formatting, Clippy, unsafe audit, image/layout/conformance checks (same
+      19-job CI run).
+- [ ] Dedicated boot tests for each new hardware path, including absent-device fallbacks;
+      nonzero-segment binding and some allocator-exhaustion cases still lack fixtures.
+- [x] Separate virtio/AHCI/NVMe disk boots with persistent file checksums (same CI run).
 - [ ] Assertion database, README and roadmap agree on the final state and cite CI evidence.
 - [ ] All checks on the final revision pass. Only then change M9 to **done**.
 
@@ -641,7 +660,26 @@ Line or that all operation-region/link evaluation is unwired. It does not comple
 
 - Evaluate the actual root/bridge `_PRT` packages and link `_STA`/`_CRS`, preserving polarity,
   trigger and sharing flags from single current Small IRQ/Extended IRQ descriptors. Direct
-  GSIs retain PCI defaults. No `_PRS` guesses, `_SRS`, general firmware writes or link allocation.
+  GSIs retain PCI defaults. Current route discovery uses no `_PRS` guesses, `_SRS`, general
+  firmware writes or link allocation.
+- A portable helper parses one simple `_PRS` IRQ descriptor: Small/Extended IRQs, including
+  Small IRQ wake bit 5 and legal mode/polarity combinations, plus Extended IRQ producer/consumer
+  usage. It builds a candidate `_SRS` buffer from `_CRS`, preserving descriptor order/type/length,
+  ignored Small IRQ bits, and recalculating a present checksum. `select_link_route` prefers an
+  available current `_CRS` route, otherwise chooses an available level/shared `_PRS` option after
+  caller-supplied ISA-to-GSI mapping, checks that `_SRS` has one argument when a reprogramming
+  candidate is needed, and returns the candidate buffer. These selector, effects-planner, and portable transaction host tests passed in exact-revision CI [39420993249](https://github.com/NeXuS4Dev/NOLX/actions/runs/39420993249).
+  `plan_link_srs` software-evaluates the selected `_SRS` body in a bounded AML frame, including
+  DWord buffer fields sourced from the candidate `Arg0`, AML locals, or method-private named
+  buffers, and returns an ordered journal only for exact, caller-permitted PCI-config byte fields
+  (ByteAcc, Preserve, aligned 8-bit fields on the bounded segment-zero/root-bus-zero profile).
+  Other field shapes and unpermitted values are refused; failed evaluation returns no partial
+  journal. `MethodEffects` also retains the unique PCI field read-set used during planning.
+  `apply_pci_field_writes` validates the whole permission set before hardware access, checks the
+  planning read-set before its first write, applies exact byte writes with readback, runs a caller
+  postcondition, and reverses/validates attempted writes if any step fails. Ordinary `Namespace::evaluate` remains read-only. This is
+  still only a portable helper: no kernel backend applies the journal, re-evaluates live `_CRS`,
+  or publishes the resulting route. General link reprogramming stays open.
 - Select the validated `_PIC(Arg0)` Store-to-integer subset **before** root resources and routes;
   Q35 takes the actual APIC table. Unknown/unsupported `_PIC` is a routing refusal, not PIC fallback.
 - Snapshot only verified PIIX/ICH9 root-bus PIRQ bytes; support read-only ByteAccess PCI fields
@@ -1404,3 +1442,52 @@ not SMP-safe against concurrent claims of the same vector beyond the compare-and
 the vectors themselves remain local APIC vectors, not an IOAPIC route. General reclamation,
 nonzero-segment binding, USB/Executive bindings and general device-power/S3 remain open.
 **M9 is not complete.**
+
+
+## Shared dynamic-vector verification checkpoint (2026-10-20)
+
+This checkpoint supersedes the earlier static-vector description, but **does not complete M9**.
+The shared rules retain preferred vectors `0x50..0x55` and `0xd0`, with all kinds falling back
+to the common bounded `0x60..0xdf` range while excluding every preferred slot. One kernel owner
+table covers xHCI, virtio-blk, AHCI, NVMe, both virtio-net queues, and e1000 shared-GSI routes.
+The managed domain is `0x50..0xdf`; central APIC dispatch EOIs an unowned vector in that domain
+without calling a driver.
+
+The current implementation claims xHCI vectors before message programming and releases them
+only after the existing checked stop/bus-master proof. Virtio-net similarly claims both queue
+vectors before MSI-X setup and releases the pair after checked stop. E1000 claims one vector per
+GSI route; adapters sharing a GSI share that route with a reference count, and the final
+reference masks/readbacks the I/O APIC entry before returning the vector. If a failed route
+transaction cannot confirm its retry-mask readback (or matching owner release), the claim is
+retained and a per-GSI quarantine refuses later acquisitions instead of leaking a second vector.
+The e1000 recovery fixture injects a failed program readback followed by an unconfirmed remask
+readback, then checks the claim remains owned and a retry makes no duplicate claim. This is
+software readback fault injection, not physical-hardware-failure evidence. Recovery assertions,
+network logs/checks and the xHCI interrupt-proof parser test allocated ownership rather than
+static formulas. The verified revision also keeps e1000's source identity routable until both
+the PCI INTx-disable bit and NIC interrupt mask read back, and makes virtio-net retry a partially
+released pair without silently forgetting a vector now owned by an unexpected source.
+
+A separate 2026-10-20 change adds a segment field to `Bdf`, checks explicit/embedded segment
+agreement in ECAM and `SegmentConfig`, and routes native driver probes through mapped MCFG
+allocations with full-address deduplication. The segment-zero legacy path cannot alias a nonzero
+request; the generic BAR/bridge planner and ACPI INTx routing reject nonzero segments until
+their topology/provider models are segment-aware. Host tests for this identity and range logic
+ran in CI run [39391895780](https://github.com/NeXuS4Dev/NOLX/actions/runs/39391895780), but no
+multi-segment QEMU fixture or end-to-end nonzero-segment native binding was exercised. The
+nonzero-segment native-binding gate remains unverified, and this change does not complete
+general multi-root enumeration or resource assignment.
+
+CI run [39391895780](https://github.com/NeXuS4Dev/NOLX/actions/runs/39391895780) on `82b414c`
+passed all 19 jobs. This includes both Rust host-test steps, kernel build and Clippy, `cargo fmt`,
+unsafe audit, and QEMU checks for xHCI controller lifecycle/IRQ recovery, e1000 shared-INTx
+remask quarantine and peer traffic, and virtio-net MSI-X recovery and peer traffic. The suite
+also passed the three isolated storage boots, PCI resource recovery, USB/HID and AML checks.
+Locally, seven xHCI parser tests and the 401-assertion conformance check passed; local
+`cargo`/`rustc`/QEMU binaries remain unavailable. The QEMU fault hooks prove software handling
+of injected readback failures, not physical hardware failure. The shared-vector changes are
+therefore verified for the CI scenarios, but this is not general interrupt-resource or M9
+completion evidence. General `_PRT`/link `_SRS` programming, native nonzero-segment binding,
+missing vector-exhaustion fixtures, USB hub/SuperSpeed/hotplug, Executive/input-object,
+remaining AML, power-policy/S3 and final cross-document evidence gates remain open.
+**M9 remains incomplete.**

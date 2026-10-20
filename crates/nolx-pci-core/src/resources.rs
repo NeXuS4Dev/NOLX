@@ -328,6 +328,7 @@ fn rounded(size: u64, granularity: u64) -> Result<u64, Error> {
 }
 
 /// Plan missing BARs and closed type-1 memory/I/O windows, preserving assigned resources.
+/// Only a complete segment-zero inventory is accepted until topology is segment-aware.
 /// Bus numbers must already be valid. ROM BARs, CardBus and reassignment of existing BARs
 /// are outside this API. Prefetchable new BARs use non-prefetchable forwarding below 4 GiB.
 pub fn plan<C: ConfigSpace>(
@@ -336,12 +337,14 @@ pub fn plan<C: ConfigSpace>(
     memory: Pool,
     io: Pool,
 ) -> Result<Plan, Error> {
-    if inventory.overflowed
+    if cfg.segment() != 0
+        || inventory.overflowed
         || inventory.refused_bridges != 0
-        || inventory
-            .as_slice()
-            .iter()
-            .any(|i| i.header_type > 1 || (i.header_type == 1 && (i.class != 6 || i.subclass != 4)))
+        || inventory.as_slice().iter().any(|i| {
+            i.bdf.segment != 0
+                || i.header_type > 1
+                || (i.header_type == 1 && (i.class != 6 || i.subclass != 4))
+        })
     {
         return Err(Error::Topology);
     }

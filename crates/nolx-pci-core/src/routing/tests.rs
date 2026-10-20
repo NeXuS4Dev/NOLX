@@ -2,9 +2,11 @@ use super::*;
 use crate::{
     enumerate,
     tests::{Machine, Regs},
+    FunctionInfo,
 };
 fn b(bus: u8, device: u8) -> Bdf {
     Bdf {
+        segment: 0,
         bus,
         device,
         function: 0,
@@ -99,6 +101,56 @@ fn invalid_pin_duplicate_rows_and_incomplete_inventory_refuse() {
     inv.refused_bridges = 1;
     assert_eq!(scope_bus(&mut cfg, &inv, &[]), Err(Error::Topology));
 }
+#[test]
+fn routing_refuses_nonzero_and_mixed_segment_views() {
+    struct SegmentOne(Machine);
+    impl ConfigSpace for SegmentOne {
+        fn segment(&self) -> u16 {
+            1
+        }
+        fn read_u32(&mut self, bdf: Bdf, offset: u8) -> u32 {
+            ConfigSpace::read_u32(&mut self.0, bdf, offset)
+        }
+        fn write_u32(&mut self, bdf: Bdf, offset: u8, value: u32) {
+            ConfigSpace::write_u32(&mut self.0, bdf, offset, value);
+        }
+    }
+
+    let empty = Inventory::default();
+    let mut segment_one = SegmentOne(Machine::new());
+    assert_eq!(
+        scope_bus(&mut segment_one, &empty, &[]),
+        Err(Error::Topology)
+    );
+    assert_eq!(
+        lookup(&mut segment_one, &empty, &[], b(0, 1), 1),
+        Err(Error::Topology)
+    );
+    let mut segment_zero = Machine::new();
+    assert_eq!(
+        lookup(
+            &mut segment_zero,
+            &empty,
+            &[],
+            Bdf::in_segment(1, 0, 1, 0).unwrap(),
+            1
+        ),
+        Err(Error::Topology)
+    );
+
+    let mut mixed = Inventory::default();
+    mixed
+        .push(FunctionInfo {
+            bdf: Bdf::in_segment(1, 0, 2, 0).unwrap(),
+            ..FunctionInfo::default()
+        })
+        .unwrap();
+    assert_eq!(
+        scope_bus(&mut segment_zero, &mixed, &[]),
+        Err(Error::Topology)
+    );
+}
+
 #[test]
 fn duplicate_parents_and_bus_cycles_are_not_guessed() {
     let (mut cfg, _) = topology();

@@ -78,9 +78,11 @@ pub enum PciError {
     Full,
 }
 
-/// A bus/device/function triple.
+/// A PCI segment and bus/device/function address.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Bdf {
+    /// PCI segment group number.
+    pub segment: u16,
     /// Bus number, 0 to 255.
     pub bus: u8,
     /// Device number, 0 to 31.
@@ -90,8 +92,18 @@ pub struct Bdf {
 }
 
 impl Bdf {
-    /// Build a triple, refusing device and function numbers the hardware cannot express.
+    /// Build a segment-zero address, refusing unrepresentable device/function numbers.
     pub const fn new(bus: u8, device: u8, function: u8) -> Result<Self, PciError> {
+        Self::in_segment(0, bus, device, function)
+    }
+
+    /// Build a segment-qualified address, refusing unrepresentable device/function numbers.
+    pub const fn in_segment(
+        segment: u16,
+        bus: u8,
+        device: u8,
+        function: u8,
+    ) -> Result<Self, PciError> {
         if device >= 32 {
             return Err(PciError::InvalidDevice);
         }
@@ -99,18 +111,30 @@ impl Bdf {
             return Err(PciError::InvalidFunction);
         }
         Ok(Self {
+            segment,
             bus,
             device,
             function,
         })
+    }
+
+    /// Pack the validated segment/BDF tuple into a unique 32-bit internal identity:
+    /// segment in bits 31:16, bus 15:8, device 7:3 and function 2:0.
+    #[must_use]
+    pub const fn packed_id(self) -> u32 {
+        ((self.segment as u32) << 16)
+            | ((self.bus as u32) << 8)
+            | ((self.device as u32) << 3)
+            | self.function as u32
     }
 }
 
 /// The value written to `0xCF8` to select one dword of configuration space.
 ///
 /// Bit 31 enables the mapping, bits 23:16 are the bus, 15:11 the device, 10:8 the function,
-/// and bits 7:2 the dword index. The low two bits of `offset` are discarded: the mechanism
-/// only addresses whole dwords, and the data port supplies the byte lanes.
+/// and bits 7:2 the dword index. This legacy format has no segment field; callers must reject
+/// nonzero-segment addresses before using it. The low two bits of `offset` are discarded:
+/// the mechanism only addresses whole dwords, and the data port supplies the byte lanes.
 #[must_use]
 pub const fn config_address(bdf: Bdf, offset: u8) -> u32 {
     0x8000_0000
@@ -125,6 +149,10 @@ pub const fn config_address(bdf: Bdf, offset: u8) -> u32 {
 /// `offset` is a byte offset within the 256-byte legacy space. Implementations address the
 /// dword containing it; callers pass dword-aligned offsets.
 pub trait ConfigSpace {
+    /// Segment selected by this configuration view. Legacy/unqualified transports are segment 0.
+    fn segment(&self) -> u16 {
+        0
+    }
     /// Read the dword at `offset` of function `bdf`.
     fn read_u32(&mut self, bdf: Bdf, offset: u8) -> u32;
     /// Write the dword at `offset` of function `bdf`.
@@ -543,7 +571,7 @@ impl Inventory {
 /// a bridge that breaks that rule is counted in [`Inventory::refused_bridges`] and not followed,
 /// which also makes the scan terminate on any input.
 pub fn enumerate<C: ConfigSpace>(cfg: &mut C) -> Inventory {
-    enumerate_range(cfg, 0, 0)
+    enumerate_ranges(cfg, &[(0, 0)])
 }
 
 /// Enumerate declared root buses in an inclusive firmware range and their bridges.
@@ -551,15 +579,26 @@ pub fn enumerate<C: ConfigSpace>(cfg: &mut C) -> Inventory {
 /// Unlike [`enumerate`], every bus in the supplied range is a root. This supports
 /// MCFG allocations with nonzero first buses. A reversed range yields an empty inventory.
 pub fn enumerate_range<C: ConfigSpace>(cfg: &mut C, first: u8, last: u8) -> Inventory {
+    enumerate_ranges(cfg, &[(first, last)])
+}
+
+/// Enumerate several declared root-bus ranges in one segment, scanning every bus only once.
+///
+/// This is useful when one segment has several disjoint MCFG allocations. Overlapping roots and
+/// buses reached through bridges are deduplicated by the shared visited-bus map.
+pub fn enumerate_ranges<C: ConfigSpace>(cfg: &mut C, roots: &[(u8, u8)]) -> Inventory {
+    let segment = cfg.segment();
     let mut inventory = Inventory::default();
     let mut reached = [false; 256];
-    if first <= last {
-        reached[usize::from(first)..=usize::from(last)].fill(true);
+    for &(first, last) in roots {
+        if first <= last {
+            reached[usize::from(first)..=usize::from(last)].fill(true);
+        }
     }
     let mut bus = 0usize;
     while bus < 256 {
         if reached[bus] {
-            scan_bus(cfg, bus as u8, &mut inventory, &mut reached);
+            scan_bus(cfg, segment, bus as u8, &mut inventory, &mut reached);
         }
         bus += 1;
     }
@@ -568,20 +607,21 @@ pub fn enumerate_range<C: ConfigSpace>(cfg: &mut C, first: u8, last: u8) -> Inve
 
 fn scan_bus<C: ConfigSpace>(
     cfg: &mut C,
+    segment: u16,
     bus: u8,
     inventory: &mut Inventory,
     reached: &mut [bool; 256],
 ) {
     let mut device = 0u8;
     while device < 32 {
-        // A device number is valid by construction; `Bdf::new` cannot fail here.
-        if let Ok(first) = Bdf::new(bus, device, 0) {
+        // Device/function numbers are valid by construction; only the BDF address is formed here.
+        if let Ok(first) = Bdf::in_segment(segment, bus, device, 0) {
             if let Some(info) = read_function(cfg, first) {
                 let functions = if info.multifunction { 8 } else { 1 };
                 record(cfg, info, inventory, reached, bus);
                 let mut function = 1u8;
                 while function < functions {
-                    if let Ok(bdf) = Bdf::new(bus, device, function) {
+                    if let Ok(bdf) = Bdf::in_segment(segment, bus, device, function) {
                         if let Some(extra) = read_function(cfg, bdf) {
                             record(cfg, extra, inventory, reached, bus);
                         }

@@ -1,11 +1,16 @@
 //! I/O APIC setup for the legacy IRQ lines described by the ACPI MADT.
 
 use core::ptr;
+#[cfg(feature = "hal-e1000-recovery-test")]
+use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+use crate::sync::IrqLock;
 use nolx_hal_core::acpi::{
     InterruptOverride, IoApicNmiSource, Madt, MAX_IO_APICS, MAX_IO_APIC_NMIS,
 };
+
+use super::irq_vectors::{self, VectorKind};
 
 const IOAPIC_REGISTER_WINDOW: usize = 0x10;
 const IOAPIC_VERSION: u8 = 0x01;
@@ -29,10 +34,25 @@ static NMI_ROUTE_LOW_REGISTER: [AtomicU32; MAX_IO_APIC_NMIS] =
     [const { AtomicU32::new(0) }; MAX_IO_APIC_NMIS];
 
 const PCI_GSIS: usize = 24;
+const PCI_REDIRECTION_WRITABLE: u32 = 0x1afff;
+const E1000_INTX_KIND: VectorKind = VectorKind::E1000Intx;
 static PCI_BASE: [AtomicU64; PCI_GSIS] = [const { AtomicU64::new(0) }; PCI_GSIS];
 static PCI_REGISTER: [AtomicU32; PCI_GSIS] = [const { AtomicU32::new(0) }; PCI_GSIS];
 static PCI_DESTINATION: AtomicU32 = AtomicU32::new(0);
+/// Readback-verified unmasked low words, indexed by their shared GSI route.
 static PCI_PROGRAMMED: [AtomicU32; PCI_GSIS] = [const { AtomicU32::new(0) }; PCI_GSIS];
+/// A vector retained after a failed route transaction whose remask or owner release was not
+/// confirmed; it prevents another acquisition from claiming a second vector for this GSI.
+static PCI_QUARANTINED_VECTOR: [AtomicU32; PCI_GSIS] = [const { AtomicU32::new(0) }; PCI_GSIS];
+/// Number of live adapter sources sharing each programmed route.
+static PCI_REFERENCES: [AtomicU32; PCI_GSIS] = [const { AtomicU32::new(0) }; PCI_GSIS];
+/// Serializes route-vector ownership, shared references and I/O APIC programming.
+static PCI_ROUTE_LOCK: IrqLock = IrqLock::new();
+
+#[cfg(feature = "hal-e1000-recovery-test")]
+static FAIL_NEXT_PCI_PROGRAMMED_READBACK: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "hal-e1000-recovery-test")]
+static FAIL_NEXT_PCI_REMASK_READBACK: AtomicBool = AtomicBool::new(false);
 
 /// Failure while validating or programming the I/O APICs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +69,8 @@ pub enum IoApicError {
     InvalidOverride,
     /// I/O APIC records overlap in MMIO address or global-system-interrupt coverage.
     ConflictingTopology,
+    /// Reinitialization would erase active or quarantined PCI route ownership.
+    RouteStateActive,
     /// An NMI-source record contains reserved polarity or trigger encodings.
     InvalidNmiSource,
     /// An NMI source names a GSI not covered by an I/O APIC.
@@ -85,6 +107,19 @@ struct NmiRoute {
 pub fn init(madt: &Madt, destination_apic_id: u32) -> Result<(), IoApicError> {
     if destination_apic_id > u8::MAX as u32 {
         return Err(IoApicError::UnsupportedDestination);
+    }
+    if PCI_PROGRAMMED
+        .iter()
+        .any(|entry| entry.load(Ordering::Acquire) != 0)
+        || PCI_REFERENCES
+            .iter()
+            .any(|entry| entry.load(Ordering::Acquire) != 0)
+        || PCI_QUARANTINED_VECTOR
+            .iter()
+            .any(|entry| entry.load(Ordering::Acquire) != 0)
+    {
+        // Reinitialization may not erase live or quarantined route ownership.
+        return Err(IoApicError::RouteStateActive);
     }
     let descriptions = madt.io_apics();
     if descriptions.is_empty() {
@@ -249,6 +284,8 @@ pub fn init(madt: &Madt, destination_apic_id: u32) -> Result<(), IoApicError> {
     for gsi in 0..PCI_GSIS {
         PCI_BASE[gsi].store(0, Ordering::Relaxed);
         PCI_PROGRAMMED[gsi].store(0, Ordering::Relaxed);
+        PCI_QUARANTINED_VECTOR[gsi].store(0, Ordering::Relaxed);
+        PCI_REFERENCES[gsi].store(0, Ordering::Relaxed);
         if gsi < 3
             || gsi == 12
             || madt
@@ -290,53 +327,198 @@ pub fn unmask_legacy_irq(irq: u8) -> bool {
     true
 }
 
-/// Program a validated current firmware GSI, preserving its actual electrical flags.
-/// Fixed vectors 0x23..0x37 exclude PIT/keyboard/mouse and MADT NMI reservations.
-/// Shared owners must agree exactly. Readback failure leaves the input masked.
-pub fn unmask_pci_route(irq: nolx_power_core::routing::Interrupt) -> Option<u8> {
+/// Acquire the readback-verified current firmware route for one e1000 source.
+///
+/// The route is keyed by GSI: adapters sharing the same GSI share one local-APIC vector,
+/// and its reference count keeps the route alive until the last adapter has stopped. A new
+/// route takes a dynamically claimed vector before the I/O APIC is unmasked. Unsupported,
+/// conflicting or unverified routes are refused. Failed programming is remasked and checked;
+/// if the mask cannot be confirmed, the vector is retained and the GSI quarantined so a later
+/// acquisition cannot claim a second vector for the uncertain route.
+pub fn acquire_pci_route(irq: nolx_power_core::routing::Interrupt) -> Option<u8> {
     let index = usize::try_from(irq.gsi).ok()?;
     if index >= PCI_GSIS || !irq.level || !irq.shared {
         return None;
     }
-    let _guard = super::cpu::InterruptGuard::disable();
+    let _guard = PCI_ROUTE_LOCK.lock();
     let base = PCI_BASE[index].load(Ordering::Acquire);
     if base == 0 {
         return None;
     }
     let register = PCI_REGISTER[index].load(Ordering::Relaxed) as u8;
-    let vector = VECTOR_BASE + index as u8;
-    let value = u32::from(vector)
-        | REDIRECTION_LEVEL_TRIGGERED
-        | if irq.active_low {
-            REDIRECTION_ACTIVE_LOW
-        } else {
-            0
-        };
-    let previous = PCI_PROGRAMMED[index].load(Ordering::Relaxed);
-    if previous != 0 && previous != value {
+    let destination = PCI_DESTINATION.load(Ordering::Relaxed);
+    let references = PCI_REFERENCES[index].load(Ordering::Relaxed);
+    let programmed = PCI_PROGRAMMED[index].load(Ordering::Relaxed);
+
+    if PCI_QUARANTINED_VECTOR[index].load(Ordering::Acquire) != 0 {
+        // Ownership from an earlier failed transaction is unverified. Keep its claim and refuse
+        // this GSI rather than leaking another vector on each retry.
         return None;
     }
-    let destination = PCI_DESTINATION.load(Ordering::Relaxed);
+    if references != 0 {
+        let vector = programmed as u8;
+        let expected = pci_route_value(vector, irq);
+        if programmed != expected
+            || irq_vectors::owner(vector) != Some((E1000_INTX_KIND, index))
+            || ioapic_read(base, register) & PCI_REDIRECTION_WRITABLE != expected
+            || ioapic_read(base, register + 1) & 0xff000000 != destination
+        {
+            return None;
+        }
+        PCI_REFERENCES[index].store(references.checked_add(1)?, Ordering::Release);
+        return Some(vector);
+    }
+    if programmed != 0 {
+        // A nonempty route without a reference is stale or inconsistent; never overwrite it.
+        return None;
+    }
+
+    let vector = irq_vectors::claim(E1000_INTX_KIND, index)?;
+    let value = pci_route_value(vector, irq);
+    let masked = value | REDIRECTION_MASKED;
     ioapic_write(
         base,
         register,
         ioapic_read(base, register) | REDIRECTION_MASKED,
     );
+    if ioapic_read(base, register) & REDIRECTION_MASKED == 0 {
+        retain_or_release_failed_pci_route(index, base, register, vector, masked);
+        return None;
+    }
     ioapic_write(base, register + 1, destination);
-    ioapic_write(base, register, value | REDIRECTION_MASKED);
-    const WRITABLE: u32 = 0x1afff;
-    if ioapic_read(base, register) & WRITABLE != value | REDIRECTION_MASKED
+    ioapic_write(base, register, masked);
+    if !pci_route_programmed_readback(base, register, masked)
         || ioapic_read(base, register + 1) & 0xff000000 != destination
     {
+        retain_or_release_failed_pci_route(index, base, register, vector, masked);
         return None;
     }
     ioapic_write(base, register, value);
-    if ioapic_read(base, register) & WRITABLE != value {
-        ioapic_write(base, register, value | REDIRECTION_MASKED);
+    if ioapic_read(base, register) & PCI_REDIRECTION_WRITABLE != value {
+        retain_or_release_failed_pci_route(index, base, register, vector, masked);
         return None;
     }
-    PCI_PROGRAMMED[index].store(value, Ordering::Release);
+    PCI_PROGRAMMED[index].store(value, Ordering::Relaxed);
+    PCI_REFERENCES[index].store(1, Ordering::Release);
     Some(vector)
+}
+
+/// A failed transaction can relinquish its vector only after the route's mask bit reads back
+/// and the matching owner entry releases. Otherwise the claim and per-GSI marker are retained,
+/// preventing a retry from allocating a second vector while route state is uncertain.
+fn retain_or_release_failed_pci_route(
+    index: usize,
+    base: u64,
+    register: u8,
+    vector: u8,
+    masked: u32,
+) {
+    ioapic_write(base, register, masked);
+    if pci_route_masked_readback(base, register)
+        && irq_vectors::release(vector, E1000_INTX_KIND, index)
+    {
+        return;
+    }
+    PCI_QUARANTINED_VECTOR[index].store(u32::from(vector), Ordering::Release);
+}
+
+fn pci_route_programmed_readback(base: u64, register: u8, expected: u32) -> bool {
+    #[cfg(feature = "hal-e1000-recovery-test")]
+    if FAIL_NEXT_PCI_PROGRAMMED_READBACK.swap(false, Ordering::AcqRel) {
+        return false;
+    }
+    ioapic_read(base, register) & PCI_REDIRECTION_WRITABLE == expected
+}
+
+fn pci_route_masked_readback(base: u64, register: u8) -> bool {
+    #[cfg(feature = "hal-e1000-recovery-test")]
+    if FAIL_NEXT_PCI_REMASK_READBACK.swap(false, Ordering::AcqRel) {
+        return false;
+    }
+    ioapic_read(base, register) & REDIRECTION_MASKED != 0
+}
+
+#[cfg(feature = "hal-e1000-recovery-test")]
+/// Inject a failed route readback followed by an unconfirmed retry-mask readback.
+pub(crate) fn inject_pci_route_remask_readback_failure() {
+    FAIL_NEXT_PCI_PROGRAMMED_READBACK.store(true, Ordering::Release);
+    FAIL_NEXT_PCI_REMASK_READBACK.store(true, Ordering::Release);
+}
+
+/// Release one adapter's reference after its device and PCI INTx source have been proven quiet.
+/// The final reference masks and readbacks the I/O APIC entry before returning the vector.
+pub fn release_pci_route(irq: nolx_power_core::routing::Interrupt, vector: u8) -> bool {
+    let Ok(index) = usize::try_from(irq.gsi) else {
+        return false;
+    };
+    if index >= PCI_GSIS || !irq.level || !irq.shared {
+        return false;
+    }
+    let _guard = PCI_ROUTE_LOCK.lock();
+    let base = PCI_BASE[index].load(Ordering::Acquire);
+    if base == 0 {
+        return false;
+    }
+    let register = PCI_REGISTER[index].load(Ordering::Relaxed) as u8;
+    let destination = PCI_DESTINATION.load(Ordering::Relaxed);
+    let references = PCI_REFERENCES[index].load(Ordering::Relaxed);
+    let expected = pci_route_value(vector, irq);
+    if references == 0
+        || PCI_PROGRAMMED[index].load(Ordering::Relaxed) != expected
+        || irq_vectors::owner(vector) != Some((E1000_INTX_KIND, index))
+        || ioapic_read(base, register) & PCI_REDIRECTION_WRITABLE != expected
+        || ioapic_read(base, register + 1) & 0xff000000 != destination
+    {
+        return false;
+    }
+    if references > 1 {
+        PCI_REFERENCES[index].store(references - 1, Ordering::Release);
+        return true;
+    }
+
+    let masked = expected | REDIRECTION_MASKED;
+    ioapic_write(base, register, masked);
+    if ioapic_read(base, register) & PCI_REDIRECTION_WRITABLE != masked {
+        return false;
+    }
+    if !irq_vectors::release(vector, E1000_INTX_KIND, index) {
+        return false;
+    }
+    PCI_PROGRAMMED[index].store(0, Ordering::Relaxed);
+    PCI_REFERENCES[index].store(0, Ordering::Release);
+    true
+}
+
+fn pci_route_value(vector: u8, irq: nolx_power_core::routing::Interrupt) -> u32 {
+    u32::from(vector)
+        | REDIRECTION_LEVEL_TRIGGERED
+        | if irq.active_low {
+            REDIRECTION_ACTIVE_LOW
+        } else {
+            0
+        }
+}
+
+#[cfg(feature = "hal-e1000-recovery-test")]
+/// The active reference count of one supported GSI route, for native lifecycle assertions.
+pub(crate) fn pci_route_references(gsi: u32) -> usize {
+    usize::try_from(gsi)
+        .ok()
+        .and_then(|index| PCI_REFERENCES.get(index))
+        .map(|references| references.load(Ordering::Acquire) as usize)
+        .unwrap_or(0)
+}
+
+#[cfg(feature = "hal-e1000-recovery-test")]
+/// The vector retained for an unverified route transaction, if that GSI is quarantined.
+pub(crate) fn pci_route_quarantined_vector(gsi: u32) -> Option<u8> {
+    let index = usize::try_from(gsi).ok()?;
+    let vector = PCI_QUARANTINED_VECTOR.get(index)?.load(Ordering::Acquire);
+    if vector == 0 {
+        None
+    } else {
+        u8::try_from(vector).ok()
+    }
 }
 
 /// Unmask MADT NMI-source routes after the local APIC and NMI IDT path are ready.

@@ -53,6 +53,15 @@ fn pinned(dev: usize, peer: usize, region: Region, mappings: usize, vector: u8, 
     assert_eq!(mmio::live_mappings(), mappings);
     assert!(STATE[dev].lock().rings.is_some());
     assert!(RECEIVE[dev].lock().is_some());
+    assert_eq!(RX_VECTOR[dev].load(Ordering::Acquire), 0);
+    let Some((route, held_vector)) = *PCI_ROUTE[dev].lock() else {
+        panic!("failed e1000 retained no shared INTx route reference");
+    };
+    assert_eq!(held_vector, vector);
+    assert_eq!(
+        super::super::irq_vectors::owner(vector),
+        Some((INTX_KIND, route.gsi as usize))
+    );
     assert!(region.read32(e1000::REG_CTRL).is_ok());
     let bdf = STATE[dev].lock().bdf.unwrap();
     let command = ConfigAccess.read_u32(bdf, 4);
@@ -64,15 +73,43 @@ fn pinned(dev: usize, peer: usize, region: Region, mappings: usize, vector: u8, 
     assert_eq!(driver_start::start(dev), Err(Error::BadState));
     assert_eq!(driver_start::remove(dev), Err(Error::Busy));
 }
-fn recovered(dev: usize, region: Region, mappings: usize, vector: u8) {
+fn recovered(dev: usize, region: Region, mappings: usize, route: Interrupt, vector: u8) {
     driver_start::recover(dev).unwrap();
     assert_eq!(driver_start::state(dev), Ok(FrameworkState::Stopped));
     assert!(removable(dev));
+    assert!(PCI_ROUTE[dev].lock().is_none());
+    assert_eq!(super::super::ioapic::pci_route_references(route.gsi), 1);
+    assert_eq!(
+        super::super::irq_vectors::owner(vector),
+        Some((INTX_KIND, route.gsi as usize)),
+        "shared route vector was released while its peer is still active"
+    );
     assert_eq!(super::super::dma::live_pages(), 11);
     assert_eq!(mmio::live_mappings() + 1, mappings);
     assert!(region.read32(0).is_err());
     detached(dev, vector);
     refused(dev);
+}
+fn route_owned(dev: usize, irq: Interrupt, vector: u8, references: usize, phase: &'static str) {
+    assert_eq!(*PCI_ROUTE[dev].lock(), Some((irq, vector)));
+    assert_eq!(
+        RX_VECTOR[dev].load(Ordering::Acquire),
+        vector,
+        "{phase}: handle {dev} lost vector {vector:#x} for GSI {} (state {:?}, BDF {:?}, route {:?}, owner {:?})",
+        irq.gsi,
+        driver_start::state(dev),
+        STATE[dev].lock().bdf,
+        *PCI_ROUTE[dev].lock(),
+        super::super::irq_vectors::owner(vector)
+    );
+    assert_eq!(
+        super::super::irq_vectors::owner(vector),
+        Some((INTX_KIND, irq.gsi as usize))
+    );
+    assert_eq!(
+        super::super::ioapic::pci_route_references(irq.gsi),
+        references
+    );
 }
 fn exchange(dev: usize, sequence: u8, expected: [u8; 6], console: &mut dyn HalConsole) {
     let mac = mac(dev).unwrap();
@@ -113,13 +150,21 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     assert_eq!(peer_mac, [2, 0, 0, 0, 0, 0x21]);
     let mappings = mmio::live_mappings();
     let mut region = STATE[dev].lock().region.unwrap();
-    let vector = RX_VECTOR[peer].load(Ordering::Acquire);
+    let (target_irq, target_vector) = PCI_ROUTE[dev].lock().unwrap();
+    let (peer_irq, vector) = PCI_ROUTE[peer].lock().unwrap();
+    assert_eq!(target_irq, peer_irq, "fixture must share one GSI route");
+    assert_eq!(target_vector, vector);
     assert_eq!(
-        vector,
-        32 + super::super::pci_intx::lookup(STATE[dev].lock().bdf.unwrap())
-            .unwrap()
-            .gsi as u8
+        super::super::irq_vectors::owner(vector),
+        Some((INTX_KIND, target_irq.gsi as usize))
     );
+    assert_eq!(
+        super::super::ioapic::pci_route_references(target_irq.gsi),
+        2
+    );
+    // The target is intentionally quarantined after its injected post-ARP startup failure;
+    // pinned() verifies its retained route reference while the source vector is masked.
+    route_owned(peer, peer_irq, vector, 2, "initial live peer");
     pinned(dev, peer, region, mappings, vector, true);
     assert_eq!(driver_start::recover(peer), Err(Error::BadState));
     assert_eq!(
@@ -131,9 +176,15 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     probe(console); // A retained failed BDF must not bind a second owner.
     pinned(dev, peer, region, mappings, vector, true);
     exchange(peer, 0, peer_mac, console);
-    recovered(dev, region, mappings, vector);
+    recovered(dev, region, mappings, target_irq, vector);
     driver_start::start(dev).unwrap();
-    assert_eq!(RX_VECTOR[dev].load(Ordering::Acquire), vector);
+    route_owned(
+        dev,
+        target_irq,
+        vector,
+        2,
+        "post-startup-quarantine recovery",
+    );
     exchange(dev, 1, target_mac, console);
     exchange(peer, 2, peer_mac, console);
     let _=writeln!(console,"e1000-recovery: post-ARP startup quarantine recovered; DMA 22 -> 11 -> 22, shared INTx live");
@@ -145,13 +196,15 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     assert_eq!(driver_start::recover(dev), Err(Error::OpFailed));
     pinned(dev, peer, region, mappings, vector, true);
     exchange(peer, 3, peer_mac, console);
-    recovered(dev, region, mappings, vector);
+    recovered(dev, region, mappings, target_irq, vector);
     driver_start::start(dev).unwrap();
+    route_owned(dev, target_irq, vector, 2, "failed-stop recovery");
     exchange(dev, 4, target_mac, console);
     exchange(peer, 5, peer_mac, console);
     let _=writeln!(console,"e1000-recovery: failed stop/repeated refusal retained 22 pages, stale MMIO and IRQ source retired after recovery");
 
     driver_start::stop(dev).unwrap();
+    route_owned(peer, peer_irq, vector, 1, "peer after target stop");
     MODE.store(1, Ordering::Release);
     assert_eq!(driver_start::start(dev), Err(Error::OpFailed));
     assert_eq!(
@@ -163,6 +216,7 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     assert!(removable(dev));
     driver_start::recover(dev).unwrap();
     driver_start::start(dev).unwrap();
+    route_owned(dev, target_irq, vector, 2, "allocation-failure recovery");
     exchange(dev, 6, target_mac, console);
     let _ = writeln!(
         console,
@@ -177,8 +231,9 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     assert_eq!(driver_start::recover(dev), Err(Error::OpFailed));
     pinned(dev, peer, region, mappings, vector, true);
     exchange(peer, 7, peer_mac, console);
-    recovered(dev, region, mappings, vector);
+    recovered(dev, region, mappings, target_irq, vector);
     driver_start::start(dev).unwrap();
+    route_owned(dev, target_irq, vector, 2, "RX-only recovery");
     exchange(dev, 8, target_mac, console);
     let _ = writeln!(
         console,
@@ -190,16 +245,86 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     assert_eq!(driver_start::stop(dev), Err(Error::OpFailed));
     pinned(dev, peer, region, mappings, vector, false);
     exchange(peer, 9, peer_mac, console);
-    recovered(dev, region, mappings, vector);
+    recovered(dev, region, mappings, target_irq, vector);
     driver_start::start(dev).unwrap();
+    route_owned(dev, target_irq, vector, 2, "withheld-PCI-proof recovery");
     exchange(dev, 10, target_mac, console);
     let _=writeln!(console,"e1000-recovery: deliberately withheld PCI exclusion proof pinned DMA despite actual bus-master disable");
     driver_start::stop(dev).unwrap();
+    assert_eq!(
+        super::super::ioapic::pci_route_references(target_irq.gsi),
+        1
+    );
     driver_start::stop(peer).unwrap();
+    assert_eq!(
+        super::super::ioapic::pci_route_references(target_irq.gsi),
+        0
+    );
+    assert_eq!(super::super::irq_vectors::owner(vector), None);
+    let _ = writeln!(
+        console,
+        "e1000-recovery: shared GSI {} vector {:#x} released only after last checked stop",
+        target_irq.gsi, vector
+    );
     detached(dev, vector);
     detached(peer, vector);
     assert_eq!(super::super::dma::live_pages(), 0);
     assert_eq!(mmio::live_mappings() + 2, mappings);
+
+    // Force a programming readback failure followed by an inconclusive remask readback.
+    // The route manager must retain the claimed vector and refuse a second claim for this GSI.
+    let vectors_before_quarantine = super::super::irq_vectors::outstanding();
+    super::super::ioapic::inject_pci_route_remask_readback_failure();
+    assert_eq!(driver_start::start(dev), Err(Error::OpFailed));
+    driver_start::recover(dev).unwrap();
+    assert_eq!(
+        super::super::ioapic::pci_route_references(target_irq.gsi),
+        0
+    );
+    assert!(PCI_ROUTE[dev].lock().is_none());
+    assert!(removable(dev));
+    let quarantined_vector = super::super::ioapic::pci_route_quarantined_vector(target_irq.gsi)
+        .expect("unverified route mask did not quarantine its vector");
+    assert!(super::super::irq_vectors::is_managed_vector(
+        quarantined_vector
+    ));
+    assert_eq!(
+        super::super::irq_vectors::owner(quarantined_vector),
+        Some((INTX_KIND, target_irq.gsi as usize))
+    );
+    assert_eq!(
+        super::super::irq_vectors::outstanding(),
+        vectors_before_quarantine + 1
+    );
+    detached(dev, quarantined_vector);
+
+    // A retry is refused from the per-GSI quarantine record, not given a fresh vector.
+    assert_eq!(driver_start::start(dev), Err(Error::OpFailed));
+    driver_start::recover(dev).unwrap();
+    assert_eq!(
+        super::super::ioapic::pci_route_quarantined_vector(target_irq.gsi),
+        Some(quarantined_vector)
+    );
+    assert_eq!(
+        super::super::irq_vectors::owner(quarantined_vector),
+        Some((INTX_KIND, target_irq.gsi as usize))
+    );
+    assert_eq!(
+        super::super::irq_vectors::outstanding(),
+        vectors_before_quarantine + 1
+    );
+    assert_eq!(
+        super::super::ioapic::pci_route_references(target_irq.gsi),
+        0
+    );
+    assert!(removable(dev));
+    let _ = writeln!(
+        console,
+        "e1000-recovery: inconclusive remask readback quarantined GSI {} vector {:#x}; retry made no duplicate claim",
+        target_irq.gsi,
+        quarantined_vector
+    );
+
     driver_start::remove(dev).unwrap();
     driver_start::remove(peer).unwrap();
     crate::mm::audit().unwrap();

@@ -42,6 +42,9 @@ pub struct ConfigAccess;
 
 impl ExtendedConfigSpace for ConfigAccess {
     fn read_dword(&mut self, segment: u16, bdf: Bdf, offset: u16) -> Result<u32, EcamError> {
+        if bdf.segment != segment {
+            return Err(EcamError::OutsideWindow);
+        }
         let mappings = MAPPINGS.lock();
         for mapping in mappings.iter().flatten() {
             if mapping.segment == segment && (mapping.first..=mapping.last).contains(&bdf.bus) {
@@ -72,6 +75,9 @@ impl ExtendedConfigSpace for ConfigAccess {
         offset: u16,
         value: u32,
     ) -> Result<(), EcamError> {
+        if bdf.segment != segment {
+            return Err(EcamError::OutsideWindow);
+        }
         let mappings = MAPPINGS.lock();
         for mapping in mappings.iter().flatten() {
             if mapping.segment == segment && (mapping.first..=mapping.last).contains(&bdf.bus) {
@@ -99,11 +105,11 @@ impl ExtendedConfigSpace for ConfigAccess {
 
 impl ConfigSpace for ConfigAccess {
     fn read_u32(&mut self, bdf: Bdf, offset: u8) -> u32 {
-        self.read_dword(0, bdf, u16::from(offset & !3))
+        self.read_dword(bdf.segment, bdf, u16::from(offset & !3))
             .unwrap_or(u32::MAX)
     }
     fn write_u32(&mut self, bdf: Bdf, offset: u8, value: u32) {
-        let _ = self.write_dword(0, bdf, u16::from(offset & !3), value);
+        let _ = self.write_dword(bdf.segment, bdf, u16::from(offset & !3), value);
     }
 }
 
@@ -135,6 +141,7 @@ pub fn select_transport(console: &mut dyn HalConsole) {
         };
         if allocation.segment == 0 {
             let bdf = Bdf {
+                segment: 0,
                 bus: allocation.start_bus,
                 device: 0,
                 function: 0,
@@ -163,11 +170,83 @@ pub fn select_transport(console: &mut dyn HalConsole) {
     }
 }
 
+/// Enumerate segment-zero legacy roots plus every successfully mapped MCFG allocation.
+///
+/// Each allocation is treated as a declared root-bus range, so equal bus/device/function
+/// numbers in different segments remain distinct. Overlapping discovery through a bridge is
+/// deduplicated by the segment-qualified BDF.
+pub fn enumerate_native() -> nolx_pci_core::Inventory {
+    let mappings = *MAPPINGS.lock();
+
+    // Fold all segment-zero MCFG ranges into the legacy root scan. ConfigAccess selects ECAM
+    // within mapped ranges and legacy ports elsewhere; one visited-bus map avoids double-counting
+    // bridges when an MCFG range overlaps bus 0 or a bus reached through a bridge.
+    let mut segment_zero_roots = [(0, 0); MAX_ALLOCATIONS + 1];
+    segment_zero_roots[0] = (0, 0);
+    let mut segment_zero_count = 1;
+    for allocation in mappings.iter().flatten() {
+        if allocation.segment == 0 {
+            segment_zero_roots[segment_zero_count] = (allocation.first, allocation.last);
+            segment_zero_count += 1;
+        }
+    }
+    let mut combined = nolx_pci_core::enumerate_ranges(
+        &mut ConfigAccess,
+        &segment_zero_roots[..segment_zero_count],
+    );
+
+    // Each nonzero segment has its own root set and visited map. Group disjoint mappings before
+    // scanning, so cross-allocation bridges and repeated roots are each accounted exactly once.
+    for (index, allocation) in mappings.iter().enumerate() {
+        let Some(allocation) = allocation.as_ref() else {
+            continue;
+        };
+        if allocation.segment == 0
+            || mappings[..index]
+                .iter()
+                .flatten()
+                .any(|previous| previous.segment == allocation.segment)
+        {
+            continue;
+        }
+        let mut roots = [(0, 0); MAX_ALLOCATIONS];
+        let mut root_count = 0;
+        for range in mappings
+            .iter()
+            .flatten()
+            .filter(|range| range.segment == allocation.segment)
+        {
+            roots[root_count] = (range.first, range.last);
+            root_count += 1;
+        }
+        let mut transport = ConfigAccess;
+        let mut config = SegmentConfig {
+            transport: &mut transport,
+            segment: allocation.segment,
+        };
+        let found = nolx_pci_core::enumerate_ranges(&mut config, &roots[..root_count]);
+        combined.refused_bridges = combined
+            .refused_bridges
+            .saturating_add(found.refused_bridges);
+        combined.overflowed |= found.overflowed;
+        for info in found.as_slice() {
+            if combined.as_slice().iter().any(|old| old.bdf == info.bdf) {
+                continue;
+            }
+            let _ = combined.push(*info);
+        }
+    }
+    combined
+}
+
 /// The legacy configuration mechanism over the two architected ports.
 pub struct LegacyPorts;
 
 impl ConfigSpace for LegacyPorts {
     fn read_u32(&mut self, bdf: Bdf, offset: u8) -> u32 {
+        if bdf.segment != 0 || Bdf::new(bdf.bus, bdf.device, bdf.function).is_err() {
+            return u32::MAX;
+        }
         let _guard = LEGACY_LOCK.lock();
         // SAFETY: 0xCF8 and 0xCFC are the configuration ports the PCI specification defines on
         // every x86 PC. A configuration read has no side effect of its own; an absent function
@@ -182,6 +261,9 @@ impl ConfigSpace for LegacyPorts {
     }
 
     fn write_u32(&mut self, bdf: Bdf, offset: u8, value: u32) {
+        if bdf.segment != 0 || Bdf::new(bdf.bus, bdf.device, bdf.function).is_err() {
+            return;
+        }
         let _guard = LEGACY_LOCK.lock();
         // SAFETY: as [`LegacyPorts::read_u32`]. Callers are PCI configuration algorithms
         // (BAR probing, device enable and interrupt setup); the pair stays locked.
@@ -195,9 +277,9 @@ impl ConfigSpace for LegacyPorts {
     }
 }
 
-/// Enumerate PCI configuration space and report every function found.
+/// Enumerate PCI configuration space across segment-zero roots and mapped MCFG allocations.
 pub fn init(console: &mut dyn HalConsole) {
-    let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
+    let inventory = enumerate_native();
     let note = if inventory.overflowed {
         ", inventory incomplete"
     } else {
@@ -209,20 +291,38 @@ pub fn init(console: &mut dyn HalConsole) {
         inventory.len, inventory.refused_bridges
     );
     for info in inventory.as_slice() {
-        let _ = writeln!(
-            console,
-            "pci: {:02x}:{:02x}.{} {:04x}:{:04x} class {:02x}.{:02x} if {:02x} rev {:02x} hdr {}",
-            info.bdf.bus,
-            info.bdf.device,
-            info.bdf.function,
-            info.vendor_id,
-            info.device_id,
-            info.class,
-            info.subclass,
-            info.prog_if,
-            info.revision,
-            info.header_type
-        );
+        if info.bdf.segment == 0 {
+            let _ = writeln!(
+                console,
+                "pci: {:02x}:{:02x}.{} {:04x}:{:04x} class {:02x}.{:02x} if {:02x} rev {:02x} hdr {}",
+                info.bdf.bus,
+                info.bdf.device,
+                info.bdf.function,
+                info.vendor_id,
+                info.device_id,
+                info.class,
+                info.subclass,
+                info.prog_if,
+                info.revision,
+                info.header_type
+            );
+        } else {
+            let _ = writeln!(
+                console,
+                "pci: segment {:04x} {:02x}:{:02x}.{} {:04x}:{:04x} class {:02x}.{:02x} if {:02x} rev {:02x} hdr {}",
+                info.bdf.segment,
+                info.bdf.bus,
+                info.bdf.device,
+                info.bdf.function,
+                info.vendor_id,
+                info.device_id,
+                info.class,
+                info.subclass,
+                info.prog_if,
+                info.revision,
+                info.header_type
+            );
+        }
     }
     let allocations = *MAPPINGS.lock();
     for allocation in allocations.iter().flatten() {
@@ -278,7 +378,7 @@ fn report_bars(console: &mut dyn HalConsole, bdf: Bdf, bars: &BarSet) {
     }
 }
 
-/// Independently check mapped ECAM identities and extended headers against legacy discovery.
+/// Independently check segment-zero ECAM identities and extended headers against legacy ports.
 /// Called after the memory manager starts and before the periodic timer is enabled.
 fn probe_ecam(console: &mut dyn HalConsole, inventory: &nolx_pci_core::Inventory) {
     use nolx_pci_core::ecam::{AccessWidth, EcamWindow};
@@ -293,8 +393,11 @@ fn probe_ecam(console: &mut dyn HalConsole, inventory: &nolx_pci_core::Inventory
     let mut matched = 0;
     let mut refused = 0;
     for info in inventory.as_slice() {
-        // Legacy discovery describes only segment zero. Never compare its BDFs to
-        // another segment, even when that segment uses the same bus numbers.
+        if info.bdf.segment != 0 {
+            continue;
+        }
+        // This legacy-equivalence check applies only to segment zero. Never compare a
+        // nonzero-segment identity with legacy ports, even when bus numbers match.
         let Some(allocation) = mcfg.allocations().iter().find(|allocation| {
             allocation.segment == 0
                 && allocation.start_bus <= info.bdf.bus
@@ -399,6 +502,7 @@ pub fn prepare_resources(console: &mut dyn HalConsole) {
     let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
     let host = ConfigAccess.read_u32(
         Bdf {
+            segment: 0,
             bus: 0,
             device: 0,
             function: 0,

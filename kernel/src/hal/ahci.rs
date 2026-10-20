@@ -235,7 +235,7 @@ const DISPATCH: Dispatch = Dispatch {
 /// Probe for the controller, register the driver with the framework, and bind and start it. The
 /// bring-up's output is replayed on the console. Failure is reported and does not stop boot.
 pub fn probe(console: &mut dyn HalConsole) {
-    let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
+    let inventory = super::pci::enumerate_native();
     let mut found = false;
     for info in inventory.as_slice().iter().filter(|info| {
         info.class == AHCI_CLASS && info.subclass == AHCI_SUBCLASS && info.prog_if == AHCI_PROG_IF
@@ -279,12 +279,13 @@ pub fn probe(console: &mut dyn HalConsole) {
                 let _ = writeln!(console, "ahci: bound and started through nolx-df");
                 let _ = writeln!(
                     console,
-                    "ahci: instance {dev}, block {}, vector {:#x}, PCI {:02x}:{:02x}.{}",
+                    "ahci: instance {dev}, block {}, vector {:#x}, PCI {:02x}:{:02x}.{}, segment {}",
                     blockdev::device(dev).unwrap(),
                     state.vector.unwrap_or(0),
                     info.bdf.bus,
                     info.bdf.device,
-                    info.bdf.function
+                    info.bdf.function,
+                    info.bdf.segment
                 );
             }
             Err(error) => {

@@ -1,5 +1,6 @@
 use super::*;
 use crate::tests::{bdf, Machine, Regs};
+use crate::FunctionInfo;
 
 fn endpoint() -> Regs {
     let mut r = Regs::endpoint(0x1234, 0x5678, 1, 8, false);
@@ -264,6 +265,24 @@ fn overlapping_sibling_windows_and_incomplete_topology_are_refused() {
         plan(&mut m, &inventory, mem, io),
         Err(Error::Topology)
     ));
+}
+
+#[test]
+fn resource_repair_refuses_nonzero_segments_until_segmented_topology_is_supported() {
+    let mut inventory = Inventory::default();
+    inventory
+        .push(FunctionInfo {
+            bdf: Bdf::in_segment(7, 0, 3, 0).unwrap(),
+            vendor_id: 0x1234,
+            ..FunctionInfo::default()
+        })
+        .unwrap();
+    let (mem, io) = pools();
+    let mut machine = Machine::new();
+    assert_eq!(
+        plan(&mut machine, &inventory, mem, io).err(),
+        Some(Error::Topology)
+    );
 }
 
 #[test]

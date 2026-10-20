@@ -1,9 +1,10 @@
 //! Bounded MSI/MSI-X top half: acknowledge/mask the source and schedule idle work, never touch rings.
 use super::*;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use nolx_pci_core::msi;
 use usb::interrupt as rule;
-const FIRST_VECTOR: u8 = 0xd0;
+const KIND: super::super::irq_vectors::VectorKind = super::super::irq_vectors::VectorKind::Xhci;
+const NO_VECTOR: u8 = 0;
 const _: () = assert!(driver_start::DEVICES <= 16);
 #[derive(Clone, Copy)]
 struct Source {
@@ -17,20 +18,39 @@ static WORK: [AtomicBool; driver_start::DEVICES] =
     [const { AtomicBool::new(false) }; driver_start::DEVICES];
 static DELIVERED: [AtomicUsize; driver_start::DEVICES] =
     [const { AtomicUsize::new(0) }; driver_start::DEVICES];
+static VECTORS: [AtomicU8; driver_start::DEVICES] =
+    [const { AtomicU8::new(NO_VECTOR) }; driver_start::DEVICES];
+#[cfg(any(
+    feature = "hal-xhci-lifecycle-test",
+    feature = "hal-xhci-recovery-test",
+    feature = "hal-xhci-transfer-fault-test",
+    feature = "hal-xhci-start-fault-test"
+))]
+static LAST_VECTOR: [AtomicU8; driver_start::DEVICES] =
+    [const { AtomicU8::new(NO_VECTOR) }; driver_start::DEVICES];
+#[cfg(feature = "hal-xhci-irq-test")]
 pub(super) fn vector(dev: usize) -> u8 {
-    FIRST_VECTOR + dev as u8
+    VECTORS[dev].load(Ordering::Acquire)
 }
 pub(super) fn count(dev: usize) -> usize {
     DELIVERED[dev].load(Ordering::Acquire)
 }
 pub(super) fn handles(vector: u8) -> bool {
-    (FIRST_VECTOR..FIRST_VECTOR + driver_start::DEVICES as u8).contains(&vector)
+    matches!(
+        super::super::irq_vectors::owner(vector),
+        Some((kind, dev)) if kind == KIND && dev < driver_start::DEVICES
+    )
 }
 pub(super) fn interrupt(vector: u8) {
-    if !handles(vector) {
+    let Some((kind, dev)) = super::super::irq_vectors::owner(vector) else {
+        return;
+    };
+    if kind != KIND {
         return;
     }
-    let dev = usize::from(vector - FIRST_VECTOR);
+    if dev >= driver_start::DEVICES || VECTORS[dev].load(Ordering::Acquire) != vector {
+        return;
+    }
     let source = SOURCES[dev].lock();
     let Some(source) = source.as_ref() else {
         return;
@@ -72,7 +92,7 @@ fn disable_messages(bdf: Bdf) -> Result<bool, Failure> {
     }
     Ok(caps.find(msi::CAP_MSI).is_some() || caps.find(msi::CAP_MSI_X).is_some())
 }
-fn program(dev: usize, bdf: Bdf, regs: Region) -> Result<&'static str, Failure> {
+fn program(bdf: Bdf, regs: Region, vector: u8) -> Result<&'static str, Failure> {
     let caps = nolx_pci_core::capabilities(&mut ConfigAccess, bdf);
     // PCI command status is W1C: never echo the upper half while blocking legacy INTx.
     let command = ConfigAccess.read_u32(bdf, PCI_COMMAND) & 0xffff;
@@ -119,12 +139,8 @@ fn program(dev: usize, bdf: Bdf, regs: Region) -> Result<&'static str, Failure> 
         }
         let destination =
             u8::try_from(super::super::apic::current_apic_id()).map_err(|_| Failure::Interrupt)?;
-        let words = msi::msix_entry(
-            u64::from(msi::message_address(destination)),
-            vector(dev),
-            false,
-        )
-        .ok_or(Failure::Interrupt)?;
+        let words = msi::msix_entry(u64::from(msi::message_address(destination)), vector, false)
+            .ok_or(Failure::Interrupt)?;
         let at = u64::from(layout.table_offset);
         regs.write32(at + 12, msi::MSIX_VECTOR_MASKED)?;
         for (i, word) in words.chunks_exact(4).enumerate() {
@@ -145,13 +161,40 @@ fn program(dev: usize, bdf: Bdf, regs: Region) -> Result<&'static str, Failure> 
         }
         Ok("MSI-X")
     } else {
-        super::super::msix::enable_msi(bdf, vector(dev)).map_err(|_| Failure::Interrupt)?;
+        super::super::msix::enable_msi(bdf, vector).map_err(|_| Failure::Interrupt)?;
         let cap = caps.find(msi::CAP_MSI).ok_or(Failure::Interrupt)?;
         if (ConfigAccess.read_u32(bdf, cap.offset) >> 16) as u16 & msi::MSI_CTRL_ENABLE == 0 {
             return Err(Failure::Interrupt);
         }
         Ok("MSI")
     }
+}
+fn claim_vector(dev: usize) -> Result<u8, Failure> {
+    if VECTORS[dev].load(Ordering::Acquire) != NO_VECTOR {
+        return Err(Failure::Busy);
+    }
+    let vector = super::super::irq_vectors::claim(KIND, dev).ok_or(Failure::NoVector)?;
+    VECTORS[dev].store(vector, Ordering::Release);
+    Ok(vector)
+}
+/// Release the source's vector only after the controller stop has proved quiescence.
+pub(super) fn release_vector(dev: usize) -> bool {
+    let vector = VECTORS[dev].load(Ordering::Acquire);
+    if vector == NO_VECTOR {
+        return true;
+    }
+    if !super::super::irq_vectors::release(vector, KIND, dev) {
+        return false;
+    }
+    #[cfg(any(
+        feature = "hal-xhci-lifecycle-test",
+        feature = "hal-xhci-recovery-test",
+        feature = "hal-xhci-transfer-fault-test",
+        feature = "hal-xhci-start-fault-test"
+    ))]
+    LAST_VECTOR[dev].store(vector, Ordering::Release);
+    VECTORS[dev].store(NO_VECTOR, Ordering::Release);
+    true
 }
 pub(super) fn arm(
     dev: usize,
@@ -168,6 +211,8 @@ pub(super) fn arm(
         );
         return Ok(());
     }
+    // Reserve the vector before the controller or its MSI/MSI-X table can use it.
+    let vector = claim_vector(dev)?;
     let runtime = u64::from(regs.read32(0x18)? & !31) + 0x20;
     let before = count(dev);
     let transport;
@@ -177,7 +222,7 @@ pub(super) fn arm(
         regs.write32(runtime, rule::PENDING)?;
         regs.write32(op + usb::OP_USBSTS, rule::STATUS_EVENT)?;
         *SOURCES[dev].lock() = Some(Source { regs, op, runtime });
-        transport = program(dev, bdf, regs)?;
+        transport = program(bdf, regs, vector)?;
         regs.write32(runtime + 4, 0)?; // no moderation delay for this bounded profile
         regs.write32(runtime, rule::ENABLE)?;
         regs.write32(
@@ -206,7 +251,7 @@ pub(super) fn arm(
     let _ = writeln!(
         console,
         "xhci: handle={dev} {transport} vector={:#x} delivered={}, deferred HID",
-        vector(dev),
+        vector,
         count(dev)
     );
     #[cfg(feature = "hal-xhci-irq-start-fault-test")]
@@ -270,10 +315,41 @@ pub(super) fn finish(dev: usize, more: bool) -> Result<(), Failure> {
     feature = "hal-xhci-recovery-test",
     feature = "hal-xhci-transfer-fault-test"
 ))]
-pub(super) fn detached_test(dev: usize) {
+pub(super) fn detached_test(dev: usize, retained: bool) {
     assert!(SOURCES[dev].lock().is_none());
     assert!(!WORK[dev].load(Ordering::Acquire));
-    let before = count(dev);
-    interrupt(vector(dev));
-    assert_eq!(count(dev), before, "late vector touched retired state");
+    let current = VECTORS[dev].load(Ordering::Acquire);
+    let retired = if current != NO_VECTOR {
+        current
+    } else if retained {
+        NO_VECTOR
+    } else {
+        LAST_VECTOR[dev].load(Ordering::Acquire)
+    };
+    if retained {
+        if current != NO_VECTOR {
+            assert_eq!(
+                super::super::irq_vectors::owner(current),
+                Some((KIND, dev)),
+                "quarantined controller lost its vector"
+            );
+        }
+    } else {
+        assert_eq!(current, NO_VECTOR, "checked stop retained its vector");
+        if retired != NO_VECTOR {
+            let owner = super::super::irq_vectors::owner(retired);
+            assert_ne!(
+                owner,
+                Some((KIND, dev)),
+                "checked stop did not release its vector"
+            );
+            if owner.is_none() {
+                // A free retired vector is safe to inject as a stale interrupt. If another
+                // source has already claimed it, injection would be that source's real vector.
+                let before = count(dev);
+                interrupt(retired);
+                assert_eq!(count(dev), before, "late vector touched retired state");
+            }
+        }
+    }
 }

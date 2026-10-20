@@ -93,17 +93,29 @@ def boot(qemu, kernel, names, machine, bridge=False, shared=False, storage=False
     assert 'in use 0 -> 0 bytes, integrity ok' in text, text
     if machine == 'q35':
         assert 'pci: configuration transport=ECAM segment 0' in text, text
-    instances = re.findall(r'(e1000|virtio-net): instance (\d+), PCI (\S+), mac \[([^]]+)\], vectors? (0x[0-9a-f]+)(?:/(0x[0-9a-f]+))?', text)
+    instances = re.findall(
+        r'(e1000|virtio-net): instance (\d+), PCI (\S+), mac \[([^]]+)\], '
+        r'(?:GSI (\d+), )?vectors? (0x[0-9a-f]+)(?:/(0x[0-9a-f]+))?',
+        text,
+    )
     assert len(instances) == len(names), text
     assert len({r[1] for r in instances}) == len(names), instances
     assert len({r[2] for r in instances}) == len(names), instances
     mac_for_handle = {r[1]: bytes.fromhex(r[3].replace(',', '')) for r in instances}
     assert set(mac_for_handle.values()) == set(captures), instances
-    msix = [v for r in instances if r[0] == 'virtio-net' for v in r[4:6]]
+    all_vectors = [int(vector, 16) for row in instances for vector in row[5:7] if vector]
+    assert all(0x50 <= vector <= 0xdf for vector in all_vectors), instances
+    e1000_routes = [(int(row[4]), row[5]) for row in instances if row[0] == 'e1000']
+    for index, (gsi, vector) in enumerate(e1000_routes):
+        for other_gsi, other_vector in e1000_routes[index + 1:]:
+            assert (gsi == other_gsi) == (vector == other_vector), instances
+    msix = [vector for row in instances if row[0] == 'virtio-net' for vector in row[5:7] if vector]
     assert len(set(msix)) == 2 * names.count('virtio-net'), instances
+    assert not (set(msix) & {vector for _, vector in e1000_routes}), instances
     if shared:
-        vectors = [r[4] for r in instances]
-        assert len(set(vectors)) == 1, f'fixture did not create shared INTx: {instances}'
+        vectors = {vector for _, vector in e1000_routes}
+        gsis = {gsi for gsi, _ in e1000_routes}
+        assert len(vectors) == len(gsis) == 1, f'fixture did not create shared INTx: {instances}'
     if bridge:
         assert all(not r[2].startswith('00:') for r in instances), instances
     for name in set(names):
@@ -195,9 +207,17 @@ def main():
                 text = boot(args.qemu, args.kernel.resolve(), ['e1000'] * 2, machine, **options)
                 assert text.count('INTx line poisoned to ff') == 2, text
                 assert 'evaluated ACPI INTx routing authorized:' in text, text
+                routes = re.findall(
+                    r'e1000: instance \d+, PCI \S+, mac \[[^]]+\], GSI (\d+), vector (0x[0-9a-f]+)',
+                    text,
+                )
+                assert len(routes) == 2, text
+                assert all(0x50 <= int(vector, 16) <= 0xdf for _, vector in routes), routes
+                if options.get('shared'):
+                    assert len(set(routes)) == 1, f'fixture did not share one GSI/vector: {routes}'
                 if machine == 'q35':
                     assert 'interrupt model=APIC, _PIC notified=true' in text, text
-                    assert re.search(r'INTx vector 0x3[0-7], interrupts [1-9]', text), text
+                    assert re.search(r'INTx vector 0x[0-9a-f]+, interrupts [1-9]', text), text
             for mode in ['malformed-prt', 'unmapped-scope', 'unsupported-pic']:
                 intx_refusal(args.qemu, args.kernel.resolve(), machine, mode)
         return

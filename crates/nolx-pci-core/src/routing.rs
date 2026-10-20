@@ -25,7 +25,13 @@ pub enum Error {
     Ambiguous,
 }
 fn complete(inventory: &Inventory) -> Result<(), Error> {
-    if inventory.overflowed || inventory.refused_bridges != 0 {
+    if inventory.overflowed
+        || inventory.refused_bridges != 0
+        || inventory
+            .as_slice()
+            .iter()
+            .any(|info| info.bdf.segment != 0)
+    {
         Err(Error::Topology)
     } else {
         Ok(())
@@ -38,7 +44,7 @@ pub fn scope_bus<C: ConfigSpace>(
     bridges: &[u32],
 ) -> Result<u8, Error> {
     complete(inventory)?;
-    if bridges.len() > 32 {
+    if cfg.segment() != 0 || bridges.len() > 32 {
         return Err(Error::Topology);
     }
     let mut bus = 0;
@@ -50,6 +56,7 @@ pub fn scope_bus<C: ConfigSpace>(
             return Err(Error::Topology);
         }
         let bdf = Bdf {
+            segment: cfg.segment(),
             bus,
             device: (address >> 16) as u8,
             function: (address & 7) as u8,
@@ -89,7 +96,12 @@ pub fn lookup<C: ConfigSpace>(
     pin: u8,
 ) -> Result<usize, Error> {
     complete(inventory)?;
-    if !(1..=4).contains(&pin) || bdf.device >= 32 || bdf.function >= 8 {
+    if cfg.segment() != 0
+        || bdf.segment != 0
+        || !(1..=4).contains(&pin)
+        || bdf.device >= 32
+        || bdf.function >= 8
+    {
         return Err(Error::Topology);
     }
     let mut pin = pin - 1;

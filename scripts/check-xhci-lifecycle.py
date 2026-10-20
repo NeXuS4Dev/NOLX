@@ -128,7 +128,12 @@ def boot(qemu, kernel, machine, mode, interrupts=False):
                 if mode == 'irq-start-fault':
                     assert 'injected post-run start failure (after armed MSI-X)' in text, text
                 if interrupts:
-                    verify_interrupts(text, controllers=2 if mode == 'irq-start-fault' else 1, arms=2 if mode == 'irq-start-fault' else 1)
+                    verify_interrupts(
+                        text,
+                        controllers=2 if mode == 'irq-start-fault' else 1,
+                        arms=2 if mode == 'irq-start-fault' else 1,
+                        unique_vectors=mode != 'irq-start-fault',
+                    )
                 print(f'PASS: xhci-{mode}-{machine}: post-run exposed DMA/MMIO rollback, live peer input and safe failed-record removal, DMA 0', flush=True)
                 return
             for cycle, name in enumerate('abcd'):

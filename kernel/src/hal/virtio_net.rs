@@ -7,7 +7,7 @@ mod recovery;
 use super::{
     dma::Dma,
     driver_start::{self, Log},
-    msix,
+    irq_vectors, msix,
     pci::ConfigAccess,
 };
 use crate::{
@@ -25,10 +25,14 @@ use nolx_net_core::{
 use nolx_pci_core::{BarSet, Bdf, ConfigSpace};
 use nolx_virtio_core::{self as virtio, common, net, Descriptor, VirtioCap};
 
-/// MSI-X receive vector (table entry zero).
+/// Preferred MSI-X receive vector (table entry zero) for the first native adapter.
 pub const RX_VECTOR: u8 = 0x53;
-/// MSI-X transmit vector (table entry one).
+/// Preferred MSI-X transmit vector (table entry one) for the first native adapter.
 pub const TX_VECTOR: u8 = 0x54;
+const RX_KIND: irq_vectors::VectorKind = irq_vectors::VectorKind::VirtioNetRx;
+const TX_KIND: irq_vectors::VectorKind = irq_vectors::VectorKind::VirtioNetTx;
+static VECTORS: [IrqMutex<Option<(u8, u8)>>; driver_start::DEVICES] =
+    [const { IrqMutex::new(None) }; driver_start::DEVICES];
 static RX_INTERRUPTS: [AtomicUsize; driver_start::DEVICES] =
     [const { AtomicUsize::new(0) }; driver_start::DEVICES];
 static TX_INTERRUPTS: [AtomicUsize; driver_start::DEVICES] =
@@ -58,16 +62,51 @@ static BDFS: [IrqMutex<Option<Bdf>>; driver_start::DEVICES] =
     [const { IrqMutex::new(None) }; driver_start::DEVICES];
 static PRIMARY: AtomicUsize = AtomicUsize::new(usize::MAX);
 
-fn vectors(dev: usize) -> (u8, u8) {
-    if PRIMARY.load(Ordering::Acquire) == dev {
-        (RX_VECTOR, TX_VECTOR)
-    } else {
-        (0xb0 + 2 * dev as u8, 0xb1 + 2 * dev as u8)
-    }
+fn vectors(dev: usize) -> Option<(u8, u8)> {
+    *VECTORS[dev].lock()
 }
-/// Static MSI-X reservations, disjoint from storage and architecture vectors.
+fn claim_vectors(dev: usize) -> Result<(u8, u8), Failure> {
+    let mut assigned = VECTORS[dev].lock();
+    if assigned.is_some() {
+        return Err(Failure::Busy);
+    }
+    let rx = irq_vectors::claim(RX_KIND, dev).ok_or(Failure::NoVector)?;
+    let Some(tx) = irq_vectors::claim(TX_KIND, dev) else {
+        let released = irq_vectors::release(rx, RX_KIND, dev);
+        debug_assert!(released, "newly claimed virtio-net RX vector was not owned");
+        return Err(Failure::NoVector);
+    };
+    *assigned = Some((rx, tx));
+    Ok((rx, tx))
+}
+fn release_vectors(dev: usize) -> bool {
+    let mut assigned = VECTORS[dev].lock();
+    let Some((rx, tx)) = *assigned else {
+        return true;
+    };
+    for (vector, kind) in [(rx, RX_KIND), (tx, TX_KIND)] {
+        match irq_vectors::owner(vector) {
+            Some(owner) if owner == (kind, dev) => {
+                if !irq_vectors::release(vector, kind, dev) {
+                    return false;
+                }
+            }
+            // A previous checked-stop attempt can have released the first queue vector
+            // before a later queue's ledger compare-and-swap failed. Retry only that
+            // partial state; never silently forget a vector owned by another source.
+            None => {}
+            Some(_) => return false,
+        }
+    }
+    *assigned = None;
+    true
+}
+/// Whether an allocated shared-table vector belongs to one of this driver's two queues.
 pub fn handles_vector(vector: u8) -> bool {
-    vector == RX_VECTOR || vector == TX_VECTOR || (0xb0..0xd0).contains(&vector)
+    match irq_vectors::owner(vector) {
+        Some((kind, _)) => kind == RX_KIND || kind == TX_KIND,
+        None => false,
+    }
 }
 
 /// A refused device, transfer, packet or capability.
@@ -93,6 +132,8 @@ pub enum Failure {
     Packet,
     /// A queue completed without its interrupt arriving.
     Interrupt,
+    /// The shared native interrupt vector domain has no two free vectors for this adapter.
+    NoVector,
     /// Another caller owns the synchronous transport.
     Busy,
 }
@@ -121,7 +162,7 @@ static MATCHES: &[Match] = &[Match::by_ids(0x1af4, 0x1000), Match::by_ids(0x1af4
 
 /// Enumerate and bind each supported segment-zero interface exactly once.
 pub fn probe(console: &mut dyn HalConsole) {
-    let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
+    let inventory = super::pci::enumerate_native();
     let mut found = false;
     for info in inventory
         .as_slice()
@@ -169,9 +210,9 @@ pub fn probe(console: &mut dyn HalConsole) {
                 match outcome {
                     Ok(()) => {
                         let _ = writeln!(console, "virtio-net: bound and started through nolx-df");
-                        let (rx, tx) = vectors(dev);
+                        let (rx, tx) = vectors(dev).expect("started virtio-net owns both vectors");
                         let mac = DEVICE[dev].lock().as_ref().unwrap().mac;
-                        let _ = writeln!(console, "virtio-net: instance {dev}, PCI {:02x}:{:02x}.{}, mac {mac:02x?}, vectors {rx:#x}/{tx:#x}", info.bdf.bus, info.bdf.device, info.bdf.function);
+                        let _ = writeln!(console, "virtio-net: instance {dev}, PCI {:02x}:{:02x}.{}, mac {mac:02x?}, vectors {rx:#x}/{tx:#x}, segment {}", info.bdf.bus, info.bdf.device, info.bdf.function, info.bdf.segment);
                     }
                     Err(error) => {
                         let _ = writeln!(console, "virtio-net: not brought up: {error:?}");
@@ -258,6 +299,9 @@ fn stop(dev: usize) -> bool {
     if result.is_err() {
         return false;
     }
+    if !release_vectors(dev) {
+        return false;
+    }
     let nic = DEVICE[dev].lock().take();
     let partial = core::mem::replace(
         &mut *PARTIAL[dev].lock(),
@@ -296,7 +340,10 @@ fn empty_dma(dev: usize) -> bool {
         && DEVICE[dev].lock().is_none()
 }
 pub(crate) fn removable(dev: usize) -> bool {
-    COMMON[dev].lock().is_none() && !LIVE[dev].load(Ordering::Acquire) && empty_dma(dev)
+    COMMON[dev].lock().is_none()
+        && !LIVE[dev].load(Ordering::Acquire)
+        && empty_dma(dev)
+        && vectors(dev).is_none()
 }
 
 fn map(dev: usize, bars: &BarSet, cap: VirtioCap) -> Result<Region, Failure> {
@@ -492,13 +539,14 @@ impl Nic {
 
 fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<(), Failure> {
     let bdf = BDFS[dev].lock().ok_or(Failure::NoDevice)?;
-    let (rx_vector, tx_vector) = vectors(dev);
     if !super::apic::is_enabled() {
         return Err(Failure::Interrupt);
     }
     if !removable(dev) {
         return Err(Failure::Busy);
     }
+    // Both queue vectors are owned before MSI-X can expose either one to the controller.
+    let (rx_vector, tx_vector) = claim_vectors(dev)?;
     pci_access(bdf, false)?;
     disable_messages(bdf)?;
     let bars = nolx_pci_core::read_bars(&mut ConfigAccess, bdf);
@@ -607,17 +655,17 @@ fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<(), Failure> {
 
 /// Attribute each MSI-X completion and receive FIFO to its exact adapter before APIC EOI.
 pub fn on_interrupt(vector: u8) {
-    let (dev, rx) = if vector == RX_VECTOR || vector == TX_VECTOR {
-        (PRIMARY.load(Ordering::Acquire), vector == RX_VECTOR)
-    } else if (0xb0..0xd0).contains(&vector) {
-        (usize::from((vector - 0xb0) / 2), vector & 1 == 0)
-    } else {
-        return;
+    let (dev, rx) = match irq_vectors::owner(vector) {
+        Some((kind, dev)) if kind == RX_KIND => (dev, true),
+        Some((kind, dev)) if kind == TX_KIND => (dev, false),
+        _ => return,
     };
     if dev >= driver_start::DEVICES || !LIVE[dev].load(Ordering::Acquire) {
         return;
     }
-    let assigned = vectors(dev);
+    let Some(assigned) = vectors(dev) else {
+        return;
+    };
     if vector != if rx { assigned.0 } else { assigned.1 } {
         return;
     }

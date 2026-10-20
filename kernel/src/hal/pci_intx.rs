@@ -54,6 +54,7 @@ impl Snapshot {
         };
         let host = ConfigAccess.read_u32(
             Bdf {
+                segment: 0,
                 bus: 0,
                 device: 0,
                 function: 0,
@@ -66,6 +67,7 @@ impl Snapshot {
             _ => return result,
         };
         let bdf = Bdf {
+            segment: 0,
             bus: 0,
             device,
             function: 0,
@@ -147,6 +149,11 @@ pub fn publish(tables: &[Table], console: &mut dyn HalConsole) -> Result<(), rou
 /// Resolve a PCI pin through actual `_PRT` data, using swizzling only on undescribed buses.
 /// An available-but-refused ACPI namespace never downgrades to the Interrupt Line byte.
 pub fn lookup(bdf: Bdf) -> Option<Interrupt> {
+    // The published `_PRT`/PIRQ snapshot is segment-zero only; never route an identical BDF
+    // from another segment through that cache or through legacy Interrupt Line fallback.
+    if bdf.segment != 0 {
+        return None;
+    }
     let pin = ((ConfigAccess.read_u32(bdf, 0x3c) >> 8) & 255) as u8;
     let cache = CACHE.lock();
     if cache.ready {
