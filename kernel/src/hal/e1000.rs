@@ -29,8 +29,8 @@ use nolx_df_core::{DeviceId, Dispatch, Driver, Match};
 use nolx_e1000_core::{self as e1000, DEVICE_82540EM, VENDOR_INTEL};
 use nolx_hal_core::console::HalConsole;
 use nolx_mm_core::mmio::MmioError;
-use nolx_power_core::routing::Interrupt;
 use nolx_pci_core::{Bdf, ConfigSpace};
+use nolx_power_core::routing::Interrupt;
 
 use super::pci::ConfigAccess;
 use super::{dma::Dma, driver_start};
