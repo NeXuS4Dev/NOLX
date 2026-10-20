@@ -256,7 +256,10 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     driver_start::stop(dev).unwrap();
     assert_eq!(super::super::ioapic::pci_route_references(target_irq.gsi), 1);
     driver_start::stop(peer).unwrap();
-    assert_eq!(super::super::ioapic::pci_route_references(target_irq.gsi), 0);
+    assert_eq!(
+        super::super::ioapic::pci_route_references(target_irq.gsi),
+        0
+    );
     assert_eq!(super::super::irq_vectors::owner(vector), None);
     let _ = writeln!(
         console,
