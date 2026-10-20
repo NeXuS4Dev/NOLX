@@ -28,6 +28,10 @@ static VECTORS: [AtomicU8; driver_start::DEVICES] =
 ))]
 static LAST_VECTOR: [AtomicU8; driver_start::DEVICES] =
     [const { AtomicU8::new(NO_VECTOR) }; driver_start::DEVICES];
+#[cfg(feature = "hal-xhci-irq-test")]
+pub(super) fn vector(dev: usize) -> u8 {
+    VECTORS[dev].load(Ordering::Acquire)
+}
 pub(super) fn count(dev: usize) -> usize {
     DELIVERED[dev].load(Ordering::Acquire)
 }
@@ -135,12 +139,8 @@ fn program(bdf: Bdf, regs: Region, vector: u8) -> Result<&'static str, Failure> 
         }
         let destination =
             u8::try_from(super::super::apic::current_apic_id()).map_err(|_| Failure::Interrupt)?;
-        let words = msi::msix_entry(
-            u64::from(msi::message_address(destination)),
-            vector,
-            false,
-        )
-        .ok_or(Failure::Interrupt)?;
+        let words = msi::msix_entry(u64::from(msi::message_address(destination)), vector, false)
+            .ok_or(Failure::Interrupt)?;
         let at = u64::from(layout.table_offset);
         regs.write32(at + 12, msi::MSIX_VECTOR_MASKED)?;
         for (i, word) in words.chunks_exact(4).enumerate() {
