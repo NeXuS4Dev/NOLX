@@ -96,9 +96,24 @@ fn recovered(
     detached(dev, vector);
     refused(dev);
 }
-fn route_owned(dev: usize, irq: Interrupt, vector: u8, references: usize) {
+fn route_owned(
+    dev: usize,
+    irq: Interrupt,
+    vector: u8,
+    references: usize,
+    phase: &'static str,
+) {
     assert_eq!(*PCI_ROUTE[dev].lock(), Some((irq, vector)));
-    assert_eq!(RX_VECTOR[dev].load(Ordering::Acquire), vector);
+    assert_eq!(
+        RX_VECTOR[dev].load(Ordering::Acquire),
+        vector,
+        "{phase}: handle {dev} lost vector {vector:#x} for GSI {} (state {:?}, BDF {:?}, route {:?}, owner {:?})",
+        irq.gsi,
+        driver_start::state(dev),
+        STATE[dev].lock().bdf,
+        *PCI_ROUTE[dev].lock(),
+        super::super::irq_vectors::owner(vector)
+    );
     assert_eq!(
         super::super::irq_vectors::owner(vector),
         Some((INTX_KIND, irq.gsi as usize))
@@ -156,8 +171,8 @@ pub(super) fn run(console: &mut dyn HalConsole) {
         Some((INTX_KIND, target_irq.gsi as usize))
     );
     assert_eq!(super::super::ioapic::pci_route_references(target_irq.gsi), 2);
-    route_owned(dev, target_irq, vector, 2);
-    route_owned(peer, peer_irq, vector, 2);
+    route_owned(dev, target_irq, vector, 2, "initial target");
+    route_owned(peer, peer_irq, vector, 2, "initial peer");
     pinned(dev, peer, region, mappings, vector, true);
     assert_eq!(driver_start::recover(peer), Err(Error::BadState));
     assert_eq!(
@@ -171,7 +186,7 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     exchange(peer, 0, peer_mac, console);
     recovered(dev, region, mappings, target_irq, vector);
     driver_start::start(dev).unwrap();
-    route_owned(dev, target_irq, vector, 2);
+    route_owned(dev, target_irq, vector, 2, "post-startup-quarantine recovery");
     exchange(dev, 1, target_mac, console);
     exchange(peer, 2, peer_mac, console);
     let _=writeln!(console,"e1000-recovery: post-ARP startup quarantine recovered; DMA 22 -> 11 -> 22, shared INTx live");
@@ -185,13 +200,13 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     exchange(peer, 3, peer_mac, console);
     recovered(dev, region, mappings, target_irq, vector);
     driver_start::start(dev).unwrap();
-    route_owned(dev, target_irq, vector, 2);
+    route_owned(dev, target_irq, vector, 2, "failed-stop recovery");
     exchange(dev, 4, target_mac, console);
     exchange(peer, 5, peer_mac, console);
     let _=writeln!(console,"e1000-recovery: failed stop/repeated refusal retained 22 pages, stale MMIO and IRQ source retired after recovery");
 
     driver_start::stop(dev).unwrap();
-    route_owned(peer, peer_irq, vector, 1);
+    route_owned(peer, peer_irq, vector, 1, "peer after target stop");
     MODE.store(1, Ordering::Release);
     assert_eq!(driver_start::start(dev), Err(Error::OpFailed));
     assert_eq!(
@@ -203,7 +218,7 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     assert!(removable(dev));
     driver_start::recover(dev).unwrap();
     driver_start::start(dev).unwrap();
-    route_owned(dev, target_irq, vector, 2);
+    route_owned(dev, target_irq, vector, 2, "allocation-failure recovery");
     exchange(dev, 6, target_mac, console);
     let _ = writeln!(
         console,
@@ -220,7 +235,7 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     exchange(peer, 7, peer_mac, console);
     recovered(dev, region, mappings, target_irq, vector);
     driver_start::start(dev).unwrap();
-    route_owned(dev, target_irq, vector, 2);
+    route_owned(dev, target_irq, vector, 2, "RX-only recovery");
     exchange(dev, 8, target_mac, console);
     let _ = writeln!(
         console,
@@ -234,7 +249,7 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     exchange(peer, 9, peer_mac, console);
     recovered(dev, region, mappings, target_irq, vector);
     driver_start::start(dev).unwrap();
-    route_owned(dev, target_irq, vector, 2);
+    route_owned(dev, target_irq, vector, 2, "withheld-PCI-proof recovery");
     exchange(dev, 10, target_mac, console);
     let _=writeln!(console,"e1000-recovery: deliberately withheld PCI exclusion proof pinned DMA despite actual bus-master disable");
     driver_start::stop(dev).unwrap();

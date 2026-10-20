@@ -7,7 +7,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use crate::aml::{self, Namespace, Path, Value};
+use crate::aml::{Namespace, Path, Value};
 
 use super::Error;
 
@@ -48,7 +48,6 @@ pub struct LinkIrqOption {
 struct IrqDescriptor {
     tag: u8,
     start: usize,
-    end: usize,
     flags: u8,
     options: Vec<LinkIrqOption>,
 }
@@ -265,8 +264,8 @@ fn parse_template(bytes: &[u8]) -> Result<Template, Error> {
         }
 
         let parsed = match tag {
-            0x22 | 0x23 => Some(parse_small_irq(tag, at, end, data)?),
-            0x89 => Some(parse_extended_irq(at, end, data)?),
+            0x22 | 0x23 => Some(parse_small_irq(tag, at, data)?),
+            0x89 => Some(parse_extended_irq(at, data)?),
             _ => None,
         };
         if let Some(parsed) = parsed {
@@ -279,12 +278,7 @@ fn parse_template(bytes: &[u8]) -> Result<Template, Error> {
     }
 }
 
-fn parse_small_irq(
-    tag: u8,
-    start: usize,
-    end: usize,
-    data: &[u8],
-) -> Result<IrqDescriptor, Error> {
+fn parse_small_irq(tag: u8, start: usize, data: &[u8]) -> Result<IrqDescriptor, Error> {
     if data.len() != usize::from(tag & 7) || !(data.len() == 2 || data.len() == 3) {
         return Err(Error::Invalid);
     }
@@ -317,13 +311,12 @@ fn parse_small_irq(
     Ok(IrqDescriptor {
         tag,
         start,
-        end,
         flags,
         options,
     })
 }
 
-fn parse_extended_irq(start: usize, end: usize, data: &[u8]) -> Result<IrqDescriptor, Error> {
+fn parse_extended_irq(start: usize, data: &[u8]) -> Result<IrqDescriptor, Error> {
     if data.len() < 2 || data[0] & !0x1f != 0 || data[1] == 0 {
         return Err(Error::Invalid);
     }
@@ -353,7 +346,6 @@ fn parse_extended_irq(start: usize, end: usize, data: &[u8]) -> Result<IrqDescri
     Ok(IrqDescriptor {
         tag: 0x89,
         start,
-        end,
         flags,
         options,
     })

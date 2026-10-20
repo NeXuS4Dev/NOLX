@@ -237,14 +237,7 @@ fn bring_up(dev: usize, console: &mut dyn HalConsole) -> Result<(), Failure> {
     );
     let _ = writeln!(console, "xhci: controller reset, halted");
     report_ports(console, &regs, caplength, ports)?;
-    live::start(
-        dev,
-        bdf.packed_id(),
-        regs,
-        op,
-        ports,
-        console,
-    )?;
+    live::start(dev, bdf.packed_id(), regs, op, ports, console)?;
     irq::arm(dev, bdf, regs, op, console)
 }
 

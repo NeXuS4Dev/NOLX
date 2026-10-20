@@ -340,14 +340,19 @@ pub(super) fn detached_test(dev: usize, retained: bool) {
     } else {
         assert_eq!(current, NO_VECTOR, "checked stop retained its vector");
         if retired != NO_VECTOR {
-            assert_eq!(
-                super::super::irq_vectors::owner(retired),
-                None,
+            let owner = super::super::irq_vectors::owner(retired);
+            assert_ne!(
+                owner,
+                Some((KIND, dev)),
                 "checked stop did not release its vector"
             );
+            if owner.is_none() {
+                // A free retired vector is safe to inject as a stale interrupt. If another
+                // source has already claimed it, injection would be that source's real vector.
+                let before = count(dev);
+                interrupt(retired);
+                assert_eq!(count(dev), before, "late vector touched retired state");
+            }
         }
     }
-    let before = count(dev);
-    interrupt(retired);
-    assert_eq!(count(dev), before, "late vector touched retired state");
 }
