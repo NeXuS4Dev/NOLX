@@ -115,8 +115,18 @@ fn addresses_the_hardware_cannot_express_are_refused() {
 fn equal_bus_device_function_tuples_in_distinct_segments_are_distinct() {
     let segment_zero = Bdf::new(3, 4, 1).unwrap();
     let segment_seven = Bdf::in_segment(7, 3, 4, 1).unwrap();
-    assert_eq!((segment_zero.bus, segment_zero.device, segment_zero.function), (3, 4, 1));
-    assert_eq!((segment_seven.bus, segment_seven.device, segment_seven.function), (3, 4, 1));
+    assert_eq!(
+        (segment_zero.bus, segment_zero.device, segment_zero.function),
+        (3, 4, 1)
+    );
+    assert_eq!(
+        (
+            segment_seven.bus,
+            segment_seven.device,
+            segment_seven.function
+        ),
+        (3, 4, 1)
+    );
     assert_eq!(segment_zero.packed_id(), (3_u32 << 8) | (4 << 3) | 1);
     assert_eq!(
         segment_seven.packed_id(),

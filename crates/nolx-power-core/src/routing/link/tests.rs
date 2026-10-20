@@ -1,9 +1,9 @@
+use super::alloc::vec;
+use super::alloc::vec::Vec;
 use super::{
     build_srs_template, link_possible_interrupts, link_srs_template, possible_interrupts, Error,
     LinkIrqNumber, LinkIrqOption, Namespace, Path, MAX_TEMPLATE_BYTES,
 };
-use super::alloc::vec;
-use super::alloc::vec::Vec;
 
 fn template(mut descriptors: Vec<u8>, checksum: bool) -> Vec<u8> {
     descriptors.push(0x79);

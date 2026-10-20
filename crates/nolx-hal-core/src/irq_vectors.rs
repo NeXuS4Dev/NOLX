@@ -96,9 +96,8 @@ impl Pool {
     /// candidates, even though some of them lie inside the shared range.
     pub fn candidates(&self) -> impl Iterator<Item = u8> + '_ {
         core::iter::once(self.preferred).chain(
-            (self.first..=self.last).filter(move |vector| {
-                *vector != self.preferred && !is_preferred_vector(*vector)
-            }),
+            (self.first..=self.last)
+                .filter(move |vector| *vector != self.preferred && !is_preferred_vector(*vector)),
         )
     }
 }
@@ -179,9 +178,7 @@ mod tests {
         let occupied = [FIRST_FALLBACK_VECTOR, FIRST_FALLBACK_VECTOR + 1];
         for kind in KINDS {
             let pool = pool(kind);
-            let free = |vector: u8| {
-                vector != pool.preferred && !occupied.contains(&vector)
-            };
+            let free = |vector: u8| vector != pool.preferred && !occupied.contains(&vector);
             assert_eq!(choose(&pool, free), Some(FIRST_FALLBACK_VECTOR + 2));
         }
     }

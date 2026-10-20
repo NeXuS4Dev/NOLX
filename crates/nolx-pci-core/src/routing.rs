@@ -27,7 +27,10 @@ pub enum Error {
 fn complete(inventory: &Inventory) -> Result<(), Error> {
     if inventory.overflowed
         || inventory.refused_bridges != 0
-        || inventory.as_slice().iter().any(|info| info.bdf.segment != 0)
+        || inventory
+            .as_slice()
+            .iter()
+            .any(|info| info.bdf.segment != 0)
     {
         Err(Error::Topology)
     } else {

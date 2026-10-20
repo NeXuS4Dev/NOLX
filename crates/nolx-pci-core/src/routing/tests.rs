@@ -118,7 +118,10 @@ fn routing_refuses_nonzero_and_mixed_segment_views() {
 
     let empty = Inventory::default();
     let mut segment_one = SegmentOne(Machine::new());
-    assert_eq!(scope_bus(&mut segment_one, &empty, &[]), Err(Error::Topology));
+    assert_eq!(
+        scope_bus(&mut segment_one, &empty, &[]),
+        Err(Error::Topology)
+    );
     assert_eq!(
         lookup(&mut segment_one, &empty, &[], b(0, 1), 1),
         Err(Error::Topology)
@@ -142,7 +145,10 @@ fn routing_refuses_nonzero_and_mixed_segment_views() {
             ..FunctionInfo::default()
         })
         .unwrap();
-    assert_eq!(scope_bus(&mut segment_zero, &mixed, &[]), Err(Error::Topology));
+    assert_eq!(
+        scope_bus(&mut segment_zero, &mixed, &[]),
+        Err(Error::Topology)
+    );
 }
 
 #[test]
