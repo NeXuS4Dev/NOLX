@@ -673,11 +673,12 @@ Line or that all operation-region/link evaluation is unwired. It does not comple
   buffers, and returns an ordered journal only for exact, caller-permitted PCI-config byte fields
   (ByteAcc, Preserve, aligned 8-bit fields on the bounded segment-zero/root-bus-zero profile).
   Other field shapes and unpermitted values are refused; failed evaluation returns no partial
-  journal. Ordinary
-  `Namespace::evaluate` remains read-only. The journal is not applied to hardware, and this
-  preflight is not connected to kernel route publication. A chipset-specific transaction that
-  applies the journal with verified snapshot/rollback/readback, then re-evaluates `_CRS` before
-  publishing the route, remains a prerequisite. General link reprogramming stays open.
+  journal. `MethodEffects` also retains the unique PCI field read-set used during planning.
+  `apply_pci_field_writes` now validates the whole permission set and read snapshot before I/O,
+  applies exact byte writes with readback, runs a caller postcondition, and reverses/validates
+  attempted writes if any step fails. Ordinary `Namespace::evaluate` remains read-only. This is
+  still only a portable helper: no kernel backend applies the journal, re-evaluates live `_CRS`,
+  or publishes the resulting route. General link reprogramming stays open.
 - Select the validated `_PIC(Arg0)` Store-to-integer subset **before** root resources and routes;
   Q35 takes the actual APIC table. Unknown/unsupported `_PIC` is a routing refusal, not PIC fallback.
 - Snapshot only verified PIIX/ICH9 root-bus PIRQ bytes; support read-only ByteAccess PCI fields

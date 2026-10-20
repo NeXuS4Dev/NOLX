@@ -160,6 +160,17 @@ pub trait FieldReader {
     /// Return a snapshot value, or refuse a location not covered by the provider.
     fn read(&self, field: PciField) -> Result<u64, Error>;
 }
+/// One root-bus-zero PCI field value read while planning a method.
+///
+/// Shadow reads from fields already written in the AML method are not included; they are satisfied
+/// from the ordered write journal instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PciFieldRead {
+    /// Exact field read from the caller's snapshot.
+    pub field: PciField,
+    /// The byte value observed during planning.
+    pub value: u8,
+}
 /// One whitelisted byte write produced by bounded method planning; never applied by the AML evaluator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PciFieldWrite {
@@ -195,17 +206,217 @@ impl PciFieldWritePermission {
         self.values[value / 64] & (1u64 << (value % 64)) != 0
     }
 }
-/// Result of software-only AML method execution with authorized PCI field writes journaled.
+/// Result of software-only AML method execution with authorized PCI field effects journaled.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MethodEffects {
     /// Returned AML value, if the method executed a Return opcode.
     pub result: Option<Value>,
-    /// Ordered field-write intents. Hardware is untouched; callers must separately validate,
-    /// apply, read back and, if needed, roll back a transaction before publishing anything.
+    /// Unique PCI bytes read from the caller's snapshot during method evaluation.
+    pub reads: Vec<PciFieldRead>,
+    /// Ordered field-write intents. Hardware is untouched until a separate transaction applies them.
     pub writes: Vec<PciFieldWrite>,
 }
 const MAX_FIELD_WRITE_PERMISSIONS: usize = 32;
+const MAX_FIELD_READS: usize = 64;
 const MAX_FIELD_WRITES: usize = 64;
+
+/// Byte-granular PCI configuration access used by a caller-owned write transaction.
+///
+/// Implementations must restrict access to the field supplied on each call and serialize the
+/// whole transaction against other configuration-space users. `Err` means the access could not
+/// be confirmed; the transaction will attempt verified rollback of every attempted write.
+pub trait PciFieldWriteBackend {
+    /// Transport failure type.
+    type Error;
+    /// Read one exact PCI configuration byte.
+    fn read_byte(&mut self, field: PciField) -> Result<u8, Self::Error>;
+    /// Write one exact PCI configuration byte.
+    fn write_byte(&mut self, field: PciField, value: u8) -> Result<(), Self::Error>;
+}
+
+/// Failure while applying a bounded PCI field-write journal transactionally.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PciFieldWriteTransactionError<BackendError, PostconditionError> {
+    /// The read, write, or permission list exceeded the bounded transaction capacity.
+    Limit,
+    /// A field is not an aligned root-bus-zero byte within the supported legacy configuration space.
+    InvalidField,
+    /// The same field was listed more than once in the snapshot or permission set.
+    DuplicateField,
+    /// A staged write does not match an exact field/value permission.
+    PermissionDenied,
+    /// A snapshot field could not be re-read before any writes began.
+    SnapshotRead(BackendError),
+    /// A planning snapshot no longer matches hardware before any write began.
+    StaleSnapshot,
+    /// A target field changed between preflight and its application; prior writes were rolled back.
+    ChangedDuringApply,
+    /// A byte could not be read before a write.
+    Read(BackendError),
+    /// A byte write reported a transport failure.
+    Write(BackendError),
+    /// The write completed but its byte readback could not be obtained.
+    Readback(BackendError),
+    /// A write's byte readback did not match the requested value.
+    ReadbackMismatch,
+    /// Caller verification (for example, re-evaluated `_CRS`) refused the transaction.
+    Postcondition(PostconditionError),
+    /// At least one rollback byte could not be restored and verified.
+    RollbackFailed,
+}
+
+fn valid_transaction_field(field: PciField) -> bool {
+    field.bytes == 1 && field.offset < 256 && field.address & !0x1f0007 == 0
+}
+
+fn rollback_field_writes<B: PciFieldWriteBackend>(
+    backend: &mut B,
+    previous: &[PciFieldWrite],
+) -> bool {
+    let mut restored = true;
+    for write in previous.iter().rev() {
+        let _ = backend.write_byte(write.field, write.value);
+        if !matches!(backend.read_byte(write.field), Ok(value) if value == write.value) {
+            restored = false;
+        }
+    }
+    restored
+}
+
+/// Apply authorized PCI byte writes, verify each readback, and run a caller postcondition.
+///
+/// Every write is authorized and every field is validated before the first backend operation.
+/// The transaction first rechecks the fields read by AML against the planning snapshot, then
+/// writes in AML order. A write error, readback mismatch, stale snapshot, or failed postcondition
+/// restores attempted writes in reverse order and verifies each restoration. A failed rollback is
+/// reported separately because the caller must quarantine the device or halt. The postcondition
+/// is a separate callback so it cannot use the backend to bypass the exact write permissions; it
+/// may refresh a read-only field snapshot, re-evaluate `_CRS`, and publish only after those checks.
+pub fn apply_pci_field_writes<B, F, PostconditionError>(
+    effects: &MethodEffects,
+    permissions: &[PciFieldWritePermission],
+    backend: &mut B,
+    postcondition: F,
+) -> Result<(), PciFieldWriteTransactionError<B::Error, PostconditionError>>
+where
+    B: PciFieldWriteBackend,
+    F: FnOnce() -> Result<(), PostconditionError>,
+{
+    if effects.reads.len() > MAX_FIELD_READS
+        || effects.writes.len() > MAX_FIELD_WRITES
+        || permissions.len() > MAX_FIELD_WRITE_PERMISSIONS
+    {
+        return Err(PciFieldWriteTransactionError::Limit);
+    }
+    for (index, read) in effects.reads.iter().enumerate() {
+        if !valid_transaction_field(read.field) {
+            return Err(PciFieldWriteTransactionError::InvalidField);
+        }
+        if effects.reads[..index]
+            .iter()
+            .any(|previous| previous.field == read.field)
+        {
+            return Err(PciFieldWriteTransactionError::DuplicateField);
+        }
+    }
+    for (index, permission) in permissions.iter().enumerate() {
+        if !valid_transaction_field(permission.field) {
+            return Err(PciFieldWriteTransactionError::InvalidField);
+        }
+        if permissions[..index]
+            .iter()
+            .any(|previous| previous.field == permission.field)
+        {
+            return Err(PciFieldWriteTransactionError::DuplicateField);
+        }
+    }
+    for write in &effects.writes {
+        if !valid_transaction_field(write.field) {
+            return Err(PciFieldWriteTransactionError::InvalidField);
+        }
+        if !permissions
+            .iter()
+            .any(|permission| permission.field == write.field && permission.allows(write.value))
+        {
+            return Err(PciFieldWriteTransactionError::PermissionDenied);
+        }
+    }
+
+    for read in &effects.reads {
+        let value = backend
+            .read_byte(read.field)
+            .map_err(PciFieldWriteTransactionError::SnapshotRead)?;
+        if value != read.value {
+            return Err(PciFieldWriteTransactionError::StaleSnapshot);
+        }
+    }
+
+    let mut previous = Vec::with_capacity(effects.writes.len());
+    for (index, write) in effects.writes.iter().enumerate() {
+        let before = match backend.read_byte(write.field) {
+            Ok(value) => value,
+            Err(error) => {
+                if !rollback_field_writes(backend, &previous) {
+                    return Err(PciFieldWriteTransactionError::RollbackFailed);
+                }
+                return Err(PciFieldWriteTransactionError::Read(error));
+            }
+        };
+        let expected = effects.writes[..index]
+            .iter()
+            .rev()
+            .find(|prior| prior.field == write.field)
+            .map(|prior| prior.value)
+            .or_else(|| {
+                effects
+                    .reads
+                    .iter()
+                    .find(|read| read.field == write.field)
+                    .map(|read| read.value)
+            });
+        if expected.is_some_and(|expected| expected != before) {
+            if !rollback_field_writes(backend, &previous) {
+                return Err(PciFieldWriteTransactionError::RollbackFailed);
+            }
+            return Err(PciFieldWriteTransactionError::ChangedDuringApply);
+        }
+        // Record before attempting the write: a backend may report failure after the device
+        // accepted the byte, so rollback must include the uncertain operation itself.
+        previous.push(PciFieldWrite {
+            field: write.field,
+            value: before,
+        });
+        if let Err(error) = backend.write_byte(write.field, write.value) {
+            if !rollback_field_writes(backend, &previous) {
+                return Err(PciFieldWriteTransactionError::RollbackFailed);
+            }
+            return Err(PciFieldWriteTransactionError::Write(error));
+        }
+        let readback = match backend.read_byte(write.field) {
+            Ok(value) => value,
+            Err(error) => {
+                if !rollback_field_writes(backend, &previous) {
+                    return Err(PciFieldWriteTransactionError::RollbackFailed);
+                }
+                return Err(PciFieldWriteTransactionError::Readback(error));
+            }
+        };
+        if readback != write.value {
+            if !rollback_field_writes(backend, &previous) {
+                return Err(PciFieldWriteTransactionError::RollbackFailed);
+            }
+            return Err(PciFieldWriteTransactionError::ReadbackMismatch);
+        }
+    }
+
+    if let Err(error) = postcondition() {
+        if !rollback_field_writes(backend, &previous) {
+            return Err(PciFieldWriteTransactionError::RollbackFailed);
+        }
+        return Err(PciFieldWriteTransactionError::Postcondition(error));
+    }
+    Ok(())
+}
 #[derive(Clone)]
 enum Kind<'a> {
     Scope,
@@ -909,6 +1120,7 @@ impl<'a> Namespace<'a> {
         let result = self.run_method(index, args, 0, &mut steps, &mut effects)?;
         Ok(MethodEffects {
             result,
+            reads: effects.reads,
             writes: effects.writes,
         })
     }
@@ -1075,7 +1287,7 @@ impl<'a> Namespace<'a> {
         bits: usize,
         flags: u8,
         depth: usize,
-        effects: &EvaluationEffects<'_>,
+        effects: &mut EvaluationEffects<'_>,
     ) -> Result<Value, Error> {
         let field = self.field_location(region, bit, bits, flags, depth)?;
         if let Some(write) = effects
@@ -1087,7 +1299,20 @@ impl<'a> Namespace<'a> {
             return Ok(Value::Integer(u64::from(write.value)));
         }
         let reader = self.reader.ok_or(Error::Unsupported(0x5b81))?;
-        Ok(Value::Integer(reader.read(field)? & 255))
+        let value = (reader.read(field)? & 255) as u8;
+        if effects.permissions.is_some() {
+            if let Some(previous) = effects.reads.iter().find(|read| read.field == field) {
+                if previous.value != value {
+                    return Err(Error::WriteDenied);
+                }
+            } else {
+                if effects.reads.len() >= MAX_FIELD_READS {
+                    return Err(Error::Limit);
+                }
+                effects.reads.push(PciFieldRead { field, value });
+            }
+        }
+        Ok(Value::Integer(u64::from(value)))
     }
     fn object(
         &self,
@@ -1501,18 +1726,21 @@ impl<'a> Namespace<'a> {
 }
 struct EvaluationEffects<'a> {
     permissions: Option<&'a [PciFieldWritePermission]>,
+    reads: Vec<PciFieldRead>,
     writes: Vec<PciFieldWrite>,
 }
 impl<'a> EvaluationEffects<'a> {
     fn read_only() -> Self {
         Self {
             permissions: None,
+            reads: Vec::new(),
             writes: Vec::new(),
         }
     }
     fn with_permissions(permissions: &'a [PciFieldWritePermission]) -> Self {
         Self {
             permissions: Some(permissions),
+            reads: Vec::new(),
             writes: Vec::new(),
         }
     }

@@ -772,3 +772,255 @@ fn package_index_writes_are_local_bounded_copies_never_namespace_or_buffer_targe
     ns.load(&bytes).unwrap();
     assert_eq!(ns.evaluate(&path("\\GROW"), &[]), Err(Error::Limit));
 }
+
+#[derive(Default)]
+struct TestPciWriteBackend {
+    values: Vec<(PciField, u8)>,
+    writes: Vec<(PciField, u8)>,
+    reads: usize,
+    fail_before_write: Option<usize>,
+    fail_after_write: Option<usize>,
+    override_write: Option<(usize, u8)>,
+    mutate_on_read: Option<(usize, PciField, u8)>,
+}
+impl PciFieldWriteBackend for TestPciWriteBackend {
+    type Error = &'static str;
+
+    fn read_byte(&mut self, field: PciField) -> Result<u8, Self::Error> {
+        self.reads += 1;
+        if let Some((at, changed_field, value)) = self.mutate_on_read {
+            if at == self.reads {
+                let (_, current) = self
+                    .values
+                    .iter_mut()
+                    .find(|(candidate, _)| *candidate == changed_field)
+                    .ok_or("missing field")?;
+                *current = value;
+            }
+        }
+        self.values
+            .iter()
+            .find(|(candidate, _)| *candidate == field)
+            .map(|(_, value)| *value)
+            .ok_or("missing field")
+    }
+
+    fn write_byte(&mut self, field: PciField, value: u8) -> Result<(), Self::Error> {
+        let attempt = self.writes.len() + 1;
+        self.writes.push((field, value));
+        if self.fail_before_write == Some(attempt) {
+            return Err("write refused");
+        }
+        let stored = self
+            .override_write
+            .filter(|(at, _)| *at == attempt)
+            .map_or(value, |(_, stored)| stored);
+        let (_, current) = self
+            .values
+            .iter_mut()
+            .find(|(candidate, _)| *candidate == field)
+            .ok_or("missing field")?;
+        *current = stored;
+        if self.fail_after_write == Some(attempt) {
+            return Err("write uncertain");
+        }
+        Ok(())
+    }
+}
+
+fn transaction_field(offset: u16) -> PciField {
+    PciField {
+        address: 0x0001_0000,
+        offset,
+        bytes: 1,
+    }
+}
+
+fn transaction_effects(reads: &[(PciField, u8)], writes: &[(PciField, u8)]) -> MethodEffects {
+    MethodEffects {
+        result: None,
+        reads: reads
+            .iter()
+            .map(|(field, value)| PciFieldRead {
+                field: *field,
+                value: *value,
+            })
+            .collect(),
+        writes: writes
+            .iter()
+            .map(|(field, value)| PciFieldWrite {
+                field: *field,
+                value: *value,
+            })
+            .collect(),
+    }
+}
+
+fn transaction_permission(field: PciField, values: &[u8]) -> PciFieldWritePermission {
+    PciFieldWritePermission::from_values(field, values).unwrap()
+}
+
+#[test]
+fn pci_write_transaction_checks_snapshots_and_commits_ordered_readback_verified_writes() {
+    let pirqa = transaction_field(0x60);
+    let pirqb = transaction_field(0x61);
+    let effects = transaction_effects(
+        &[(pirqa, 1)],
+        &[(pirqa, 2), (pirqa, 3), (pirqb, 4)],
+    );
+    let permissions = [
+        transaction_permission(pirqa, &[2, 3]),
+        transaction_permission(pirqb, &[4]),
+    ];
+    let mut backend = TestPciWriteBackend {
+        values: vec![(pirqa, 1), (pirqb, 0)],
+        ..TestPciWriteBackend::default()
+    };
+    let mut postcondition_ran = false;
+    let result = apply_pci_field_writes(&effects, &permissions, &mut backend, || {
+        postcondition_ran = true;
+        Ok::<(), &'static str>(())
+    });
+    assert_eq!(result, Ok(()));
+    assert!(postcondition_ran);
+    assert_eq!(backend.values, vec![(pirqa, 3), (pirqb, 4)]);
+    assert_eq!(
+        backend.writes,
+        vec![(pirqa, 2), (pirqa, 3), (pirqb, 4)]
+    );
+}
+
+#[test]
+fn pci_write_transaction_refuses_stale_snapshot_before_any_write() {
+    let field = transaction_field(0x60);
+    let effects = transaction_effects(&[(field, 1)], &[(field, 2)]);
+    let permission = transaction_permission(field, &[2]);
+    let mut backend = TestPciWriteBackend {
+        values: vec![(field, 9)],
+        ..TestPciWriteBackend::default()
+    };
+    assert_eq!(
+        apply_pci_field_writes(&effects, &[permission], &mut backend, || {
+            Ok::<(), &'static str>(())
+        }),
+        Err(PciFieldWriteTransactionError::StaleSnapshot)
+    );
+    assert!(backend.writes.is_empty());
+    assert_eq!(backend.values, vec![(field, 9)]);
+}
+
+#[test]
+fn pci_write_transaction_rolls_back_if_a_planned_field_changes_mid_apply() {
+    let first = transaction_field(0x60);
+    let second = transaction_field(0x61);
+    let effects = transaction_effects(&[(second, 1)], &[(first, 2), (second, 3)]);
+    let permissions = [
+        transaction_permission(first, &[2]),
+        transaction_permission(second, &[3]),
+    ];
+    let mut backend = TestPciWriteBackend {
+        values: vec![(first, 1), (second, 1)],
+        // Snapshot read, first write pre-read, first readback, second pre-read.
+        mutate_on_read: Some((4, second, 9)),
+        ..TestPciWriteBackend::default()
+    };
+    assert_eq!(
+        apply_pci_field_writes(&effects, &permissions, &mut backend, || {
+            Ok::<(), &'static str>(())
+        }),
+        Err(PciFieldWriteTransactionError::ChangedDuringApply)
+    );
+    assert_eq!(backend.values, vec![(first, 1), (second, 9)]);
+    assert_eq!(backend.writes, vec![(first, 2), (first, 1)]);
+}
+
+#[test]
+fn pci_write_transaction_prevalidates_all_write_permissions_without_io() {
+    let allowed = transaction_field(0x60);
+    let denied = transaction_field(0x61);
+    let effects = transaction_effects(&[], &[(allowed, 2), (denied, 3)]);
+    let permission = transaction_permission(allowed, &[2]);
+    let mut backend = TestPciWriteBackend {
+        values: vec![(allowed, 1), (denied, 1)],
+        ..TestPciWriteBackend::default()
+    };
+    assert_eq!(
+        apply_pci_field_writes(&effects, &[permission], &mut backend, || {
+            Ok::<(), &'static str>(())
+        }),
+        Err(PciFieldWriteTransactionError::PermissionDenied)
+    );
+    assert_eq!(backend.reads, 0);
+    assert!(backend.writes.is_empty());
+}
+
+#[test]
+fn pci_write_transaction_rolls_back_an_uncertain_failed_write() {
+    let field = transaction_field(0x60);
+    let effects = transaction_effects(&[], &[(field, 2)]);
+    let permission = transaction_permission(field, &[2]);
+    let mut backend = TestPciWriteBackend {
+        values: vec![(field, 1)],
+        fail_after_write: Some(1),
+        ..TestPciWriteBackend::default()
+    };
+    assert_eq!(
+        apply_pci_field_writes(&effects, &[permission], &mut backend, || {
+            Ok::<(), &'static str>(())
+        }),
+        Err(PciFieldWriteTransactionError::Write("write uncertain"))
+    );
+    assert_eq!(backend.values, vec![(field, 1)]);
+    assert_eq!(backend.writes, vec![(field, 2), (field, 1)]);
+}
+
+#[test]
+fn pci_write_transaction_rolls_back_readback_and_postcondition_failures() {
+    let field = transaction_field(0x60);
+    let effects = transaction_effects(&[], &[(field, 2)]);
+    let permission = transaction_permission(field, &[2]);
+    let mut bad_readback = TestPciWriteBackend {
+        values: vec![(field, 1)],
+        override_write: Some((1, 99)),
+        ..TestPciWriteBackend::default()
+    };
+    assert_eq!(
+        apply_pci_field_writes(&effects, &[permission], &mut bad_readback, || {
+            Ok::<(), &'static str>(())
+        }),
+        Err(PciFieldWriteTransactionError::ReadbackMismatch)
+    );
+    assert_eq!(bad_readback.values, vec![(field, 1)]);
+
+    let mut bad_postcondition = TestPciWriteBackend {
+        values: vec![(field, 1)],
+        ..TestPciWriteBackend::default()
+    };
+    assert_eq!(
+        apply_pci_field_writes(&effects, &[permission], &mut bad_postcondition, || {
+            Err::<(), &'static str>("_CRS mismatch")
+        }),
+        Err(PciFieldWriteTransactionError::Postcondition("_CRS mismatch"))
+    );
+    assert_eq!(bad_postcondition.values, vec![(field, 1)]);
+    assert_eq!(bad_postcondition.writes, vec![(field, 2), (field, 1)]);
+}
+
+#[test]
+fn pci_write_transaction_reports_unverified_rollback() {
+    let field = transaction_field(0x60);
+    let effects = transaction_effects(&[], &[(field, 2)]);
+    let permission = transaction_permission(field, &[2]);
+    let mut backend = TestPciWriteBackend {
+        values: vec![(field, 1)],
+        fail_before_write: Some(2),
+        ..TestPciWriteBackend::default()
+    };
+    assert_eq!(
+        apply_pci_field_writes(&effects, &[permission], &mut backend, || {
+            Err::<(), &'static str>("_CRS mismatch")
+        }),
+        Err(PciFieldWriteTransactionError::RollbackFailed)
+    );
+    assert_eq!(backend.values, vec![(field, 2)]);
+}

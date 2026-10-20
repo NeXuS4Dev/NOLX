@@ -313,6 +313,9 @@ fn link_srs_planning_executes_only_authorized_field_writes_without_hardware_acce
     let possible = small_link_template();
     let current = small_current_template();
     let srs_body = [
+        vec![0x70],
+        b"PRQ0".to_vec(),
+        vec![0x60],
         vec![0x8a, 0x68, 0x0a, 9],
         b"TMP0".to_vec(),
         vec![0x70],
@@ -323,7 +326,17 @@ fn link_srs_planning_executes_only_authorized_field_writes_without_hardware_acce
     ]
     .concat();
     let aml = link_with_pci_field(&possible, &current, 1, &srs_body);
+    struct FieldSnapshot;
+    impl crate::aml::FieldReader for FieldSnapshot {
+        fn read(&self, field: PciField) -> Result<u64, crate::aml::Error> {
+            assert_eq!(field.address, 0x0001_0000);
+            assert_eq!(field.offset, 0x60);
+            Ok(0x11)
+        }
+    }
+    let snapshot = FieldSnapshot;
     let mut namespace = Namespace::new();
+    namespace.set_field_reader(&snapshot);
     namespace.load(&aml).unwrap();
     let link = Path::parse("\\PCI0.LNK0").unwrap();
     let selection = select_link_route(
@@ -343,6 +356,9 @@ fn link_srs_planning_executes_only_authorized_field_writes_without_hardware_acce
 
     let plan = plan_link_srs(&namespace, &link, &selection, &[permission]).unwrap();
     assert_eq!(plan.result, Some(Value::Integer(0x20)));
+    assert_eq!(plan.reads.len(), 1);
+    assert_eq!(plan.reads[0].field, field);
+    assert_eq!(plan.reads[0].value, 0x11);
     assert_eq!(plan.writes, vec![PciFieldWrite { field, value: 0x20 }]);
 
     // Ordinary evaluation remains read-only and refuses the same field target.
