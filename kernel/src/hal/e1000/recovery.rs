@@ -73,13 +73,7 @@ fn pinned(dev: usize, peer: usize, region: Region, mappings: usize, vector: u8, 
     assert_eq!(driver_start::start(dev), Err(Error::BadState));
     assert_eq!(driver_start::remove(dev), Err(Error::Busy));
 }
-fn recovered(
-    dev: usize,
-    region: Region,
-    mappings: usize,
-    route: Interrupt,
-    vector: u8,
-) {
+fn recovered(dev: usize, region: Region, mappings: usize, route: Interrupt, vector: u8) {
     driver_start::recover(dev).unwrap();
     assert_eq!(driver_start::state(dev), Ok(FrameworkState::Stopped));
     assert!(removable(dev));
@@ -96,13 +90,7 @@ fn recovered(
     detached(dev, vector);
     refused(dev);
 }
-fn route_owned(
-    dev: usize,
-    irq: Interrupt,
-    vector: u8,
-    references: usize,
-    phase: &'static str,
-) {
+fn route_owned(dev: usize, irq: Interrupt, vector: u8, references: usize, phase: &'static str) {
     assert_eq!(*PCI_ROUTE[dev].lock(), Some((irq, vector)));
     assert_eq!(
         RX_VECTOR[dev].load(Ordering::Acquire),
@@ -170,7 +158,10 @@ pub(super) fn run(console: &mut dyn HalConsole) {
         super::super::irq_vectors::owner(vector),
         Some((INTX_KIND, target_irq.gsi as usize))
     );
-    assert_eq!(super::super::ioapic::pci_route_references(target_irq.gsi), 2);
+    assert_eq!(
+        super::super::ioapic::pci_route_references(target_irq.gsi),
+        2
+    );
     // The target is intentionally quarantined after its injected post-ARP startup failure;
     // pinned() verifies its retained route reference while the source vector is masked.
     route_owned(peer, peer_irq, vector, 2, "initial live peer");
@@ -187,7 +178,13 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     exchange(peer, 0, peer_mac, console);
     recovered(dev, region, mappings, target_irq, vector);
     driver_start::start(dev).unwrap();
-    route_owned(dev, target_irq, vector, 2, "post-startup-quarantine recovery");
+    route_owned(
+        dev,
+        target_irq,
+        vector,
+        2,
+        "post-startup-quarantine recovery",
+    );
     exchange(dev, 1, target_mac, console);
     exchange(peer, 2, peer_mac, console);
     let _=writeln!(console,"e1000-recovery: post-ARP startup quarantine recovered; DMA 22 -> 11 -> 22, shared INTx live");
@@ -254,7 +251,10 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     exchange(dev, 10, target_mac, console);
     let _=writeln!(console,"e1000-recovery: deliberately withheld PCI exclusion proof pinned DMA despite actual bus-master disable");
     driver_start::stop(dev).unwrap();
-    assert_eq!(super::super::ioapic::pci_route_references(target_irq.gsi), 1);
+    assert_eq!(
+        super::super::ioapic::pci_route_references(target_irq.gsi),
+        1
+    );
     driver_start::stop(peer).unwrap();
     assert_eq!(
         super::super::ioapic::pci_route_references(target_irq.gsi),
@@ -264,8 +264,7 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     let _ = writeln!(
         console,
         "e1000-recovery: shared GSI {} vector {:#x} released only after last checked stop",
-        target_irq.gsi,
-        vector
+        target_irq.gsi, vector
     );
     detached(dev, vector);
     detached(peer, vector);
@@ -278,12 +277,17 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     super::super::ioapic::inject_pci_route_remask_readback_failure();
     assert_eq!(driver_start::start(dev), Err(Error::OpFailed));
     driver_start::recover(dev).unwrap();
-    assert_eq!(super::super::ioapic::pci_route_references(target_irq.gsi), 0);
+    assert_eq!(
+        super::super::ioapic::pci_route_references(target_irq.gsi),
+        0
+    );
     assert!(PCI_ROUTE[dev].lock().is_none());
     assert!(removable(dev));
     let quarantined_vector = super::super::ioapic::pci_route_quarantined_vector(target_irq.gsi)
         .expect("unverified route mask did not quarantine its vector");
-    assert!(super::super::irq_vectors::is_managed_vector(quarantined_vector));
+    assert!(super::super::irq_vectors::is_managed_vector(
+        quarantined_vector
+    ));
     assert_eq!(
         super::super::irq_vectors::owner(quarantined_vector),
         Some((INTX_KIND, target_irq.gsi as usize))
@@ -309,7 +313,10 @@ pub(super) fn run(console: &mut dyn HalConsole) {
         super::super::irq_vectors::outstanding(),
         vectors_before_quarantine + 1
     );
-    assert_eq!(super::super::ioapic::pci_route_references(target_irq.gsi), 0);
+    assert_eq!(
+        super::super::ioapic::pci_route_references(target_irq.gsi),
+        0
+    );
     assert!(removable(dev));
     let _ = writeln!(
         console,

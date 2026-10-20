@@ -136,8 +136,7 @@ pub fn build_srs_template(
             let LinkIrqNumber::Gsi(number) = selected.number else {
                 return Err(Error::Invalid);
             };
-            output[current_irq.start + 3] =
-                (current_irq.flags & 1) | extended_irq_flags(selected);
+            output[current_irq.start + 3] = (current_irq.flags & 1) | extended_irq_flags(selected);
             output[current_irq.start + 5..current_irq.start + 9]
                 .copy_from_slice(&number.to_le_bytes());
         }
@@ -176,9 +175,7 @@ pub fn link_srs_template(
     let Value::Buffer(possible) = value else {
         return Err(Error::Invalid);
     };
-    let current = namespace
-        .device_resources(link)?
-        .ok_or(Error::Invalid)?;
+    let current = namespace.device_resources(link)?.ok_or(Error::Invalid)?;
     build_srs_template(&current, &possible, selected)
 }
 
@@ -287,9 +284,7 @@ fn parse_small_irq(tag: u8, start: usize, data: &[u8]) -> Result<IrqDescriptor, 
         return Err(Error::Invalid);
     }
     let flags = if data.len() == 3 { data[2] } else { 1 };
-    if flags & !SMALL_IRQ_FLAGS_ALLOWED != 0
-        || (flags & 1 == 0) != (flags & 8 != 0)
-    {
+    if flags & !SMALL_IRQ_FLAGS_ALLOWED != 0 || (flags & 1 == 0) != (flags & 8 != 0) {
         return Err(Error::Invalid);
     }
     let mut options = Vec::new();

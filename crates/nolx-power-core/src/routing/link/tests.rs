@@ -37,10 +37,7 @@ fn small_current_template() -> Vec<u8> {
 
 fn extended_link_template() -> Vec<u8> {
     // Producer, level-triggered, active-low, shared, wake-capable; possible GSIs 20 and 21.
-    template(
-        vec![0x89, 10, 0, 0x1c, 2, 20, 0, 0, 0, 21, 0, 0, 0],
-        true,
-    )
+    template(vec![0x89, 10, 0, 0x1c, 2, 20, 0, 0, 0, 21, 0, 0, 0], true)
 }
 
 fn extended_current_template() -> Vec<u8> {
@@ -127,10 +124,7 @@ fn extended_irq_choice_preserves_current_descriptor_shape_and_checksum() {
     let current = extended_current_template();
     let configured = build_srs_template(&current, &bytes, options[1]).unwrap();
     assert_eq!(configured.len(), current.len());
-    assert_eq!(
-        &configured[..9],
-        &[0x89, 6, 0, 0x1c, 1, 21, 0, 0, 0]
-    );
+    assert_eq!(&configured[..9], &[0x89, 6, 0, 0x1c, 1, 21, 0, 0, 0]);
     assert_eq!(possible_interrupts(&configured).unwrap(), vec![options[1]]);
     let end_tag = configured.iter().position(|byte| *byte == 0x79).unwrap();
     assert_eq!(end_tag, 9);
@@ -155,9 +149,9 @@ fn extended_irq_parser_accepts_both_resource_usage_flags() {
 fn namespace_helpers_evaluate_prs_and_build_from_current_crs() {
     // Device(LNK0) with literal _PRS and _CRS buffers; IRQ3 is current, IRQ3/IRQ5 are possible.
     let aml = [
-        0x5b, 0x82, 35, b'L', b'N', b'K', b'0', 8, b'_', b'P', b'R', b'S', 0x11, 9, 0x0a, 6,
-        0x23, 40, 0, 0x18, 0x79, 0, 8, b'_', b'C', b'R', b'S', 0x11, 9, 0x0a, 6, 0x23, 8,
-        0, 0x18, 0x79, 0,
+        0x5b, 0x82, 35, b'L', b'N', b'K', b'0', 8, b'_', b'P', b'R', b'S', 0x11, 9, 0x0a, 6, 0x23,
+        40, 0, 0x18, 0x79, 0, 8, b'_', b'C', b'R', b'S', 0x11, 9, 0x0a, 6, 0x23, 8, 0, 0x18, 0x79,
+        0,
     ];
     let mut namespace = Namespace::new();
     namespace.load(&aml).unwrap();
