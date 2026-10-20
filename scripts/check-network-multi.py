@@ -198,9 +198,33 @@ def main():
     parser.add_argument('--qemu', default=os.environ.get('QEMU', 'qemu-system-x86_64'))
     parser.add_argument('--kernel', type=Path, default=ROOT / 'build' / 'nolx.elf')
     parser.add_argument('--intx-routing-only', action='store_true', help='require hal-pci-intx-poison-test; verify direct/shared/bridged/nested PC and Q35')
+    parser.add_argument('--link-srs-only', action='store_true', help='require hal-pci-link-srs-test (and poisoned lines); all PIRQ links start disabled and must recover through _SRS')
     parser.add_argument('--storage-fixture-only', action='store_true', help='require both multi-test features; six storage controllers plus four NICs on Q35')
     args = parser.parse_args()
     (ROOT / 'build').mkdir(exist_ok=True)
+    if args.link_srs_only:
+        for machine in ['pc', 'q35']:
+            for options in [{}, {'shared': True}, {'bridge': True}]:
+                text = boot(args.qemu, args.kernel.resolve(), ['e1000'] * 2, machine, **options)
+                assert re.search(r'link test: disabled [1-9]\d* PIRQ route\(s\)', text), \
+                    'fixture did not disable the firmware PIRQ routes first:\n' + text
+                assert text.count('INTx line poisoned to ff') == 2, text
+                preflight = re.findall(r'ACPI link preflight: (\d+) link\(s\), (\d+) require _SRS', text)
+                assert len(preflight) == 1 and int(preflight[0][1]) >= 1, \
+                    f'no link needed _SRS after every PIRQ route was disabled: {preflight}\n{text}'
+                applied = re.findall(r'ACPI link (\S+) reprogrammed via _SRS: GSI (\d+)', text)
+                assert len(applied) == int(preflight[0][1]), \
+                    f'preflight/applied _SRS counts disagree: {preflight} vs {applied}\n{text}'
+                assert 'evaluated ACPI INTx routing authorized:' in text, text
+                routes = re.findall(
+                    r'e1000: instance \d+, PCI \S+, mac \[[^]]+\], GSI (\d+), vector (0x[0-9a-f]+)',
+                    text,
+                )
+                assert len(routes) == 2, text
+                assert {gsi for gsi, _ in routes} <= {gsi for _, gsi in applied}, \
+                    f'e1000 traffic used a GSI no _SRS reprogramming selected: routes={routes} applied={applied}'
+                assert 'ACPI INTx evaluation refused:' not in text, text
+        return
     if args.intx_routing_only:
         for machine in ['pc', 'q35']:
             for options in [{}, {'shared': True}, {'bridge': True}, {'bridge': True, 'nested': True}]:

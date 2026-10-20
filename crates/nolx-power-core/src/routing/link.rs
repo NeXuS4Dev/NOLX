@@ -55,6 +55,7 @@ struct IrqDescriptor {
 
 struct Template {
     irq: Option<IrqDescriptor>,
+    descriptors: usize,
     end_tag: usize,
     checksum: u8,
 }
@@ -85,33 +86,52 @@ pub fn possible_interrupts(bytes: &[u8]) -> Result<Vec<LinkIrqOption>, Error> {
 
 /// Build a candidate `_SRS` buffer from the link's current `_CRS` and a choice from `_PRS`.
 ///
-/// The candidate is based on `_CRS`, so every descriptor stays in the same order and keeps its
-/// original type, length, and overall buffer size as required for `_SRS`. Only the current IRQ
-/// number and representable electrical flags are changed. An optional nonzero EndTag checksum
-/// is recomputed. The returned buffer is not written to hardware and does not execute `_SRS`.
+/// When `_CRS` carries an IRQ descriptor the candidate is based on it, so every descriptor
+/// stays in the same order and keeps its original type, length, and overall buffer size as
+/// required for `_SRS`; only the IRQ number and representable electrical flags are changed.
+/// A zero Small IRQ mask in `_CRS` is a disabled link whose descriptor is patched in place,
+/// not a malformed template. An empty `_CRS` template is the other encoding of an
+/// unallocated link: the candidate then derives from the `_PRS` buffer, which is accepted
+/// only when it holds exactly the one IRQ descriptor, so no additional resource is silently
+/// submitted to `_SRS` alongside the interrupt. An optional nonzero EndTag checksum is
+/// recomputed. The returned buffer is not written to hardware and does not execute `_SRS`.
 pub fn build_srs_template(
     current: &[u8],
     possible: &[u8],
     selected: LinkIrqOption,
 ) -> Result<Vec<u8>, Error> {
-    let current_template = parse_template(current)?;
+    let current_template = parse_current_template(current)?;
     let possible_template = parse_template(possible)?;
-    let current_irq = current_template.irq.ok_or(Error::Invalid)?;
-    let possible_irq = possible_template.irq.ok_or(Error::Invalid)?;
-    if current_irq.options.len() != 1 || !possible_irq.options.contains(&selected) {
+    let possible_irq = possible_template.irq.clone().ok_or(Error::Invalid)?;
+    if !possible_irq.options.contains(&selected) {
         return Err(Error::Invalid);
     }
 
-    let current_is_small = matches!(current_irq.tag, 0x22 | 0x23);
-    let possible_is_small = matches!(possible_irq.tag, 0x22 | 0x23);
-    if current_is_small != possible_is_small
-        || (!current_is_small && (current_irq.flags & 1) != (possible_irq.flags & 1))
-    {
-        return Err(Error::Invalid);
-    }
+    let (base, base_template, base_irq) = match &current_template.irq {
+        Some(irq) => {
+            if irq.options.len() > 1 {
+                return Err(Error::Invalid);
+            }
+            let current_is_small = matches!(irq.tag, 0x22 | 0x23);
+            let possible_is_small = matches!(possible_irq.tag, 0x22 | 0x23);
+            if current_is_small != possible_is_small
+                || (!current_is_small && (irq.flags & 1) != (possible_irq.flags & 1))
+            {
+                return Err(Error::Invalid);
+            }
+            (current, &current_template, irq.clone())
+        }
+        None => {
+            if current_template.descriptors != 0 || possible_template.descriptors != 1 {
+                return Err(Error::Invalid);
+            }
+            (possible, &possible_template, possible_irq.clone())
+        }
+    };
 
-    let mut output = current.to_vec();
-    match current_irq.tag {
+    let mut output = base.to_vec();
+    let mut removed = 0usize;
+    match base_irq.tag {
         0x22 | 0x23 => {
             let LinkIrqNumber::Isa(number) = selected.number else {
                 return Err(Error::Invalid);
@@ -120,32 +140,50 @@ pub fn build_srs_template(
                 return Err(Error::Invalid);
             }
             let mask = 1u16 << number;
-            output[current_irq.start + 1..current_irq.start + 3]
-                .copy_from_slice(&mask.to_le_bytes());
+            output[base_irq.start + 1..base_irq.start + 3].copy_from_slice(&mask.to_le_bytes());
             let flags = small_irq_flags(selected);
-            if current_irq.tag == 0x22 {
+            if base_irq.tag == 0x22 {
                 // IRQNoFlags has implicit edge/high/exclusive/non-wake flags.
                 if flags != 1 {
                     return Err(Error::Invalid);
                 }
             } else {
-                // Bits 1:2 are ignored by ACPI; preserve the current _CRS bits in _SRS.
-                output[current_irq.start + 3] = flags | (current_irq.flags & 0x06);
+                // Bits 1:2 are ignored by ACPI; preserve the base template bits in _SRS.
+                output[base_irq.start + 3] = flags | (base_irq.flags & 0x06);
             }
         }
         0x89 => {
             let LinkIrqNumber::Gsi(number) = selected.number else {
                 return Err(Error::Invalid);
             };
-            output[current_irq.start + 3] = (current_irq.flags & 1) | extended_irq_flags(selected);
-            output[current_irq.start + 5..current_irq.start + 9]
+            output[base_irq.start + 3] = (base_irq.flags & 1) | extended_irq_flags(selected);
+            output[base_irq.start + 5..base_irq.start + 9]
                 .copy_from_slice(&number.to_le_bytes());
+            // A candidate derived from a multi-GSI `_PRS` descriptor still carries the
+            // unselected GSIs behind the selected one. Drop them and shrink the encoded
+            // descriptor so the candidate names exactly one interrupt. The parser has
+            // already proven that an Extended IRQ descriptor holds at least one GSI.
+            let extra = base_irq.options.len() - 1;
+            if extra > 0 {
+                let shrink = extra * 4;
+                let length = u16::from_le_bytes([
+                    output[base_irq.start + 1],
+                    output[base_irq.start + 2],
+                ]);
+                let length = usize::from(length) - shrink;
+                let length = u16::try_from(length).map_err(|_| Error::Invalid)?;
+                output[base_irq.start + 1..base_irq.start + 3]
+                    .copy_from_slice(&length.to_le_bytes());
+                output[base_irq.start + 4] = 1;
+                output.drain(base_irq.start + 9..base_irq.start + 9 + shrink);
+                removed = shrink;
+            }
         }
         _ => return Err(Error::Invalid),
     }
 
-    if current_template.checksum != 0 {
-        let checksum_at = current_template.end_tag + 1;
+    if base_template.checksum != 0 {
+        let checksum_at = base_template.end_tag - removed + 1;
         output[checksum_at] = 0;
         let sum = output[..=checksum_at]
             .iter()
@@ -155,7 +193,7 @@ pub fn build_srs_template(
 
     let verified = parse_template(&output)?;
     let verified_irq = verified.irq.ok_or(Error::Invalid)?;
-    if output.len() != current.len()
+    if output.len() != base.len() - removed
         || verified_irq.options.len() != 1
         || verified_irq.options[0] != selected
     {
@@ -202,8 +240,9 @@ pub struct LinkRouteSelection {
 ///
 /// Only level-triggered, shareable choices can be selected for PCI INTx. ISA choices are mapped
 /// by `isa_to_gsi`; returning `None` refuses that option. `_PRS` is consulted only when the
-/// current route cannot be retained. The generated buffer preserves the `_CRS` descriptor shape,
-/// but this function does not execute `_SRS` or authorize hardware writes.
+/// current route cannot be retained, which includes a disabled or unallocated link (a zero
+/// Small IRQ mask or an empty `_CRS` template). The generated buffer preserves the `_CRS`
+/// descriptor shape, but this function does not execute `_SRS` or authorize hardware writes.
 pub fn select_link_route(
     namespace: &Namespace<'_>,
     link: &Path,
@@ -215,18 +254,24 @@ pub fn select_link_route(
         return Err(Error::Invalid);
     }
     let current = namespace.device_resources(link)?.ok_or(Error::Invalid)?;
-    let current_irq = parse_template(&current)?.irq.ok_or(Error::Invalid)?;
-    if current_irq.options.len() != 1 {
-        return Err(Error::Ambiguous);
-    }
-    let current_option = current_irq.options[0];
-    if let Some(interrupt) = mapped_pci_interrupt(current_option, &isa_to_gsi) {
-        if available(interrupt) {
-            return Ok(LinkRouteSelection {
-                option: current_option,
-                interrupt,
-                srs_argument: None,
-            });
+    // A zero Small IRQ mask or an empty template is a disabled or unallocated link: there
+    // is no current route to retain, so selection falls through to the advertised choices.
+    // More than one current interrupt is ambiguous and is never guessed at.
+    let current_option = match &parse_current_template(&current)?.irq {
+        Some(irq) if irq.options.len() == 1 => Some(irq.options[0]),
+        Some(irq) if irq.options.is_empty() => None,
+        Some(_) => return Err(Error::Ambiguous),
+        None => None,
+    };
+    if let Some(current_option) = current_option {
+        if let Some(interrupt) = mapped_pci_interrupt(current_option, &isa_to_gsi) {
+            if available(interrupt) {
+                return Ok(LinkRouteSelection {
+                    option: current_option,
+                    interrupt,
+                    srs_argument: None,
+                });
+            }
         }
     }
 
@@ -343,6 +388,18 @@ fn extended_irq_flags(option: LinkIrqOption) -> u8 {
 }
 
 fn parse_template(bytes: &[u8]) -> Result<Template, Error> {
+    parse_template_mode(bytes, false)
+}
+
+/// Parse a current-settings template. A zero Small IRQ mask is how firmware reports a
+/// disabled link, so the current side accepts it as an IRQ descriptor with no choices;
+/// possible-settings parsing keeps refusing it because advertising no interrupt is not a
+/// choice an `_SRS` candidate could ever select.
+fn parse_current_template(bytes: &[u8]) -> Result<Template, Error> {
+    parse_template_mode(bytes, true)
+}
+
+fn parse_template_mode(bytes: &[u8], current: bool) -> Result<Template, Error> {
     if bytes.is_empty() || bytes.len() > MAX_TEMPLATE_BYTES {
         return Err(if bytes.is_empty() {
             Error::Invalid
@@ -352,6 +409,7 @@ fn parse_template(bytes: &[u8]) -> Result<Template, Error> {
     }
 
     let mut irq = None;
+    let mut descriptors = 0usize;
     let mut at = 0usize;
     loop {
         let tag = *bytes.get(at).ok_or(Error::Invalid)?;
@@ -369,6 +427,7 @@ fn parse_template(bytes: &[u8]) -> Result<Template, Error> {
             }
             return Ok(Template {
                 irq,
+                descriptors,
                 end_tag: at,
                 checksum,
             });
@@ -393,7 +452,7 @@ fn parse_template(bytes: &[u8]) -> Result<Template, Error> {
         }
 
         let parsed = match tag {
-            0x22 | 0x23 => Some(parse_small_irq(tag, at, data)?),
+            0x22 | 0x23 => Some(parse_small_irq(tag, at, data, current)?),
             0x89 => Some(parse_extended_irq(at, data)?),
             _ => None,
         };
@@ -403,20 +462,26 @@ fn parse_template(bytes: &[u8]) -> Result<Template, Error> {
             }
             irq = Some(parsed);
         }
+        descriptors += 1;
         at = end;
     }
 }
 
-fn parse_small_irq(tag: u8, start: usize, data: &[u8]) -> Result<IrqDescriptor, Error> {
+fn parse_small_irq(
+    tag: u8,
+    start: usize,
+    data: &[u8],
+    current: bool,
+) -> Result<IrqDescriptor, Error> {
     if data.len() != usize::from(tag & 7) || !(data.len() == 2 || data.len() == 3) {
         return Err(Error::Invalid);
     }
     let mask = u16::from_le_bytes([data[0], data[1]]);
-    if mask == 0 {
-        return Err(Error::Invalid);
-    }
     let flags = if data.len() == 3 { data[2] } else { 1 };
     if flags & !SMALL_IRQ_FLAGS_ALLOWED != 0 || (flags & 1 == 0) != (flags & 8 != 0) {
+        return Err(Error::Invalid);
+    }
+    if mask == 0 && !current {
         return Err(Error::Invalid);
     }
     let mut options = Vec::new();

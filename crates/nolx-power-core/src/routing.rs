@@ -1,5 +1,7 @@
 //! Bounded evaluated ACPI PCI interrupt routing and preparatory link-resource selection.
-//! Current routing resolution performs no `_SRS`, hardware writes or route allocation.
+//! Current routing resolution performs no `_SRS`, hardware writes or route allocation;
+//! [`plan_link_reprogramming`] only decides which links a caller's audited transaction
+//! must reprogram before the routes it resolves here may be published.
 extern crate alloc;
 use crate::aml::{self, Namespace, Path, Value};
 use alloc::vec::Vec;
@@ -118,10 +120,21 @@ pub fn interrupt(bytes: &[u8]) -> Result<Interrupt, Error> {
     }
     Ok(irq)
 }
-/// Resolve a `_PRT` package and the current resources of every named link device.
-/// Only SourceIndex zero and a single current link interrupt are supported; no choices are
-/// guessed from `_PRS`. Conflicting exact/wildcard entries are rejected transactionally.
-pub fn entries(namespace: &Namespace<'_>, value: Value) -> Result<Vec<Entry>, Error> {
+enum RawSource {
+    Direct(Interrupt),
+    Link(Path),
+}
+struct RawRow {
+    device: u8,
+    function: Option<u8>,
+    pin: u8,
+    source: RawSource,
+}
+/// Validate a `_PRT` package's shape without resolving link resources, so route
+/// publication and the link-reprogramming preflight apply exactly the same row rules.
+/// Only SourceIndex zero is supported for links. Conflicting exact/wildcard rows are
+/// rejected before any resolution happens.
+fn raw_rows(value: Value) -> Result<Vec<RawRow>, Error> {
     let Value::Package(rows) = value else {
         return Err(Error::Invalid);
     };
@@ -131,7 +144,7 @@ pub fn entries(namespace: &Namespace<'_>, value: Value) -> Result<Vec<Entry>, Er
     if rows.len() > 256 {
         return Err(Error::Limit);
     }
-    let mut entries: Vec<Entry> = Vec::new();
+    let mut parsed: Vec<RawRow> = Vec::new();
     for row in rows {
         let Value::Package(row) = row else {
             return Err(Error::Invalid);
@@ -146,26 +159,22 @@ pub fn entries(namespace: &Namespace<'_>, value: Value) -> Result<Vec<Entry>, Er
         if address >> 16 > 31 || pin > 3 || (function > 7 && function != 0xffff) {
             return Err(Error::Invalid);
         }
-        let interrupt = match &row[2] {
-            Value::Integer(0) => Interrupt {
+        let source = match &row[2] {
+            Value::Integer(0) => RawSource::Direct(Interrupt {
                 gsi: u32::try_from(source_index).map_err(|_| Error::Invalid)?,
                 active_low: true,
                 level: true,
                 shared: true,
-            },
+            }),
             Value::Reference(path) => {
-                if source_index != 0 || !crate::is_usable(namespace.device_status(path)?.0) {
+                if source_index != 0 {
                     return Err(Error::Invalid);
                 }
-                let bytes = namespace.device_resources(path)?.ok_or(Error::Invalid)?;
-                interrupt(&bytes)?
+                RawSource::Link(path.clone())
             }
             _ => return Err(Error::Invalid),
         };
-        if !interrupt.level || !interrupt.shared {
-            return Err(Error::Invalid);
-        }
-        let entry = Entry {
+        let row = RawRow {
             device: (address >> 16) as u8,
             function: if function == 0xffff {
                 None
@@ -173,26 +182,55 @@ pub fn entries(namespace: &Namespace<'_>, value: Value) -> Result<Vec<Entry>, Er
                 Some(function as u8)
             },
             pin: pin as u8,
-            interrupt,
+            source,
         };
-        if entries.iter().any(|old| {
-            old.device == entry.device
-                && old.pin == entry.pin
-                && (old.function == entry.function
+        if parsed.iter().any(|old| {
+            old.device == row.device
+                && old.pin == row.pin
+                && (old.function == row.function
                     || old.function.is_none()
-                    || entry.function.is_none())
+                    || row.function.is_none())
         }) {
             return Err(Error::Ambiguous);
         }
-        entries.push(entry);
+        parsed.push(row);
+    }
+    Ok(parsed)
+}
+/// Resolve a `_PRT` package and the current resources of every named link device.
+/// Only SourceIndex zero and a single current link interrupt are supported; no choices are
+/// guessed from `_PRS`. Conflicting exact/wildcard entries are rejected transactionally.
+pub fn entries(namespace: &Namespace<'_>, value: Value) -> Result<Vec<Entry>, Error> {
+    let mut entries: Vec<Entry> = Vec::new();
+    for row in raw_rows(value)? {
+        let interrupt = match &row.source {
+            RawSource::Direct(interrupt) => *interrupt,
+            RawSource::Link(path) => {
+                if !crate::is_usable(namespace.device_status(path)?.0) {
+                    return Err(Error::Invalid);
+                }
+                let bytes = namespace.device_resources(path)?.ok_or(Error::Invalid)?;
+                interrupt(&bytes)?
+            }
+        };
+        if !interrupt.level || !interrupt.shared {
+            return Err(Error::Invalid);
+        }
+        entries.push(Entry {
+            device: row.device,
+            function: row.function,
+            pin: row.pin,
+            interrupt,
+        });
     }
     Ok(entries)
 }
-/// Evaluate every `_PRT` under a specified root. Bridge ADRs must be valid PCI addresses.
-/// At most eight tables/1024 entries are retained; a failed table refuses the entire result.
-pub fn discover(namespace: &Namespace<'_>, root: &Path) -> Result<Vec<Table>, Error> {
-    let mut tables = Vec::new();
-    let mut count = 0;
+/// Every `_PRT` package under `root`, with each scope's root-relative bridge ADRs.
+fn prt_packages(
+    namespace: &Namespace<'_>,
+    root: &Path,
+) -> Result<Vec<(Vec<u32>, Value)>, Error> {
+    let mut packages = Vec::new();
     for path in namespace.devices() {
         let Some(value) = namespace.device_value(path, *b"_PRT")? else {
             continue;
@@ -214,6 +252,16 @@ pub fn discover(namespace: &Namespace<'_>, root: &Path) -> Result<Vec<Table>, Er
             current = current.parent();
         }
         bridges.reverse();
+        packages.push((bridges, value));
+    }
+    Ok(packages)
+}
+/// Evaluate every `_PRT` under a specified root. Bridge ADRs must be valid PCI addresses.
+/// At most eight tables/1024 entries are retained; a failed table refuses the entire result.
+pub fn discover(namespace: &Namespace<'_>, root: &Path) -> Result<Vec<Table>, Error> {
+    let mut tables = Vec::new();
+    let mut count = 0;
+    for (bridges, value) in prt_packages(namespace, root)? {
         let entries = entries(namespace, value)?;
         count += entries.len();
         if tables.len() == 8 || count > 1024 {
@@ -225,6 +273,117 @@ pub fn discover(namespace: &Namespace<'_>, root: &Path) -> Result<Vec<Table>, Er
         return Err(Error::Invalid);
     }
     Ok(tables)
+}
+/// One `_PRT`-referenced link whose current route cannot be retained and must be
+/// reprogrammed before any route from its table may be published.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkReprogramming {
+    /// The link device to reprogram through `_SRS`.
+    pub link: Path,
+    /// The advertised alternative selected for it; always carries an `_SRS` candidate.
+    pub selection: LinkRouteSelection,
+}
+/// The result of preflighting every `_PRT`-referenced link before route publication.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkPlan {
+    /// Distinct links referenced by the validated tables.
+    pub evaluated: usize,
+    /// Links that need `_SRS`, in first-reference order. Empty means every current route
+    /// can be retained and publication needs no firmware writes.
+    pub reprogramming: Vec<LinkReprogramming>,
+}
+/// Maximum distinct link devices one routing preflight may select routes for.
+const MAX_ROUTING_LINKS: usize = 64;
+/// Evaluate every `_PRT` under `root`, retain available current link routes, and select an
+/// advertised `_PRS` alternative for each link whose current route is unavailable.
+///
+/// The same structural limits as [`discover`] apply (eight tables, 1024 rows, exactly one
+/// root table), so a successful plan is never followed by a structurally refused
+/// publication after hardware was written. Direct-GSI rows and the routes selected for
+/// earlier links are committed first: a later link may share a GSI only with identical
+/// electrical characteristics, never by guessing which side's flags win. `available` is
+/// the platform policy for a fully described interrupt and must be a pure predicate; it
+/// can be consulted for a candidate that a later template or arity check in
+/// [`select_link_route`] still rejects, in which case the whole plan fails and the
+/// speculative commitment is discarded with it.
+///
+/// This performs no `_SRS`, hardware writes or controller programming. The caller applies
+/// each returned selection transactionally and re-runs [`discover`] before publishing any
+/// route; the first malformed package, unusable link or capacity refusal fails the whole
+/// plan without returning a partial prefix.
+pub fn plan_link_reprogramming(
+    namespace: &Namespace<'_>,
+    root: &Path,
+    isa_to_gsi: impl Fn(u8) -> Option<u32>,
+    mut available: impl FnMut(Interrupt) -> bool,
+) -> Result<LinkPlan, Error> {
+    let packages = prt_packages(namespace, root)?;
+    if packages.len() > 8 {
+        return Err(Error::Limit);
+    }
+    if packages
+        .iter()
+        .filter(|(bridges, _)| bridges.is_empty())
+        .count()
+        != 1
+    {
+        return Err(Error::Invalid);
+    }
+    let mut committed: Vec<Interrupt> = Vec::new();
+    let mut links: Vec<Path> = Vec::new();
+    let mut rows_total = 0usize;
+    for (_, value) in packages {
+        let rows = raw_rows(value)?;
+        rows_total += rows.len();
+        if rows_total > 1024 {
+            return Err(Error::Limit);
+        }
+        for row in rows {
+            match row.source {
+                RawSource::Direct(interrupt) => {
+                    if !committed.contains(&interrupt) {
+                        committed.push(interrupt);
+                    }
+                }
+                RawSource::Link(path) => {
+                    if !links.contains(&path) {
+                        if links.len() == MAX_ROUTING_LINKS {
+                            return Err(Error::Limit);
+                        }
+                        links.push(path);
+                    }
+                }
+            }
+        }
+    }
+    let mut reprogramming = Vec::new();
+    for link in &links {
+        let selection = select_link_route(namespace, link, &isa_to_gsi, |interrupt| {
+            if committed
+                .iter()
+                .any(|old| old.gsi == interrupt.gsi && *old != interrupt)
+            {
+                return false;
+            }
+            if !available(interrupt) {
+                return false;
+            }
+            if !committed.contains(&interrupt) {
+                committed.push(interrupt);
+            }
+            true
+        })?;
+        if selection.srs_argument.is_some() {
+            reprogramming.push(LinkReprogramming {
+                link: link.clone(),
+                selection,
+            });
+        }
+    }
+    Ok(LinkPlan {
+        evaluated: links.len(),
+        reprogramming,
+    })
 }
 
 #[cfg(test)]

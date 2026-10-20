@@ -327,6 +327,19 @@ pub fn unmask_legacy_irq(irq: u8) -> bool {
     true
 }
 
+/// Whether [`acquire_pci_route`] could program this GSI: it must lie in the bounded PCI
+/// domain, belong to a routed I/O APIC pin, and avoid the ISA/NMI reservations that the
+/// initialization pass excluded. Route planning consults this before a firmware link is
+/// steered, so a GSI the platform cannot deliver is never selected in the first place.
+pub(crate) fn pci_route_supported(gsi: u32) -> bool {
+    let Ok(index) = usize::try_from(gsi) else {
+        return false;
+    };
+    PCI_BASE
+        .get(index)
+        .is_some_and(|base| base.load(Ordering::Acquire) != 0)
+}
+
 /// Acquire the readback-verified current firmware route for one e1000 source.
 ///
 /// The route is keyed by GSI: adapters sharing the same GSI share one local-APIC vector,

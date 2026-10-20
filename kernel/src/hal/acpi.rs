@@ -281,6 +281,8 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
         );
         return;
     };
+    #[cfg(feature = "hal-pci-link-srs-test")]
+    super::pci_intx::disable_links_for_test(console);
     let snapshot = super::pci_intx::Snapshot::capture();
     let mut namespace = Namespace::with_dsdt_revision(dsdt.bytes()[8]);
     namespace.set_field_reader(&snapshot);
@@ -401,7 +403,7 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
         );
     }
     if interrupt_model_ready && matches!(root_resources(), RootResourceState::Ready(_)) {
-        super::pci_intx::evaluate(&namespace, console);
+        super::pci_intx::evaluate(&namespace, &snapshot, &platform.madt, console);
     }
     let mut retained = 0;
     let mut ready = 0;
