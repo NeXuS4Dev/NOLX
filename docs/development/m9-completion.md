@@ -1700,8 +1700,16 @@ failure recovery*. They first failed on `8036bf7b` (the self-contained bootstrap
 fixture in this checkpoint; the only functional changes in it were Clippy-only rewrites and
 the toolchain pin moving from 1.88.0 to 1.97.0.
 
-The CI logs cannot be fetched from this environment (the failure-annotation step exists for
-exactly that reason), so the failure was reproduced locally and instrumented:
+The CI logs cannot be fetched from this environment, but the `report-failure` action posts
+each failing job's serial log as a pull-request comment, which is readable. That shows the
+first network job step now failing is the e1000 recovery fixture (`recovery.rs:180`,
+`driver_start::start(dev).unwrap()` → `Err(OpFailed)`, immediately after
+`recovered(dev, …)` and `e1000-recovery: exchange=0`): a start that re-acquires the shared
+GSI route after a checked stop is refused. The same fixture passed on `ab2a8d05`, whose
+`e1000/recovery.rs` is unchanged except for Clippy rewrites, so this is the 1.97.0 toolchain
+bump changing behaviour rather than a functional edit in this checkpoint.
+
+The virtio-blk half of the same class was reproduced locally and instrumented:
 
 * `hal-virtio-blk-recovery-test` on PC with QEMU 11.1.50 reaches
   `virtio-blk-recovery: transport target=transitional peer=modern` and then hangs — not a panic.
