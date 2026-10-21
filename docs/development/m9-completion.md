@@ -1568,3 +1568,47 @@ QEMU evidence, including deliberately disabled steering bytes, not physical-boar
 verification. Nonzero-segment binding, general multi-root resources, USB hubs and
 endpoint recovery, Executive input bindings, remaining AML providers and device
 power/S3 remain open. **M9 is not complete.**
+
+
+## Documentation alignment (2026-10-21)
+
+The last unchecked final-verification item — "Assertion database, README and roadmap agree
+on the final state and cite CI evidence" — is now addressed:
+
+- `ROADMAP.md` (M9 section) runs through the 2026-10-20 audited ACPI link `_SRS` checkpoint
+  (CI run [39462936440](https://github.com/NeXuS4Dev/NOLX/actions/runs/39462936440) on
+  `ee0253b`, all 19 jobs; PCI-036 `tested-T1`, PCI-037 `tested-T2`, 406 assertions) and states
+  M9 remains in progress.
+- `README.md` M9 status table cell and continuation now cite the same final state and list the
+  remaining open gates below.
+- `docs/testing/assertions/` holds 406 assertions with 0 database problems
+  (`tools/conformance-report.py --check`), and `docs/testing/CONFORMANCE.md` regenerates
+  byte-identical, satisfying the CI `on-disk-format` job. `drv.md` prose was aligned with its
+  rows: VIO-011, VIO-012, VIO-014 and VIO-015 are `tested-T2` with on-disk checksum evidence,
+  and VIO-013 and VIO-016 are `tested-T1`.
+- `M9` remains **in progress**. It changes to **done** only when every gate below has
+  executable evidence and all checks pass on the final revision.
+
+Remaining open gates (unchanged from the checkpoints above):
+
+- General `_PRT`/link `_SRS` reprogramming beyond the verified segment-zero PIIX/ICH9 ByteAcc
+  profile: nonzero segments, renumbering MADT overrides, dependent function resource
+  alternatives, `_SRS` bodies outside the bounded AML subset, and boards whose link steering is
+  not a whitelisted PIRQ byte all refuse rather than guess.
+- Native nonzero-segment PCI binding: no multi-segment QEMU/native fixture or end-to-end
+  binding evidence (PCI-032 `implemented` covers host-tested segment-qualified identity only).
+- End-to-end interrupt-vector exhaustion fixtures for xHCI and network sources (PCI-031
+  `pending-T2`: host tests passed, QEMU fixtures not yet added).
+- USB hubs, SuperSpeed device classes/hotplug and general endpoint recovery; SS HID selection
+  remains host-tested only.
+- Executive/process-handle, security/namespace, waitable and user-facing input-device
+  bindings; PS/2 and input-object paths have no framework recovery contract.
+- Remaining AML operation-region providers and operations; general hardware-field AML/PCI
+  roots.
+- Device power-state/quiesce policy and S3 save/resume; BSP device shutdown (S5) is verified,
+  higher-layer/SMP orchestration is not.
+- Dedicated boot tests for each new hardware path, including absent-device fallbacks, and the
+  remaining allocator-exhaustion fixtures.
+
+Only executable evidence checks an item: host-test passes, QEMU boot fixtures with captured
+serial/pcap/disk evidence, and CI runs cited by revision. **M9 is not complete.**

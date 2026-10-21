@@ -274,11 +274,11 @@ fn append_cpio_record(out: &mut Vec<u8>, ino: u32, mode: Mode, name: &str, data:
     out.extend_from_slice(header.as_bytes());
     out.extend_from_slice(name.as_bytes());
     out.push(0);
-    while out.len() % 4 != 0 {
+    while !out.len().is_multiple_of(4) {
         out.push(0);
     }
     out.extend_from_slice(data);
-    while out.len() % 4 != 0 {
+    while !out.len().is_multiple_of(4) {
         out.push(0);
     }
 }

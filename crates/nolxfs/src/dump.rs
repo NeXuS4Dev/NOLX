@@ -153,18 +153,16 @@ fn dump_tree<D: BlockDevice>(dev: &D, fs_root: u64, out: &mut String) -> Result<
                         .push((logical, extent_len(val.len_and_flags)));
                 }
             }
-            gen::DREC_TYPE_XATTR => {
+            gen::DREC_TYPE_XATTR if entry.key.len() > gen::nolx_xattr_key_t::DISK_SIZE => {
                 // The attribute name lives in the key, after the xattr key
                 // header; the record value is the raw attribute bytes.
-                if entry.key.len() > gen::nolx_xattr_key_t::DISK_SIZE {
-                    let name: String = entry.key[gen::nolx_xattr_key_t::DISK_SIZE..]
-                        .iter()
-                        .take_while(|&&b| b != 0)
-                        .map(|&b| b as char)
-                        .collect();
-                    if !name.is_empty() {
-                        xattrs.entry(jkey_oid(raw)).or_default().push(name);
-                    }
+                let name: String = entry.key[gen::nolx_xattr_key_t::DISK_SIZE..]
+                    .iter()
+                    .take_while(|&&b| b != 0)
+                    .map(|&b| b as char)
+                    .collect();
+                if !name.is_empty() {
+                    xattrs.entry(jkey_oid(raw)).or_default().push(name);
                 }
             }
             _ => {}

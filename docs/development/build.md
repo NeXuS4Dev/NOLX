@@ -117,3 +117,59 @@ fault-test images to verify that `#PF` and `#GP` print register state and halt. 
 `build/nolx.elf` is built with `--remap-path-prefix` so the build path is not embedded,
 and the build records `rustc --version --verbose` in `build/buildinfo.txt`. Release
 images are signed (M13).
+
+---
+
+## Restricted-environment bootstrap (sandbox, CI without apt)
+
+The standard prerequisites table above assumes `rustup`, `qemu-system-x86_64`, and the
+`x86_64-unknown-none` target are available as system packages. In restricted
+environments (no `deb.debian.org`, no `objects.githubusercontent.com`, no `/dev/kvm`),
+none of those are available. The repo ships a self-contained bootstrap instead:
+
+| Artifact | Location |
+|----------|----------|
+| QEMU 11.1.50 (TCG, `x86_64-softmmu`) | `.nolx-deps/qemu/bin/qemu-system-x86_64` |
+| QEMU BIOS + blobs | `.nolx-deps/qemu/share/qemu/` |
+| Rust 1.97.0 (via `arena-rust-toolchain` PyPI) | `/opt/rust/prefix/bin/` (or `RUST_PREFIX`) |
+| Link stubs (`rust_eh_personality`, `memcmp`, …) | `.nolx-deps/stubs/kernel_stubs.o` |
+| Boot trampoline objects | `.nolx-deps/stubs/{boot,interrupts,syscall}.o` |
+
+### One-liner
+
+```bash
+source scripts/nolx-env.sh        # activate PATH + RUSTFLAGS
+nolx-kernel-build               # cargo build --release --target x86_64-unknown-linux-gnu
+nolx-kernel-copy                # cp to build/nolx.elf
+nolx-kernel-verify              # verify-multiboot.py (21 checks)
+nolx-kernel-run                 # QEMU -kernel with serial console
+```
+
+### Why `x86_64-unknown-linux-gnu` instead of `x86_64-unknown-none`?
+
+The prebuilt `x86_64-unknown-none` standard library rmeta files embed
+`x86_64-unknown-linux-gnu` as their target triple. Patching them to
+`x86_64-unknown-none` corrupts rustc's metadata string-sentinel layout and
+triggers `decode_symbol` "entered unreachable code" panics. The
+`x86_64-unknown-linux-gnu` target compiles all crates successfully; linking
+requires the stub objects (which define `rust_eh_personality`, `memcmp`,
+`memmove`, `memcpy`, `memset`, `bcmp`, `_Unwind_Resume`) plus the assembled
+boot trampoline objects, and `-Wl,--relax` to convert `R_X86_64_32` to
+`R_X86_64_32S` at the high kernel address. All of this is encapsulated in
+`nolx-env.sh`.
+
+### If artifacts are missing
+
+```bash
+scripts/bootstrap-qemu.sh   # builds QEMU from codeload.github.com (~5-10 min)
+scripts/bootstrap-rust.sh   # installs Rust 1.97.0 from pypi.org
+```
+
+Both work through restricted networks (only GitHub codeload + PyPI needed).
+
+### Make targets still work
+
+`make check`, `make bootcheck`, `make fscheck`, `make fmt`, `make lint` work
+unchanged. `make kernel` and `make run` should be replaced with the
+`nolx-kernel-*` functions above, because the Makefile's default `RUSTFLAGS`
+assume `x86_64-unknown-none` and a system `qemu-system-x86_64`.

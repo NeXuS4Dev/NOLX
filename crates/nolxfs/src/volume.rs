@@ -1852,7 +1852,7 @@ impl<D: BlockDevice> Volume<D> {
             .reaper
             .entries()
             .iter()
-            .flat_map(|e| (e.block..e.block + e.len))
+            .flat_map(|e| e.block..e.block + e.len)
             .collect();
         for extent in &snap_extents {
             for i in 0..extent.len.div_ceil(bs) {

@@ -1224,7 +1224,7 @@ impl<'a> Namespace<'a> {
         flags: u8,
         depth: usize,
     ) -> Result<PciField, Error> {
-        if bits != 8 || bit % 8 != 0 || flags != 1 {
+        if bits != 8 || !bit.is_multiple_of(8) || flags != 1 {
             return Err(Error::Unsupported(0x5b81));
         }
         let index = self.resolve(region)?;

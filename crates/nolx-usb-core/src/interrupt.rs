@@ -86,7 +86,7 @@ mod tests {
     fn invalid_ring_offsets_cannot_escape_the_dma_page_or_wrap() {
         assert_eq!(dequeue(0x1001, 0, true), None);
         assert_eq!(dequeue(0x1000, 256, true), None);
-        assert_eq!(dequeue(u64::MAX & !63, 4, true), None);
+        assert_eq!(dequeue(!63, 4, true), None);
     }
     #[test]
     fn message_tables_cannot_alias_registers_each_other_or_escape_the_owned_window() {
@@ -101,14 +101,7 @@ mod tests {
         assert!(!message_table_window(
             0x2404, 0x3f08, 256, 0x3800, 8, 0x4000
         ));
-        assert!(!message_table_window(
-            0x2404,
-            u64::MAX & !7,
-            256,
-            0x3800,
-            8,
-            u64::MAX
-        ));
+        assert!(!message_table_window(0x2404, !7, 256, 0x3800, 8, u64::MAX));
         assert!(!message_table_window(
             0x2404, 0x3001, 256, 0x3800, 8, 0x4000
         ));
