@@ -836,7 +836,7 @@ harness injects pointer motion only after `input: poll blocked ... timeout=5000m
 the program exits 42 only when the wake reports one ready descriptor with `POLLIN` and the
 following `read(2)` returns the injected record byte for byte. A machine with no USB pointer
 reports the phase as skipped and keeps booting. INP-010..INP-012 cover the contract, the block and
-that honesty test; the fixture is `scripts/check-input-poll.py`.
+that honesty test; the fixture is `scripts/check-input-poll.py`. All three are `tested-T2` in run [39671976393](https://github.com/NeXuS4Dev/NOLX/actions/runs/39671976393) on `5d3707d`, which passed all 19 jobs — the same run that promoted the hub assertions, on the first commit that carried both gates.
 
 ## M10 — POSIX conformance waves
 

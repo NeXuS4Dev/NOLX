@@ -126,7 +126,8 @@ segment-zero board profile and the broader open M9 gates below remain incomplete
       the kernel prints `input: poll blocked`, and the program exits 42 only when the wake
       reports one ready descriptor with `POLLIN` and the following `read(2)` returns the injected
       record field for field. A machine with no USB pointer reports the phase as skipped and
-      keeps booting. INP-010..INP-012.
+      keeps booting. INP-010..INP-012 are `tested-T2` in run
+      [39671976393](https://github.com/NeXuS4Dev/NOLX/actions/runs/39671976393) on `5d3707d`, which passed all 19 jobs.
 - [x] USB disconnect/hotplug cleanup and endpoint/ring ownership; do not leak controller
       resources or leave DMA active after device removal. Root-port unplug/reconnect has been
       checked since USB-011; a hub now adds route-scoped unplug, leaf-first subtree teardown and
