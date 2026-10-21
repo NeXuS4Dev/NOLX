@@ -398,6 +398,7 @@ pub fn poll_on(dev: usize, console: &mut dyn HalConsole) -> Result<(), Failure> 
         "xhci",
         || {
             let Some(delivered) = irq::work(dev) else {
+                live::poll_hubs(dev, console);
                 return Ok(());
             };
             let (more, reports) = live::poll_events(dev, console);

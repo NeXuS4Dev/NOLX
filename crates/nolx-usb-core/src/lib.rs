@@ -15,6 +15,7 @@
 
 use nolx_input_core::KeyEvent;
 pub mod device;
+pub mod hub;
 pub mod interrupt;
 pub mod transfer;
 

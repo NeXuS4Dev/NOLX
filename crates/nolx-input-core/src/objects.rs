@@ -44,14 +44,46 @@ pub enum Location {
     Ps2Keyboard,
     /// Fixed i8042 auxiliary port.
     Ps2Mouse,
-    /// Direct-root USB port; USB addresses/slots may be reused independently.
+    /// A USB port, either on the root hub or below hubs; addresses/slots may be reused freely.
     Usb {
         /// Encoded segment-qualified PCI controller.
         controller: u32,
         /// One-based root port.
         port: u8,
+        /// Route string below that root port: 4 bits per hub tier, zero for a root device.
+        ///
+        /// Two devices on different ports of the same hub share `controller` and `port`, so the
+        /// route is part of the identity. It is also what distinguishes a hub's own port from
+        /// the device behind it.
+        route: u32,
     },
 }
+/// True when `route` is a compact route string: at most five tiers of non-zero four-bit ports.
+///
+/// A zero nibble before a non-zero one would describe a port below an absent hub, and the
+/// controller would silently drop the transfer instead of reporting the mistake here.
+const fn route_valid(route: u32) -> bool {
+    if route >= 1 << 20 {
+        return false;
+    }
+    let mut depth = 0;
+    let mut seen_empty = false;
+    let mut index = 0;
+    while index < 5 {
+        let nibble = (route >> (4 * index)) & 0xf;
+        if nibble == 0 {
+            seen_empty = true;
+        } else if seen_empty {
+            return false;
+        } else {
+            depth += 1;
+        }
+        index += 1;
+    }
+    let _ = depth;
+    true
+}
+
 /// Current device state used to repair a reader after lost records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Snapshot {
@@ -212,7 +244,9 @@ impl<const D: usize, const R: usize, const Q: usize> Registry<D, R, Q> {
         let valid = match (source, class, location) {
             (Source::Ps2Keyboard, Class::Keyboard, Location::Ps2Keyboard)
             | (Source::Ps2Mouse, Class::Pointer, Location::Ps2Mouse) => true,
-            (Source::UsbHid, _, Location::Usb { port, .. }) => port != 0,
+            (Source::UsbHid, _, Location::Usb { port, route, .. }) => {
+                port != 0 && route_valid(route)
+            }
             _ => false,
         };
         if !valid {

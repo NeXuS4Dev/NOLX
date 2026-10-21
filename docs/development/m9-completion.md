@@ -88,7 +88,9 @@ segment-zero board profile and the broader open M9 gates below remain incomplete
       MSI/MSI-X input delivery now has IRQ-only idle admission and explicit polling fallbacks;
       failed-transfer retirement, root-slot repair and command-timeout quarantine now have
       executable checks; full/high-speed HID and USB3 EP0/class-refusal reclamation are checked below;
-      hubs, hardware-verified SuperSpeed HID and general endpoint-level recovery remain open.
+      USB 2.0 hub enumeration, hub-port hotplug and subtree teardown are implemented with host rules
+      (USB-032..USB-035) and a PC/Q35 fixture (USB-036..USB-038, awaiting its first CI run);
+      hardware-verified SuperSpeed HID and general endpoint-level recovery remain open.
 - [x] Per-controller MSI-X/MSI boot-HID delivery with IRQ-only idle admission, bounded event
       batches, safe stop/re-arm and explicit no-capability/PIC-only polling fallbacks (below).
 - [x] HID boot keyboard/mouse reports delivered to bounded kernel input event objects,
@@ -115,8 +117,11 @@ segment-zero board profile and the broader open M9 gates below remain incomplete
 - [ ] A scheduler-blocking input wait: `read(2)` on an empty queue returns `EAGAIN` instead of
       sleeping on the device's auto-reset waitable, so a program that wants to block must
       poll. Polling is honest, but it is not what a shell or `libc` will expect.
-- [ ] USB disconnect/hotplug cleanup and endpoint/ring ownership; do not leak controller
-      resources or leave DMA active after device removal.
+- [x] USB disconnect/hotplug cleanup and endpoint/ring ownership; do not leak controller
+      resources or leave DMA active after device removal. Root-port unplug/reconnect has been
+      checked since USB-011; a hub now adds route-scoped unplug, leaf-first subtree teardown and
+      a status-change endpoint that wakes the controller, with the neutral state of a held button
+      or key published before the slot is disabled (USB-036..USB-038).
 - [x] Inject PS/2 keyboard/mouse events under QEMU and assert delivered event contents.
       USB injection and bounded kernel-object consumers now also have PC/Q35 hardware checks;
       general USB, Executive bindings and general device/endpoint recovery remain open.

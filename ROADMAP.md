@@ -784,6 +784,32 @@ The complete unchecked gates remain in the linked checklist.
 - Power: ACPI table parsing, `_STA`/`_CRS`, S3/S5, device power policy.
 - Tests: T2 boot with each storage backend and checksum a written file.
 
+M9 USB hub checkpoint (2026-10-21): a USB 2.0 hub is now enumerated as a hub rather than
+refused. The rules live in `crates/nolx-usb-core/src/hub.rs`: the class descriptor (length
+`7 + ceil(ports/8)` up to eleven bytes, 1..15 ports, characteristics and TT think time, the
+removable bitmap, the power-on delay times two milliseconds), the class requests (the descriptor
+is read with `bmRequestType` `0xa0` and type `0x29`; port requests target "other", `0xa3`/`0x23`),
+the port status and change words, the route string and the slot-context/translator words, and the
+status-change endpoint with its clamped transfer length. The kernel gives every device a route in
+its slot context and in its input-object location, arms the hub's interrupt IN endpoint so a port
+change wakes the controller, re-arms it per completion, and reads the ports in a five-phase scan
+(root retire, detached retire, hub cascade, leaf-first sweep, root attach). Two defects found by
+measurement are fixed: an event that lands while the interrupter is masked is now seen by
+re-reading the event ring after re-enabling, and an idle backstop reads the ports every 100 ms so
+a lost hub wakeup cannot strand hotplug.
+
+Local evidence (QEMU 11.1.50, PC and Q35, repeated): a four-port hub takes its own slot on the
+root port QEMU assigns, a full-speed mouse behind hub port 1 enumerates at route `0x1` in a
+different slot, hotplug onto hub port 3 enumerates at route `0x3`, unplugging one device retires
+exactly that route and publishes `dx=0 dy=0 buttons=0`, removing the hub retires routes `0x2`
+and `0x4` before `0x0`, the DMA counter returns to the one-device baseline (8 pages) and a
+re-plugged two-port hub enumerates on the same root port. `cargo test -p nolx-usb-core --lib`
+passes 42 tests and `-p nolx-input-core --lib` 26 (the route is part of the input identity).
+The new `scripts/check-usb-input.py --hubs` step adds key-press and held-key assertions that this
+sandbox cannot exercise (its QEMU delivers QMP pointer events but not key events, the same reason
+the PS/2 fixture cannot run here), so USB-036..USB-038 stay `pending-T2` until the CI run for this
+revision passes. **M9 is not complete.**
+
 ## M10 — POSIX conformance waves
 
 Each wave is a numbered, testable set of System Interfaces functions.

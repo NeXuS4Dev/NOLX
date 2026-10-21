@@ -310,7 +310,15 @@ pub(super) fn finish(dev: usize, more: bool) -> Result<(), Failure> {
     if let Some(s) = SOURCES[dev].lock().as_ref() {
         s.regs.write32(s.runtime, rule::ENABLE)?;
     }
-    live::finish_events(dev)
+    live::finish_events(dev)?;
+    // The interrupter was masked while the ring was drained, so a completion that arrived in
+    // that window was written without an interrupt. Re-checking the ring after re-enabling is
+    // what turns that window from a lost wakeup into one more idle pass; anything that arrives
+    // after this read raises an interrupt of its own, because the interrupter is enabled again.
+    if live::events_pending(dev) {
+        WORK[dev].store(true, Ordering::Release);
+    }
+    Ok(())
 }
 #[cfg(any(
     feature = "hal-xhci-lifecycle-test",
