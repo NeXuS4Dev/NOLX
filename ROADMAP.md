@@ -814,9 +814,29 @@ repaired two defects the fixtures found: a hub class request that consumed the h
 status-change completion left the pipe unarmed (the completion is now replayed into a fresh
 transfer), and the leaf-first sweep retried a quarantined device's Disable Slot behind the repair
 path's back (the sweep now touches only `Retiring` devices). **M9 is not complete:** the open
-gates are the scheduler-blocking input wait, `_PRT`/`_SRS` beyond segment zero, native
-nonzero-segment PCI, the embedded-controller handshake and a firmware-exercised region write, and
-device power/S3. SuperSpeed HID reports and hub nesting beyond one tier also remain open.
+gates are `_PRT`/`_SRS` beyond segment zero, native nonzero-segment PCI, the embedded-controller
+handshake and a firmware-exercised region write, and device power/S3. SuperSpeed HID reports and
+hub nesting beyond one tier also remain open.
+
+M9 blocking input wait checkpoint (2026-10-21): `poll(2)` on `\Device\InputN` is now a real
+scheduler block instead of a suggestion to call it again. The syscall validates the caller's
+eight-byte `struct pollfd` array once, at call time, in the calling address space (`count` 1..8,
+`EINVAL`/`EFAULT` otherwise), answers immediately when something is ready or the timeout is zero,
+and otherwise records the request on the process and marks it blocked; the idle loop re-evaluates
+every suspended request after the producers have run, writes `revents` back for every entry, sets
+the return value in the saved frame and wakes the thread. `POLLNVAL` covers stdio and descriptors
+this kernel does not serve, `POLLIN` means a record or a pending resynchronisation is there, and
+`read(2)` keeps its own contract: still non-blocking, still `EAGAIN` on an empty queue. Readiness
+is a query, not a reservation — asking twice does not consume the record
+(`nlox-input-core::objects::Registry::ready`). A defect the ring-3 program found is worth naming:
+`PollFd::encode` used to zero `revents`, so the kernel computed the answer and then threw it away,
+which reported a ready descriptor as quiet. The ring-3 fixture `inputwait`
+(`hal-input-wait-test`) polls 20 ms (must expire with zero), then blocks for five seconds; the
+harness injects pointer motion only after `input: poll blocked ... timeout=5000ms` appears, and
+the program exits 42 only when the wake reports one ready descriptor with `POLLIN` and the
+following `read(2)` returns the injected record byte for byte. A machine with no USB pointer
+reports the phase as skipped and keeps booting. INP-010..INP-012 cover the contract, the block and
+that honesty test; the fixture is `scripts/check-input-poll.py`.
 
 ## M10 — POSIX conformance waves
 

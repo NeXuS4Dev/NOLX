@@ -169,6 +169,9 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         if let Err(error) = obj::boot::init(&mut console) {
             panic!("obj: namespace init failed: {error:?}");
         }
+        // HID devices that enumerated during the controller probes predate the type table; give
+        // them their Executive names now, before anything binds a process to them.
+        hal::input::publish_unbound(&mut console);
         // The object manager checks its own reference rules before anything depends on them.
         // A failure is fatal for the same reason the memory self test's is.
         if let Err(error) = obj::boot::selftest(&mut console) {
@@ -221,11 +224,25 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         let mut input_read_test_started = false;
         #[cfg(feature = "hal-input-read-test")]
         let mut input_read_test_reported = false;
+        #[cfg(feature = "hal-input-wait-test")]
+        let mut input_poll_test_reported = false;
         #[cfg(any(feature = "hal-power-test-s5", feature = "hal-power-quiesce-test"))]
         let mut power_test_started = false;
         loop {
             hal::xhci::poll_events(&mut console);
             hal::input::report_events(&mut console);
+            // A process suspended in `poll(2)` is completed here, outside any interrupt and
+            // outside the syscall: the request is re-evaluated against the queues the producers
+            // just filled, and the caller's frame is resumed with the count of ready
+            // descriptors.
+            for (pid, ready, timed_out) in exec::user::service_polls() {
+                if pid != 0 {
+                    let _ = writeln!(
+                        console,
+                        "input: poll woke pid={pid} ready={ready} timed_out={timed_out}"
+                    );
+                }
+            }
             #[cfg(feature = "hal-xhci-transfer-fault-test")]
             if memory_selftest_done {
                 hal::xhci::transfer_selftest(&mut console);
@@ -308,6 +325,39 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
                 }
             }
 
+            // The blocking `poll(2)` phase runs after the `read(2)` phase, on the same image
+            // family, and before the memory selftests for the same reason.
+            #[cfg(feature = "hal-input-wait-test")]
+            let poll_ready = {
+                #[cfg(feature = "hal-input-read-test")]
+                {
+                    input_read_test_reported
+                }
+                #[cfg(not(feature = "hal-input-read-test"))]
+                {
+                    user_test_reported
+                }
+            };
+            #[cfg(feature = "hal-input-wait-test")]
+            {
+                // The waiter needs a USB pointer, which enumerates asynchronously: keep asking
+                // until the phase either spawns it or reports that this machine has none.
+                if poll_ready {
+                    exec::begin_input_poll_test(&mut console);
+                }
+                if poll_ready
+                    && exec::input_poll_test_started()
+                    && !input_poll_test_reported
+                    && !exec::input_poll_test_running()
+                {
+                    input_poll_test_reported = true;
+                    let passed = exec::report_input_poll_test(&mut console);
+                    if !passed && !exec::input_poll_test_skipped() {
+                        panic!("input poll(2) T2 test produced an unexpected evidence chain");
+                    }
+                }
+            }
+
             let ticks = hal::timer::ticks();
             if !timer_marker_reported && ticks >= 100 {
                 let elapsed_ns = hal::timer::monotonic_ns();
@@ -324,9 +374,13 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
 
             // Every ring-3 phase has to finish before the memory selftests: they activate
             // their own address spaces, which cannot interleave with live user threads.
-            #[cfg(feature = "hal-input-read-test")]
+            #[cfg(all(feature = "hal-input-read-test", feature = "hal-input-wait-test"))]
+            let ring3_done = input_read_test_reported && input_poll_test_reported;
+            #[cfg(all(feature = "hal-input-read-test", not(feature = "hal-input-wait-test")))]
             let ring3_done = input_read_test_reported;
-            #[cfg(not(feature = "hal-input-read-test"))]
+            #[cfg(all(feature = "hal-input-wait-test", not(feature = "hal-input-read-test")))]
+            let ring3_done = input_poll_test_reported;
+            #[cfg(not(any(feature = "hal-input-read-test", feature = "hal-input-wait-test")))]
             let ring3_done = true;
 
             // Exercise the frame allocator once the clock is live, so the stress runs while

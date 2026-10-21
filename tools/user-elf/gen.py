@@ -49,6 +49,8 @@ SYS_READ = 104
 SYS_WRITE = 105
 SYS_LSEEK = 110
 SYS_UNLINK = 139
+SYS_POLL = 352
+POLLIN = 0x0001
 O_RDWR = 0x0002
 O_CREAT = 0x0040
 O_EXCL = 0x0080
@@ -158,6 +160,10 @@ class Asm:
         self.raw(b"\x81\x7e" + offset.to_bytes(1, "little")
                  + value.to_bytes(4, "little"))
 
+    def mov_dword_at_rsi_r12d(self, offset: int) -> None:
+        """mov dword [rsi + offset], r12d."""
+        self.raw(b"\x44\x89\x66" + offset.to_bytes(1, "little"))
+
     def mov_rdi_rsp(self) -> None:
         """mov rdi, rsp."""
         self.raw(b"\x48\x89\xe7")
@@ -198,6 +204,15 @@ class Asm:
     def jnz(self, label: str) -> None:
         """jnz rel32."""
         self.raw(b"\x0f\x85\x00\x00\x00\x00")
+        self.fixups.append((len(self.code) - 4, label, "rel32"))
+
+    def test_eax(self) -> None:
+        """test eax, eax: sets the sign flag for a negative syscall result."""
+        self.raw(b"\x85\xc0")
+
+    def js(self, label: str) -> None:
+        """js rel32: jump when the sign flag is set (a negative return value)."""
+        self.raw(b"\x0f\x88\x00\x00\x00\x00")
         self.fixups.append((len(self.code) - 4, label, "rel32"))
 
     def jmp(self, label: str) -> None:
@@ -661,6 +676,225 @@ def build_inputread() -> bytes:
     return bytes(image)
 
 
+# ----------------------------------------------------------------- input poll test
+#
+# `inputwait` is the ring-3 half of the scheduler-blocking input wait. It proves the three
+# semantics that make `poll(2)` useful and the one that makes it honest:
+#
+#   * an empty input queue makes `read(2)` return `EAGAIN` (the descriptor stays non-blocking);
+#   * `poll` with a short timeout returns zero, so a caller is never trapped;
+#   * `poll` with a long timeout *suspends* the thread until a producer publishes, and returns
+#     one ready descriptor with `POLLIN` in `revents`;
+#   * the record that woke it is the injected pointer report, field for field.
+#
+# The kernel prints the block and the wake, so the harness can inject the motion only after it
+# has seen the program actually suspend.
+INPUTWAIT_BASE = 0x0046_0000
+INPUTWAIT_TEXT = INPUTWAIT_BASE + 0x100
+INPUTWAIT_DATA = 0x0046_1000
+INPUTWAIT_OK_MESSAGE = b"inputwait: blocking poll(2) woke on the injected pointer record\n"
+INPUTWAIT_BAD_MESSAGE = b"inputwait: poll/read contract mismatch\n"
+INPUTWAIT_TIMEOUT_MESSAGE = b"inputwait: no pointer record arrived\n"
+INPUTWAIT_OPEN_MESSAGE = b"inputwait: open did not return a descriptor\n"
+
+# Data-segment layout, offsets from INPUTWAIT_DATA.
+INPUTWAIT_DATA_OK = 0x00
+INPUTWAIT_DATA_BAD = 0x40
+INPUTWAIT_DATA_TIMEOUT = 0x68
+INPUTWAIT_DATA_OPEN = 0x90
+INPUTWAIT_DATA_POLLFDS = 0xC0
+INPUTWAIT_DATA_RECORD = 0xD0
+INPUTWAIT_DATA_END = 0xD8
+
+# The pollfd the program builds: fd is filled in at run time, `events` asks for POLLIN.
+INPUTWAIT_POLLFD_FD = 0
+INPUTWAIT_POLLFD_EVENTS = 4
+INPUTWAIT_POLLFD_REVENTS = 6
+
+# Timeouts, in milliseconds. The short one must expire with nothing ready; the long one is the
+# block the harness releases by injecting motion. A bound matters: a program that waited for
+# ever would wedge the boot image when the injection never comes.
+INPUTWAIT_SHORT_MS = 20
+INPUTWAIT_LONG_MS = 5_000
+
+# The injected pointer report: relative x=7, y=-3, no buttons held.
+INPUTWAIT_DX = 7
+INPUTWAIT_DY = 0xFD  # -3 as a signed byte
+INPUTWAIT_BUTTONS = 0
+INPUTWAIT_CLASS_POINTER = 2
+INPUTWAIT_SOURCE_USB_HID = 3
+
+
+def build_inputwait() -> bytes:
+    asm = Asm(INPUTWAIT_TEXT)
+    # open(argv[1], O_RDONLY, 0): the kernel names the device to wait on.
+    asm.mov_rbx_stack(16)
+    asm.mov_rdi_rbx()
+    asm.mov_rsi(0)
+    asm.mov_rdx(0)
+    asm.mov_rax(SYS_OPEN)
+    asm.syscall()
+    # Any non-negative result is a descriptor: the kernel chooses the number, and spawning
+    # already installed this process's input handles, so it is not necessarily 3.
+    asm.test_eax()
+    asm.js("open_fail")
+    asm.mov_r12_rax()
+
+    # Build the pollfd: { fd, POLLIN, 0 }. The descriptor number is only known now.
+    asm.lea("rsi", "pollfds")
+    asm.mov_dword_at_rsi_r12d(INPUTWAIT_POLLFD_FD)
+
+    # A read with nothing queued is still EAGAIN: blocking is poll's job, not read's.
+    asm.mov_rdi_r12()
+    asm.lea("rsi", "record")
+    asm.mov_rdx(8)
+    asm.mov_rax(SYS_READ)
+    asm.syscall()
+    asm.cmp_eax(EAGAIN)
+    asm.jne("mismatch")
+
+    # A short timeout must expire instead of waiting for input that is not there.
+    asm.lea("rdi", "pollfds")
+    asm.mov_rsi(1)
+    asm.mov_rdx(INPUTWAIT_SHORT_MS)
+    asm.mov_rax(SYS_POLL)
+    asm.syscall()
+    asm.cmp_eax(0)
+    asm.jne("mismatch")
+
+    # The real thing: suspend until the harness injects motion, then report one ready fd.
+    asm.lea("rdi", "pollfds")
+    asm.mov_rsi(1)
+    asm.mov_rdx(INPUTWAIT_LONG_MS)
+    asm.mov_rax(SYS_POLL)
+    asm.syscall()
+    asm.cmp_eax(1)
+    asm.jne("no_record")
+
+    # `revents` says *what* is ready, not just that something is.
+    asm.lea("rsi", "pollfds")
+    asm.cmp_word_at_rsi(INPUTWAIT_POLLFD_REVENTS, POLLIN)
+    asm.jne("mismatch")
+
+    # The record that woke it is the injected report, field for field.
+    asm.mov_rdi_r12()
+    asm.lea("rsi", "record")
+    asm.mov_rdx(8)
+    asm.mov_rax(SYS_READ)
+    asm.syscall()
+    asm.cmp_eax(8)
+    asm.jne("no_record")
+    asm.lea("rsi", "record")
+    asm.cmp_byte_at_rsi(0, INPUTWAIT_CLASS_POINTER)
+    asm.jne("mismatch")
+    asm.cmp_byte_at_rsi(1, INPUTWAIT_SOURCE_USB_HID)
+    asm.jne("mismatch")
+    asm.cmp_byte_at_rsi(2, INPUTWAIT_BUTTONS)
+    asm.jne("mismatch")
+    asm.cmp_byte_at_rsi(4, INPUTWAIT_DX)
+    asm.jne("mismatch")
+    asm.cmp_byte_at_rsi(6, INPUTWAIT_DY)
+    asm.jne("mismatch")
+
+    # Closing releases the descriptor, and a later read on it is EBADF, not another block.
+    asm.mov_rdi_r12()
+    asm.mov_rax(SYS_CLOSE)
+    asm.syscall()
+    asm.cmp_eax(0)
+    asm.jne("mismatch")
+    asm.mov_rdi_r12()
+    asm.lea("rsi", "record")
+    asm.mov_rdx(8)
+    asm.mov_rax(SYS_READ)
+    asm.syscall()
+    asm.cmp_eax(EBADF)
+    asm.jne("mismatch")
+
+    asm.lea("rsi", "ok_msg")
+    asm.mov_rdx(len(INPUTWAIT_OK_MESSAGE))
+    asm.mov_rax(SYS_WRITE)
+    asm.mov_rdi(1)
+    asm.syscall()
+    asm.mov_rax(SYS_EXIT)
+    asm.mov_rdi(EXPECTED_STATUS)
+    asm.syscall()
+
+    asm.label("mismatch")
+    asm.lea("rsi", "bad_msg")
+    asm.mov_rdx(len(INPUTWAIT_BAD_MESSAGE))
+    asm.mov_rax(SYS_WRITE)
+    asm.mov_rdi(1)
+    asm.syscall()
+    asm.mov_rax(SYS_EXIT)
+    asm.mov_rdi(1)
+    asm.syscall()
+
+    asm.label("open_fail")
+    asm.lea("rsi", "open_msg")
+    asm.mov_rdx(len(INPUTWAIT_OPEN_MESSAGE))
+    asm.mov_rax(SYS_WRITE)
+    asm.mov_rdi(1)
+    asm.syscall()
+    asm.mov_rax(SYS_EXIT)
+    asm.mov_rdi(3)
+    asm.syscall()
+
+    asm.label("no_record")
+    asm.lea("rsi", "timeout_msg")
+    asm.mov_rdx(len(INPUTWAIT_TIMEOUT_MESSAGE))
+    asm.mov_rax(SYS_WRITE)
+    asm.mov_rdi(1)
+    asm.syscall()
+    asm.mov_rax(SYS_EXIT)
+    asm.mov_rdi(2)
+    asm.syscall()
+
+    asm.label("ok_msg")
+    asm.label("bad_msg")
+    asm.label("timeout_msg")
+    asm.label("open_msg")
+    asm.label("pollfds")
+    asm.label("record")
+    asm.labels["ok_msg"] = INPUTWAIT_DATA + INPUTWAIT_DATA_OK
+    asm.labels["bad_msg"] = INPUTWAIT_DATA + INPUTWAIT_DATA_BAD
+    asm.labels["timeout_msg"] = INPUTWAIT_DATA + INPUTWAIT_DATA_TIMEOUT
+    asm.labels["open_msg"] = INPUTWAIT_DATA + INPUTWAIT_DATA_OPEN
+    asm.labels["pollfds"] = INPUTWAIT_DATA + INPUTWAIT_DATA_POLLFDS
+    asm.labels["record"] = INPUTWAIT_DATA + INPUTWAIT_DATA_RECORD
+    code = asm.finish()
+
+    assert len(code) <= PAGE - 0x100, "inputwait text grew past its first page"
+    assert INPUTWAIT_DATA_OK + len(INPUTWAIT_OK_MESSAGE) <= INPUTWAIT_DATA_BAD
+    assert INPUTWAIT_DATA_BAD + len(INPUTWAIT_BAD_MESSAGE) <= INPUTWAIT_DATA_TIMEOUT
+    assert INPUTWAIT_DATA_TIMEOUT + len(INPUTWAIT_TIMEOUT_MESSAGE) <= INPUTWAIT_DATA_OPEN
+    assert INPUTWAIT_DATA_OPEN + len(INPUTWAIT_OPEN_MESSAGE) <= INPUTWAIT_DATA_POLLFDS
+    assert INPUTWAIT_DATA_POLLFDS + 8 <= INPUTWAIT_DATA_RECORD
+    assert INPUTWAIT_DATA_RECORD + 8 <= INPUTWAIT_DATA_END
+
+    text_filesz = 0x100 + len(code)
+    data = bytearray(INPUTWAIT_DATA_END)
+    data[INPUTWAIT_DATA_OK:INPUTWAIT_DATA_OK + len(INPUTWAIT_OK_MESSAGE)] = INPUTWAIT_OK_MESSAGE
+    data[INPUTWAIT_DATA_BAD:INPUTWAIT_DATA_BAD + len(INPUTWAIT_BAD_MESSAGE)] = INPUTWAIT_BAD_MESSAGE
+    data[INPUTWAIT_DATA_TIMEOUT:INPUTWAIT_DATA_TIMEOUT + len(INPUTWAIT_TIMEOUT_MESSAGE)] = INPUTWAIT_TIMEOUT_MESSAGE
+    data[INPUTWAIT_DATA_OPEN:INPUTWAIT_DATA_OPEN + len(INPUTWAIT_OPEN_MESSAGE)] = INPUTWAIT_OPEN_MESSAGE
+    # `events` is static: the program only fills in the descriptor number.
+    data[INPUTWAIT_DATA_POLLFDS + INPUTWAIT_POLLFD_EVENTS:INPUTWAIT_DATA_POLLFDS + INPUTWAIT_POLLFD_EVENTS + 2] = \
+        POLLIN.to_bytes(2, "little")
+
+    filesz = PAGE + len(data)
+    image = bytearray(filesz)
+    phnum = 3
+    image[0:64] = elf_header(INPUTWAIT_TEXT, 64, phnum)
+    image[64:120] = program_header(PT_LOAD, PF_R | PF_X, 0, INPUTWAIT_BASE,
+                                  text_filesz, text_filesz, PAGE)
+    image[120:176] = program_header(PT_LOAD, PF_R | PF_W, PAGE, INPUTWAIT_DATA,
+                                   len(data), len(data), PAGE)
+    image[176:232] = program_header(PT_GNU_STACK, PF_R | PF_W, 0, 0, 0, 0, 0x10)
+    image[0x100:0x100 + len(code)] = code
+    image[PAGE:] = data
+    return bytes(image)
+
+
 def rust_bytes(name: str, doc: str, data: bytes) -> list[str]:
     lines = [f"/// {doc}", "#[rustfmt::skip]", f"pub static {name}: &[u8] = &["]
     for start in range(0, len(data), 12):
@@ -674,6 +908,7 @@ def emit_rust() -> str:
     hello = build_hello()
     init = build_init()
     inputread = build_inputread()
+    inputwait = build_inputwait()
     o: list[str] = []
     w = o.append
     w("// " + BANNER.replace("\n", "\n// ").rstrip())
@@ -686,6 +921,9 @@ def emit_rust() -> str:
     w("//!")
     w("//! `inputread` opens the Executive input device, reads one eight-byte record through")
     w("//! `read(2)`, checks every field, closes the descriptor and exits 42.")
+    w("//!")
+    w("//! `inputwait` blocks in `poll(2)` on the same kind of descriptor, checks the timeout and the")
+    w("//! `POLLIN` readiness it wakes with, then reads the record that woke it, field for field.")
     w("")
     o.extend(rust_bytes("HELLO_ELF", f"The `hello` image: a static x86-64 ET_EXEC ELF64 ({len(hello)} bytes).", hello))
     w("")
@@ -693,11 +931,14 @@ def emit_rust() -> str:
     w("")
     o.extend(rust_bytes("INPUTREAD_ELF", f"The `inputread` image: a static x86-64 ET_EXEC ELF64 ({len(inputread)} bytes).", inputread))
     w("")
+    o.extend(rust_bytes("INPUTWAIT_ELF", f"The `inputwait` image: a static x86-64 ET_EXEC ELF64 ({len(inputwait)} bytes).", inputwait))
+    w("")
     w("/// The embedded programs, keyed by the path `nxposix_spawn` resolves.")
     w("pub static PROGRAMS: &[(&str, &[u8])] = &[")
     w("    (\"hello\", HELLO_ELF),")
     w("    (\"init\", INIT_ELF),")
     w("    (\"inputread\", INPUTREAD_ELF),")
+    w("    (\"inputwait\", INPUTWAIT_ELF),")
     w("];")
     return "\n".join(o) + "\n"
 

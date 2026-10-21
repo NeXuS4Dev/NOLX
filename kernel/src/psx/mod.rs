@@ -9,6 +9,8 @@
 //! The table contract remains the point: libc, the tests, and the conformance dashboard
 //! are all written against it.
 
+use crate::hal::console::Console;
+use core::fmt::Write as _;
 use nolx_hal_core::console::HalConsole;
 use nolx_types::errno;
 use nolx_types::syscall;
@@ -116,6 +118,10 @@ static HANDLERS: &[Entry] = &[
     Entry {
         number: syscall::SYS_UNLINK,
         handler: handle_unlink,
+    },
+    Entry {
+        number: syscall::SYS_POLL,
+        handler: handle_poll,
     },
 ];
 
@@ -239,6 +245,38 @@ fn handle_lseek(args: SyscallArgs) -> SysResult {
     match crate::exec::user::lseek_file(fd, offset, whence) {
         Ok(pos) => pos as i64,
         Err(code) => -i64::from(code),
+    }
+}
+
+/// POSIX `poll`: wait until one of the caller's descriptors has a record.
+///
+/// The wait is a real scheduler block, not a spin: the handler suspends the thread on the
+/// device's readiness and the kernel loop completes the call when a producer publishes or the
+/// timeout expires. Every transition is printed, because a test that wants to prove a block
+/// happened has to see it happen before it sends the input.
+fn handle_poll(args: SyscallArgs) -> SysResult {
+    use crate::exec::user::Poll;
+    let (fds, count, timeout) = (args.a0, args.a1, args.a2 as i32);
+    let pid = crate::exec::user::current_pid();
+    match crate::exec::user::poll(fds, count, timeout) {
+        Poll::Ready(ready) => {
+            let mut console = Console::new();
+            let _ = writeln!(
+                console,
+                "input: poll ready immediately pid={pid} fds={count} ready={ready}"
+            );
+            ready as i64
+        }
+        Poll::Empty => 0,
+        Poll::Blocked => {
+            let mut console = Console::new();
+            let _ = writeln!(
+                console,
+                "input: poll blocked pid={pid} fds={count} timeout={timeout}ms"
+            );
+            0
+        }
+        Poll::Refused(code) => -i64::from(code),
     }
 }
 

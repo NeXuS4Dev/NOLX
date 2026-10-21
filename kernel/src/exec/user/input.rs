@@ -21,7 +21,7 @@
 //! the same device get independent queues, and closing one never disturbs the other.
 
 use nolx_input_core::events::Source;
-use nolx_input_core::objects::{DeviceId, ReaderId};
+use nolx_input_core::objects::{DeviceId, ReaderId, Readiness};
 use nolx_input_core::wire;
 use nolx_types::errno;
 
@@ -133,6 +133,43 @@ pub fn is_device_descriptor(slot: usize, fd: usize) -> bool {
         .iter()
         .flatten()
         .any(|entry| entry.owner == slot && entry.fd == fd)
+}
+
+/// What a `read(2)` on this descriptor would do right now, without doing it.
+///
+/// `poll(2)` needs exactly this: a readiness answer that consumes nothing, because a waiter
+/// asks about several descriptors and a record it reserved but never read would be lost.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ready {
+    /// A record (or a resynchronisation record) is waiting.
+    Record,
+    /// The descriptor is a live device with nothing queued yet.
+    Empty,
+    /// The device is gone: `read` would return zero bytes.
+    Closed,
+    /// Not one of this module's descriptors; `poll` reports `POLLNVAL`.
+    Foreign,
+}
+
+/// Whether `slot`'s descriptor `fd` would return a record now.
+#[must_use]
+pub fn ready(slot: usize, fd: usize) -> Ready {
+    let reader = DESCRIPTORS
+        .lock()
+        .iter()
+        .flatten()
+        .find_map(|entry| (entry.owner == slot && entry.fd == fd).then_some(entry.reader));
+    let Some(reader) = reader else {
+        return Ready::Foreign;
+    };
+    match input::ready(reader) {
+        Ok(Readiness::Record | Readiness::Resync) => Ready::Record,
+        Ok(Readiness::Empty) => Ready::Empty,
+        Ok(Readiness::Disconnected) => Ready::Closed,
+        // A stale reader was closed out from under this descriptor: EOF is the honest answer,
+        // and a waiter that treated it as "not ready" would sleep on a pipe nobody will fill.
+        Err(_) => Ready::Closed,
+    }
 }
 
 /// One `read(2)` outcome: a record to copy into user memory, or end of file.

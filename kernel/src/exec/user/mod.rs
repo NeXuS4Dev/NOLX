@@ -76,6 +76,30 @@ pub const IDLE_THREAD: ThreadId = ThreadId::new(1);
 /// First scheduler slot a user process occupies.
 pub const FIRST_USER_THREAD: u64 = 2;
 
+/// A suspended `poll(2)` request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PollWait {
+    /// User address of the `struct pollfd` array, validated when the call was made.
+    pub fds: u64,
+    /// Entries in that array.
+    pub count: usize,
+    /// Timer tick at which the wait gives up, or `None` to wait indefinitely.
+    pub deadline: Option<u64>,
+}
+
+/// What one `poll(2)` did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Poll {
+    /// This many descriptors were ready and their `revents` are written.
+    Ready(usize),
+    /// Nothing is ready and the caller asked for no wait.
+    Empty,
+    /// The caller is suspended; the idle loop completes the call.
+    Blocked,
+    /// The call was refused with this errno.
+    Refused(i32),
+}
+
 /// A ring-3 process slot.
 #[derive(Clone, Copy)]
 pub struct UserProcess {
@@ -97,6 +121,12 @@ pub struct UserProcess {
     pub wait_info: u64,
     /// The child being waited for, or zero for any.
     pub wait_pid: u64,
+    /// A `poll(2)` this process is suspended in, or `None`.
+    ///
+    /// The request is kept here rather than on the kernel stack because the waiter wakes from
+    /// a *different* context: the idle loop re-checks readiness and writes this process's
+    /// `revents` and return value from outside the syscall.
+    pub poll_wait: Option<PollWait>,
     /// Bytes this process pushed through `write`, for the boot test's evidence chain.
     pub written: u64,
     /// The kernel stack top published to `TSS.RSP0` while this thread runs.
@@ -120,6 +150,7 @@ impl UserProcess {
             thread_id: ThreadId::new(0),
             wait_info: 0,
             wait_pid: 0,
+            poll_wait: None,
             written: 0,
             kernel_stack_top: 0,
             input_handles: 0,
@@ -454,6 +485,9 @@ pub fn exit_current(status: i32) {
     };
     table.processes[slot].zombie = true;
     table.processes[slot].exit_status = status;
+    // A process cannot exit while suspended, but a slot that is torn down for any other reason
+    // must not leave a wait pointing at a dead space.
+    table.processes[slot].poll_wait = None;
     // The handles die with the process, exactly as `ExitProcess` closes them. The count stays
     // in the slot as the record of what the spawn gave it, until a new process reuses the slot.
     release_input_handles(slot);
@@ -521,17 +555,7 @@ pub fn spawn(parent: u64, path: &str, image: &[u8], argv: &[&str]) -> Result<u64
 /// the ring-3 `tmpfs` instance.
 pub fn begin() -> Result<(), SetupError> {
     {
-        let mut vfs = VirtualFileSystem::new();
-        let root = vfs
-            .mount_root(
-                FsInstance::Tmpfs(Tmpfs::with_limits(64, 16 * 1024)),
-                "tmpfs",
-            )
-            .expect("ring-3 root tmpfs mount must succeed");
-        let mut ctx = ProcessVfsContext::new(root);
-        ctx.fds = DescriptorTable::with_stdio(0, 1, 2);
-        let _ = vfs.mkdir(&ctx, b"/tmp", 0o777);
-        *USER_VFS.lock() = Some((vfs, ctx));
+        mount_user_vfs();
         *TMPFS_EVIDENCE.lock() = TmpfsT2Evidence::new();
     }
     let mut table = TABLE.lock();
@@ -589,6 +613,191 @@ pub fn write_console(user_buffer: u64, length: u64) -> Result<u64, i32> {
     let mut table = TABLE.lock();
     table.processes[slot].written = table.processes[slot].written.saturating_add(done);
     Ok(done)
+}
+
+/// Most descriptors one `poll` call may watch.
+///
+/// A fixed bound, like every other table in this kernel: a caller that wants to watch more
+/// can call `poll` again, and the kernel never allocates on a syscall.
+pub const MAX_POLL_FDS: usize = 8;
+
+/// Milliseconds to timer ticks, rounding *up* so a sub-tick timeout still waits one tick.
+///
+/// A zero would busy-spin the caller's timeout into an immediate return, which would make a
+/// short timeout indistinguishable from `timeout = 0`.
+fn ticks_for_ms(milliseconds: i32) -> u64 {
+    let frequency = u64::from(crate::hal::timer::frequency_hz());
+    let ticks = (milliseconds.max(0) as u64)
+        .saturating_mul(frequency)
+        .div_ceil(1000);
+    ticks.max(1)
+}
+
+/// Re-evaluate a `PollWait` and write every `revents`, returning how many are ready.
+///
+/// The array is read and rewritten in place: POSIX says the kernel overwrites `revents`, and
+/// clearing it is what stops a stale readiness from a previous call looking like a new one.
+///
+/// # Safety
+///
+/// The slot must be live, and `fds` must already have been validated for `count` writable
+/// [`nolx_types::abi::PollFd`] entries in that slot's space.
+unsafe fn poll_evaluate(slot: usize, request: PollWait) -> Result<usize, i32> {
+    // SAFETY: the caller guarantees the slot is live and this thread is the one running it.
+    let space = unsafe { space_of(slot) };
+    let mut ready = 0usize;
+    for index in 0..request.count {
+        let address = request.fds + (index * nolx_types::abi::PollFd::SIZE) as u64;
+        let mut raw = [0u8; nolx_types::abi::PollFd::SIZE];
+        loader::read_user(space, address, &mut raw).map_err(|error| load_error_code(error))?;
+        let entry = nolx_types::abi::PollFd::decode(raw);
+        // SAFETY: `fds` covers `count` writable entries; this is one of them.
+        let revents = poll_revents(slot, entry);
+        let encoded = nolx_types::abi::PollFd { revents, ..entry }.encode();
+        loader::write_user(space, address, &encoded).map_err(|error| load_error_code(error))?;
+        if revents & nolx_types::abi::poll::NVAL == 0 && revents != 0 {
+            ready += 1;
+        }
+    }
+    Ok(ready)
+}
+
+/// The `revents` one entry earns right now: `POLLIN` if it asked for it and has data,
+/// `POLLNVAL` for a descriptor this kernel does not serve (POSIX reports that regardless of
+/// `events`), and nothing otherwise.
+fn poll_revents(slot: usize, entry: nolx_types::abi::PollFd) -> i16 {
+    let Ok(fd) = usize::try_from(entry.fd) else {
+        return nolx_types::abi::poll::NVAL;
+    };
+    if fd < 3 {
+        return nolx_types::abi::poll::NVAL;
+    }
+    match input::ready(slot, fd) {
+        input::Ready::Foreign => nolx_types::abi::poll::NVAL,
+        input::Ready::Record | input::Ready::Closed => {
+            if entry.events & nolx_types::abi::poll::IN != 0 {
+                nolx_types::abi::poll::IN
+            } else {
+                0
+            }
+        }
+        input::Ready::Empty => 0,
+    }
+}
+
+/// Mount the ring-3 `tmpfs` instance and its descriptor table.
+///
+/// The descriptor table is where *every* fd comes from, including a device descriptor, so a
+/// phase that runs after an earlier one called [`cleanup_vfs`] has to mount it again before it
+/// can open anything.
+pub fn mount_user_vfs() {
+    let mut vfs = VirtualFileSystem::new();
+    let root = vfs
+        .mount_root(
+            FsInstance::Tmpfs(Tmpfs::with_limits(64, 16 * 1024)),
+            "tmpfs",
+        )
+        .expect("ring-3 root tmpfs mount must succeed");
+    let mut ctx = ProcessVfsContext::new(root);
+    ctx.fds = DescriptorTable::with_stdio(0, 1, 2);
+    let _ = vfs.mkdir(&ctx, b"/tmp", 0o777);
+    *USER_VFS.lock() = Some((vfs, ctx));
+}
+
+/// The `poll(2)` mechanism: answer immediately, or suspend the caller on its descriptors.
+///
+/// `timeout` is milliseconds, `0` returns at once and a negative value waits forever, exactly
+/// as POSIX defines the argument. Only input descriptors are served; anything else is
+/// `POLLNVAL`, which is honest until the VFS grows a readiness notion of its own.
+pub fn poll(fds: u64, count: u64, timeout: i32) -> Poll {
+    let Ok(count) = usize::try_from(count) else {
+        return Poll::Refused(nolx_types::errno::EINVAL);
+    };
+    if count == 0 || count > MAX_POLL_FDS {
+        return Poll::Refused(nolx_types::errno::EINVAL);
+    }
+    let bytes = (count * nolx_types::abi::PollFd::SIZE) as u64;
+    let mut table = TABLE.lock();
+    let Some(slot) = table.current else {
+        return Poll::Refused(nolx_types::errno::ESRCH);
+    };
+    // Validate now, not at wake: the wake path writes into a space that is not running, and a
+    // bad pointer there would leave the caller suspended on a buffer that can never be filled.
+    // SAFETY: the calling thread's slot is live and its space is the active one.
+    let space = unsafe { space_of(slot) };
+    if loader::validate_user_range(space, fds, bytes, true).is_err() {
+        return Poll::Refused(nolx_types::errno::EFAULT);
+    }
+    let request = PollWait {
+        fds,
+        count,
+        deadline: (timeout > 0)
+            .then(|| crate::hal::timer::ticks().saturating_add(ticks_for_ms(timeout))),
+    };
+    // SAFETY: the slot is live and the range was just validated writable.
+    match unsafe { poll_evaluate(slot, request) } {
+        Ok(ready) if ready != 0 => return Poll::Ready(ready),
+        Ok(_) => {}
+        Err(code) => return Poll::Refused(code),
+    }
+    if timeout == 0 {
+        return Poll::Empty;
+    }
+    table.processes[slot].blocked = true;
+    table.processes[slot].poll_wait = Some(request);
+    Poll::Blocked
+}
+
+/// Complete suspended `poll(2)` calls whose descriptors became ready or whose timeout expired.
+///
+/// Runs from the idle loop, never from an interrupt: completing a wait writes into another
+/// address space and wakes a thread, and neither belongs in an ISR. Returns one
+/// `(pid, ready, timed_out)` record per completed call, up to `SLOTS`, so the caller can print
+/// the evidence outside the table lock.
+pub fn service_polls() -> [(u64, usize, bool); MAX_USER_PROCESSES] {
+    let mut events = [(0u64, 0usize, false); MAX_USER_PROCESSES];
+    let mut table = TABLE.lock();
+    for slot in 0..MAX_USER_PROCESSES {
+        let Some(request) = table.processes[slot].poll_wait else {
+            continue;
+        };
+        if !table.processes[slot].live || table.processes[slot].zombie {
+            table.processes[slot].poll_wait = None;
+            table.processes[slot].blocked = false;
+            continue;
+        }
+        // SAFETY: a live slot's space stays valid while the table lock is held.
+        let ready = unsafe { poll_evaluate(slot, request) };
+        let expired = request
+            .deadline
+            .is_some_and(|d| crate::hal::timer::ticks() >= d);
+        let (value, ready, timed_out) = match ready {
+            Ok(count) if count != 0 => (count as i64, count, false),
+            Ok(_) if expired => (0, 0, true),
+            // Not ready yet, or a pointer that stopped validating: either way, wait again
+            // unless the timeout says otherwise.
+            Ok(_) | Err(_) => continue,
+        };
+        let frame = table.frames[slot] as *mut InterruptFrame;
+        if frame.is_null() {
+            // The thread has no saved frame, so there is nothing to return into; drop the
+            // request rather than leaving the process suspended for ever.
+            table.processes[slot].poll_wait = None;
+            table.processes[slot].blocked = false;
+            continue;
+        }
+        // SAFETY: `frames[slot]` is the frame the entry stub built on this thread's kernel
+        // stack; the thread is suspended, so nothing else is touching it.
+        unsafe {
+            (*frame).rax = value as u64;
+        }
+        table.processes[slot].poll_wait = None;
+        table.processes[slot].blocked = false;
+        let thread = table.processes[slot].thread_id;
+        let _ = table.scheduler.wake(thread);
+        events[slot] = (table.processes[slot].pid, ready, timed_out);
+    }
+    events
 }
 
 /// The `waitid` mechanism: reap a zombie child, or suspend until the child exits.
@@ -738,6 +947,7 @@ fn spawn_impl(
         thread_id,
         wait_info: 0,
         wait_pid: 0,
+        poll_wait: None,
         written: 0,
         kernel_stack_top: stack_top,
         input_handles: bind_input_handles(slot),

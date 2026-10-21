@@ -151,6 +151,19 @@ pub enum Read {
     /// Disconnected object, after all queued neutral transitions/resync have drained.
     Disconnected,
 }
+/// The four answers [`Registry::ready`] can give, matching the first record [`Read`] would see.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Readiness {
+    /// A record (or a resynchronisation record) is available and `read` would return it.
+    Record,
+    /// The producer is live but has published nothing this reader has not drained.
+    Empty,
+    /// The producer is gone and everything it queued for this reader has been consumed.
+    Disconnected,
+    /// Records were dropped; the next `read` returns a resynchronisation record.
+    Resync,
+}
+
 /// Failed operation; failures never mutate another incarnation's state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -370,6 +383,32 @@ impl<const D: usize, const R: usize, const Q: usize> Registry<D, R, Q> {
         }
         Ok(())
     }
+    /// Whether a [`read`](Self::read) on this subscription would return a record now.
+    ///
+    /// This is deliberately a separate query, not a peek that reserves the record: a waiter
+    /// asks several devices at once, and a reservation it never consumes would swallow input.
+    /// It answers exactly the question `read` answers first — is there a resynchronisation
+    /// pending, is the queue non-empty — and leaves the queue untouched.
+    pub fn ready(&self, id: ReaderId) -> Result<Readiness, Error> {
+        let reader = self
+            .readers
+            .get(id.slot)
+            .filter(|slot| slot.generation == id.generation)
+            .and_then(|slot| slot.reader.as_ref())
+            .ok_or(Error::Stale)?;
+        if reader.lost != 0 {
+            return Ok(Readiness::Resync);
+        }
+        if reader.len != 0 {
+            return Ok(Readiness::Record);
+        }
+        Ok(if self.device(reader.device)?.connected {
+            Readiness::Empty
+        } else {
+            Readiness::Disconnected
+        })
+    }
+
     /// Read only this subscription. Resync uses current device state even after disconnect.
     pub fn read(&mut self, id: ReaderId) -> Result<Read, Error> {
         let reader = self.reader(id)?;

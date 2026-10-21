@@ -2,7 +2,9 @@
 //! Producers never call consumers. Console reads are one subscription, outside the state lock.
 use crate::sync::IrqMutex;
 use nolx_hal_core::console::HalConsole;
-pub use nolx_input_core::objects::{Class, DeviceId, Error, Info, Location, Read, ReaderId};
+pub use nolx_input_core::objects::{
+    Class, DeviceId, Error, Info, Location, Read, ReaderId, Readiness,
+};
 use nolx_input_core::{
     events::{Kind, Source},
     objects::Registry,
@@ -50,6 +52,10 @@ pub fn subscribe(id: DeviceId) -> Result<(ReaderId, Info), Error> {
 /// Read one event, explicit loss repair, Empty or terminal Disconnected.
 pub fn read(reader: ReaderId) -> Result<Read, Error> {
     STATE.lock().registry.read(reader)
+}
+/// Whether a `read` on `reader` would return a record now, without consuming it.
+pub fn ready(reader: ReaderId) -> Result<Readiness, Error> {
+    STATE.lock().registry.ready(reader)
 }
 /// Close a reader. Its generation is invalid even if the slot is subsequently reused.
 pub fn close(reader: ReaderId) -> Result<(), Error> {
@@ -165,6 +171,43 @@ mod tests;
 #[cfg(feature = "hal-input-object-test")]
 pub fn hardware_selftest(console: &mut dyn HalConsole) {
     tests::step(console);
+}
+
+/// Publish the Executive objects of devices that attached before the Object Manager was up.
+///
+/// The controller probes run before `obj::init` registers the built-in types, so a HID device
+/// that finishes enumeration during a probe has its binding refused with `UnknownType` and
+/// never retries. That leaves it readable through the kernel console and *unopenable* by name,
+/// which is the difference between the console and a program. This pass runs once the namespace
+/// exists and gives every such device the name it should have had.
+pub fn publish_unbound(console: &mut dyn HalConsole) {
+    let mut pending = [None; DEVICES];
+    {
+        let state = STATE.lock();
+        for (index, info) in state.registry.devices().enumerate().take(DEVICES) {
+            if info.connected && executive::name_of(info.id).is_none() {
+                pending[index] = Some((info.id, info.class));
+            }
+        }
+    }
+    for (id, class) in pending.into_iter().flatten() {
+        let slot = id.slot();
+        let generation = id.generation();
+        match executive::publish(id, class) {
+            Ok(name) => {
+                let _ = writeln!(
+                    console,
+                    "input: deferred object \\Device\\{name} published device={slot}:{generation} class={class:?}"
+                );
+            }
+            Err(error) => {
+                let _ = writeln!(
+                    console,
+                    "input: deferred binding refused device={slot}:{generation} class={class:?}: {error:?}"
+                );
+            }
+        }
+    }
 }
 
 /// Run the Executive binding's boot checks. Called once from the kernel idle loop.

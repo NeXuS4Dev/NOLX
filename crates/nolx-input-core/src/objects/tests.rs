@@ -402,3 +402,41 @@ fn usb_route_rejects_a_gap_below_an_absent_hub() {
         );
     }
 }
+
+#[test]
+fn readiness_answers_what_read_would_without_consuming_it() {
+    let mut r = Registry::<2, 2, 4>::new();
+    let device = attach(&mut r, 1);
+    let reader = r.open(device).unwrap();
+    // Nothing published: a live producer that owes this reader nothing.
+    assert_eq!(r.ready(reader), Ok(Readiness::Empty));
+    r.publish(device, key(true)).unwrap();
+    // Readiness is a question, not a reservation: asking twice must not swallow the record.
+    assert_eq!(r.ready(reader), Ok(Readiness::Record));
+    assert_eq!(r.ready(reader), Ok(Readiness::Record));
+    assert!(matches!(r.read(reader), Ok(Read::Event(_))));
+    assert_eq!(r.ready(reader), Ok(Readiness::Empty));
+    // The neutral release the disconnect synthesizes is still a record to read.
+    r.disconnect(device).unwrap();
+    assert_eq!(r.ready(reader), Ok(Readiness::Record));
+    assert!(matches!(r.read(reader), Ok(Read::Event(_))));
+    assert_eq!(r.ready(reader), Ok(Readiness::Disconnected));
+    // A closed reader is stale, not ready: the caller must not spin on it.
+    r.close(reader).unwrap();
+    assert_eq!(r.ready(reader), Err(Error::Stale));
+}
+
+#[test]
+fn readiness_reports_a_pending_resynchronisation() {
+    // Queue of two: a third publication forces the drop/resync path `read` reports first.
+    let mut r = Registry::<1, 1, 2>::new();
+    let device = attach(&mut r, 1);
+    let reader = r.open(device).unwrap();
+    for pressed in [true, false, true] {
+        r.publish(device, key(pressed)).unwrap();
+    }
+    assert_eq!(r.ready(reader), Ok(Readiness::Resync));
+    assert!(matches!(r.read(reader), Ok(Read::Resync { .. })));
+    // The overflow flushed this reader's queue, so the resync record was all there was to read.
+    assert_eq!(r.ready(reader), Ok(Readiness::Empty));
+}

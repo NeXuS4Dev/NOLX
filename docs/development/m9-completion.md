@@ -114,9 +114,19 @@ segment-zero board profile and the broader open M9 gates below remain incomplete
       into a ring-3 `read(2)`, and run
       [39633910912](https://github.com/NeXuS4Dev/NOLX/actions/runs/39633910912) on `7f0d208`
       passed all 19 jobs with it. INP-006 is `tested-T1`, INP-007/INP-008 `tested-T2`.
-- [ ] A scheduler-blocking input wait: `read(2)` on an empty queue returns `EAGAIN` instead of
-      sleeping on the device's auto-reset waitable, so a program that wants to block must
-      poll. Polling is honest, but it is not what a shell or `libc` will expect.
+- [x] A scheduler-blocking input wait: `poll(2)` on an input descriptor validates the caller's
+      eight-byte `struct pollfd` array once at call time, suspends the calling thread in the
+      scheduler when nothing is ready, and is completed by the idle loop when a producer
+      publishes or the deadline passes (`kernel/src/exec/user/mod.rs`). `revents` is written back
+      for every entry, so a readiness query never consumes the record it reports; `POLLNVAL`
+      covers stdio and descriptors this kernel does not serve. `read(2)` keeps its POSIX
+      behaviour: an empty queue is still `EAGAIN`, and the descriptor stays non-blocking. The
+      ring-3 program `inputwait` (`hal-input-wait-test`) polls for 20 ms (must expire with zero),
+      then blocks for five seconds; the boot fixture injects relative pointer motion only after
+      the kernel prints `input: poll blocked`, and the program exits 42 only when the wake
+      reports one ready descriptor with `POLLIN` and the following `read(2)` returns the injected
+      record field for field. A machine with no USB pointer reports the phase as skipped and
+      keeps booting. INP-010..INP-012.
 - [x] USB disconnect/hotplug cleanup and endpoint/ring ownership; do not leak controller
       resources or leave DMA active after device removal. Root-port unplug/reconnect has been
       checked since USB-011; a hub now adds route-scoped unplug, leaf-first subtree teardown and

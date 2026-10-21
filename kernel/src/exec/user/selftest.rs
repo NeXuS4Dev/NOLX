@@ -309,3 +309,177 @@ pub mod read_test {
         passed
     }
 }
+
+/// The scheduler-blocking `poll(2)` phase: a ring-3 program suspends on a pointer device.
+///
+/// The evidence chain is deliberately split across two contexts. The program asks for a short
+/// timeout (which must expire), then blocks for up to five seconds; the kernel prints
+/// `input: poll blocked` from the syscall and `input: poll woke` from the idle loop that
+/// completes it. The harness injects the pointer report only after it has read the block, so
+/// the report cannot have been queued before the program suspended — which is what makes this
+/// a block and not a race that happened to win.
+#[cfg(feature = "hal-input-wait-test")]
+pub mod poll_test {
+    use core::fmt::Write;
+
+    use nolx_input_core::objects::Class;
+
+    use crate::exec::user::{self, process_status};
+    use crate::hal::console::Console;
+    use crate::hal::input;
+
+    /// The marker the fixture greps for.
+    pub const PASS_MARKER: &str = "NOLX: input poll T2: ring-3 poll(2) suspended the caller, \
+        woke on the injected pointer report and the following read(2) matched it";
+
+    /// The status `inputwait` exits with when every check held.
+    const STATUS: i32 = 42;
+    /// Bytes `inputwait` writes when it succeeds: its whole pass message.
+    const WROTE: u64 = 64;
+    /// Phase state: zero not started, one running, two reported.
+    static PHASE: crate::sync::IrqMutex<u8> = crate::sync::IrqMutex::new(0);
+    /// The pid `inputwait` was given, or zero before the spawn.
+    static PID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    /// Whether the machine had no USB pointer object to wait on.
+    static SKIPPED: crate::sync::IrqMutex<bool> = crate::sync::IrqMutex::new(false);
+    /// The tick the phase first found no USB pointer, so the wait for one is bounded.
+    static WAITING_SINCE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    /// Milliseconds to wait for a USB pointer to enumerate before reporting the phase skipped.
+    const SETTLE_MS: u64 = 5000;
+
+    /// Whether the phase has resolved: either a waiter was spawned or the phase was skipped.
+    ///
+    /// A waiter can only start once a USB pointer exists, so the driver loop asks again on
+    /// every pass until this turns true.
+    #[must_use]
+    pub fn started() -> bool {
+        *PHASE.lock() != 0
+    }
+
+    /// Whether the phase is running: started, and the waiter has not exited yet.
+    #[must_use]
+    pub fn running() -> bool {
+        *PHASE.lock() == 1 && user::active()
+    }
+
+    /// Find a published USB pointer device's Executive path.
+    ///
+    /// USB, not any pointer: the fixture injects the report through QEMU's USB HID path, and
+    /// the ring-3 program checks the record's source byte, so waiting on the PS/2 auxiliary
+    /// port would test a different producer than the one the fixture drives.
+    fn pointer_path() -> Option<&'static str> {
+        let mut devices = [None; 16];
+        let count = input::enumerate(&mut devices).ok()?;
+        devices
+            .into_iter()
+            .take(count)
+            .flatten()
+            .filter(|info| {
+                info.connected
+                    && info.class == Class::Pointer
+                    && info.source == nolx_input_core::events::Source::UsbHid
+            })
+            .find_map(|info| crate::hal::input::executive::name_of(info.id))
+            .map(crate::hal::input::executive::path)
+    }
+
+    /// Start the phase once a USB pointer exists; return whether the phase is resolved.
+    ///
+    /// A USB device can take a moment to enumerate, so this is called every idle pass until it
+    /// either spawns the waiter or gives up. The give-up bound matters: without it a machine
+    /// with no USB pointer would hold the boot image open for ever.
+    pub fn begin(console: &mut Console) -> bool {
+        let mut state = PHASE.lock();
+        if *state != 0 {
+            return true;
+        }
+        let Some(path) = pointer_path() else {
+            let now = crate::hal::timer::monotonic_ns() / 1_000_000;
+            let first = WAITING_SINCE.load(core::sync::atomic::Ordering::Acquire);
+            if first == 0 {
+                WAITING_SINCE.store(now.max(1), core::sync::atomic::Ordering::Release);
+                return false;
+            }
+            if now.saturating_sub(first) < SETTLE_MS {
+                return false;
+            }
+            let _ = writeln!(
+                console,
+                "NOLX: input poll T2: no USB pointer device on this machine; phase skipped"
+            );
+            *SKIPPED.lock() = true;
+            *state = 2;
+            return true;
+        };
+        // An earlier ring-3 phase closed the descriptor table this process needs for `open`.
+        user::mount_user_vfs();
+        match user::spawn(
+            0,
+            "inputwait",
+            nolx_exec_core::programs_gen::INPUTWAIT_ELF,
+            &["inputwait", path],
+        ) {
+            Ok(pid) => {
+                PID.store(pid, core::sync::atomic::Ordering::Release);
+                let _ = writeln!(
+                    console,
+                    "NOLX: input poll T2: inputwait (pid {pid}) opening {path}; \
+                     inject relative motion after it blocks"
+                );
+                *state = 1;
+            }
+            Err(error) => {
+                let _ = writeln!(console, "NOLX: input poll T2: spawn FAILED: {error:?}");
+                *SKIPPED.lock() = true;
+                *state = 2;
+            }
+        }
+        true
+    }
+
+    /// Whether the phase was skipped because the machine has no pointer device.
+    #[must_use]
+    pub fn skipped() -> bool {
+        *SKIPPED.lock()
+    }
+
+    /// Report the phase once the waiter has exited; return whether its evidence chain held.
+    pub fn report(console: &mut Console) -> bool {
+        {
+            let state = PHASE.lock();
+            if *state != 1 || user::active() {
+                return false;
+            }
+        }
+        let pid = PID.load(core::sync::atomic::Ordering::Acquire);
+        let status = process_status(pid);
+        let passed =
+            status.is_some_and(|(zombie, code, wrote)| zombie && code == STATUS && wrote >= WROTE);
+        let _ = writeln!(
+            console,
+            "NOLX: input poll T2: device descriptors still open: {}",
+            user::input::open_count()
+        );
+        match status {
+            Some((zombie, code, wrote)) => {
+                let _ = writeln!(
+                    console,
+                    "NOLX: input poll T2: inputwait zombie={zombie} status={code} wrote={wrote} \
+                     (wanted status={STATUS} wrote>={WROTE})"
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    console,
+                    "NOLX: input poll T2: inputwait has no process record"
+                );
+            }
+        }
+        if passed {
+            let _ = writeln!(console, "{PASS_MARKER}");
+        }
+        user::cleanup_vfs();
+        *PHASE.lock() = 2;
+        passed
+    }
+}

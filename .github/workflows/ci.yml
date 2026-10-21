@@ -770,6 +770,12 @@ jobs:
         run: make kernel KERNEL_FEATURES=hal-input-read-test 2>&1 | tee -a /tmp/job.log
       - name: Verify a ring-3 program reads injected key records through open/read/close
         run: python3 scripts/check-ps2-input.py --read-t2 2>&1 | tee -a /tmp/job.log
+      - name: Build the ring-3 blocking `poll(2)` image
+        run: make kernel KERNEL_FEATURES=hal-input-wait-test 2>&1 | tee -a /tmp/job.log
+      - name: Verify a ring-3 poll suspends the caller and wakes on injected pointer motion
+        run: |
+          python3 scripts/check-input-poll.py 2>&1 | tee -a /tmp/job.log
+          python3 scripts/check-input-poll.py --absent 2>&1 | tee -a /tmp/job.log
       - name: Verify controller lifecycle, actual transfer STALL and fail-closed slot repair
         run: |
           for mode in lifecycle start-fault stop-fault recovery irq-start-fault transfer-fault; do
@@ -793,7 +799,7 @@ jobs:
         run: |
           set +e
           python3 scripts/annotate-failure.py "job log" /tmp/job.log 6000
-          newest=$(ls -t build/input-usb-*.log build/input-xhci-lifecycle-*.log build/input-ps2-*.log 2>/dev/null | head -1)
+          newest=$(ls -t build/input-usb-*.log build/input-xhci-lifecycle-*.log build/input-ps2-*.log build/input-poll-*.log 2>/dev/null | head -1)
           [ -n "$newest" ] && python3 scripts/annotate-failure.py "$(basename "$newest")" "$newest" 2500
           exit 0
       - uses: ./.github/actions/report-failure
