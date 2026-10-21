@@ -138,6 +138,15 @@ impl Role {
         }
     }
 
+    /// Point a HID role at another endpoint, which the fault fixtures use to ask for an
+    /// endpoint the device never declared.
+    #[cfg(feature = "hal-xhci-transfer-fault-test")]
+    fn set_endpoint(&mut self, endpoint: u8) {
+        if let Role::Hid(hid) = self {
+            hid.endpoint = endpoint;
+        }
+    }
+
     /// The interrupt endpoint this role waits on: its context index and transfer length.
     ///
     /// A HID device's reports carry input; a hub's carry a port bitmap. Both arrive on an
@@ -1511,7 +1520,7 @@ pub(super) fn stall_test(dev: usize, port: u8) -> Result<(), Failure> {
         d.input
             .write(ep + 8, &(pending | u64::from(cycle)).to_le_bytes());
         host.command(d.input.address(0), 12, d.slot)?;
-        d.hid.endpoint = 0x82;
+        d.role.set_endpoint(0x82);
         d.pending = pending;
         host.regs
             .write32(host.doorbell + u64::from(d.slot) * 4, 5)?;
