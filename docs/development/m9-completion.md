@@ -89,7 +89,7 @@ segment-zero board profile and the broader open M9 gates below remain incomplete
       failed-transfer retirement, root-slot repair and command-timeout quarantine now have
       executable checks; full/high-speed HID and USB3 EP0/class-refusal reclamation are checked below;
       USB 2.0 hub enumeration, hub-port hotplug and subtree teardown are implemented with host rules
-      (USB-032..USB-035) and a PC/Q35 fixture (USB-036..USB-038, awaiting its first CI run);
+      (USB-032..USB-035) and a PC/Q35 fixture (USB-036..USB-038, `tested-T2` in run [39655463587](https://github.com/NeXuS4Dev/NOLX/actions/runs/39655463587) on `01c5aa3`);
       hardware-verified SuperSpeed HID and general endpoint-level recovery remain open.
 - [x] Per-controller MSI-X/MSI boot-HID delivery with IRQ-only idle admission, bounded event
       batches, safe stop/re-arm and explicit no-capability/PIC-only polling fallbacks (below).

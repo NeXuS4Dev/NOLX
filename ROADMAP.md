@@ -807,8 +807,16 @@ re-plugged two-port hub enumerates on the same root port. `cargo test -p nolx-us
 passes 42 tests and `-p nolx-input-core --lib` 26 (the route is part of the input identity).
 The new `scripts/check-usb-input.py --hubs` step adds key-press and held-key assertions that this
 sandbox cannot exercise (its QEMU delivers QMP pointer events but not key events, the same reason
-the PS/2 fixture cannot run here), so USB-036..USB-038 stay `pending-T2` until the CI run for this
-revision passes. **M9 is not complete.**
+the PS/2 fixture cannot run here), so USB-036..USB-038 waited for CI. Run
+[39655463587](https://github.com/NeXuS4Dev/NOLX/actions/runs/39655463587) on `01c5aa3` passed all
+19 jobs, including that step on PC and Q35, so all three are `tested-T2`. Getting there also
+repaired two defects the fixtures found: a hub class request that consumed the hub's own
+status-change completion left the pipe unarmed (the completion is now replayed into a fresh
+transfer), and the leaf-first sweep retried a quarantined device's Disable Slot behind the repair
+path's back (the sweep now touches only `Retiring` devices). **M9 is not complete:** the open
+gates are the scheduler-blocking input wait, `_PRT`/`_SRS` beyond segment zero, native
+nonzero-segment PCI, the embedded-controller handshake and a firmware-exercised region write, and
+device power/S3. SuperSpeed HID reports and hub nesting beyond one tier also remain open.
 
 ## M10 — POSIX conformance waves
 
