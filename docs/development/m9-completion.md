@@ -1644,6 +1644,16 @@ repair that made running any QEMU fixture possible in this environment.
 - **Absent devices.** `scripts/check-absent-devices.py` boots the default image with no
   storage, USB or network device and requires one refusal line per driver, `blockdev: 0
   requests dispatched, 0 completed`, no framework start line and a completed initialization.
+- **Allocator exhaustion.** `kernel/src/mm/exhaust.rs` (`hal-mm-exhaust-test`) takes every free
+  frame, proves the allocator refuses the next frame, an order-1 block and a reserved-frame
+  free while its own free count is zero, returns every frame with the free count exact, then
+  fills the kernel heap to its 16-region cap, proves every 1 MiB payload survived, refuses an
+  8 MiB request and requires bytes-in-use to return to where it started.
+  `scripts/check-mm-exhaust.py` runs it on PC and Q35. It found two real defects in the heap's
+  over-aligned path, both fixed: the region/offset words were written at the returned pointer
+  instead of in front of it (so the caller's first write destroyed them and the block could
+  never be freed), and the reservation omitted those words (so the caller's last eight bytes
+  landed on the next block's header).
 - **Sandbox build path.** `scripts/bootstrap-rust.sh` now installs the `[all]` payload extras,
   extracts with `zstd` or the Python module and fails when no compiler appears. The
   `.nolx-deps/stubs` helpers are real `rep movsb`/`rep stosb` routines assembled from
@@ -1654,8 +1664,15 @@ repair that made running any QEMU fixture possible in this environment.
   host target's `core` library is compiled with it; without it the first core-library `movups`
   raised #UD. `make bootcheck` still passes.
 
+CI evidence for this checkpoint (run
+[39593547832](https://github.com/NeXuS4Dev/NOLX/actions/runs/39593547832) on revision `10d738a`,
+job *Native USB HID interrupts, lifecycle and DMA safety*): the absent-device fixture, the xHCI
+vector-exhaustion fixture and the allocator-exhaustion fixture all passed on PC and Q35, so
+MM-035 and MM-036 are `tested-T2`. The two network recovery fixtures now run before the
+multi-adapter step in their job, because that step was skipping them.
+
 Local verification: the xHCI exhaust fixture on both PC and Q35, the absent-device fixture on
-both PC and Q35, a mixed boot with virtio-blk/AHCI/NVMe/xHCI-keyboard (1221 block requests
+both PC and Q35, the allocator-exhaustion fixture on both PC and Q35, a mixed boot with virtio-blk/AHCI/NVMe/xHCI-keyboard (1221 block requests
 dispatched and completed, all three retained reads verified), the untouched boot self-tests,
 `cargo test --lib --bins` and `--tests` (832 tests), `cargo fmt --check`, host Clippy,
 `make bootcheck`, `make fscheck`, `make usercheck`, the unsafe-block audit and
