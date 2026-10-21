@@ -311,6 +311,11 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
                     let _ = writeln!(console, "NOLX: address space selftest: FAILED: {message}");
                     panic!("address space selftest: {message}");
                 }
+                // The dedicated exhaustion fixture: with the clock live, take every free
+                // frame and every region the heap may grow to, prove both allocators refuse
+                // cleanly, and require the counters to come back exactly.
+                #[cfg(feature = "hal-mm-exhaust-test")]
+                mm::exhaust::run(&mut console);
             }
 
             #[cfg(feature = "hal-driver-lifecycle-test")]

@@ -771,6 +771,10 @@ jobs:
         run: make kernel KERNEL_FEATURES=hal-xhci-exhaust-test 2>&1 | tee -a /tmp/job.log
       - name: Verify an exhausted xHCI vector pool is refused without a leak
         run: python3 scripts/check-xhci-lifecycle.py --mode exhaust 2>&1 | tee -a /tmp/job.log
+      - name: Build allocator-exhaustion fixture
+        run: make kernel KERNEL_FEATURES=hal-mm-exhaust-test 2>&1 | tee -a /tmp/job.log
+      - name: Verify an empty frame allocator and a full kernel heap refuse instead of corrupting
+        run: python3 scripts/check-mm-exhaust.py 2>&1 | tee -a /tmp/job.log
       - name: Annotate USB serial logs on failure
         if: failure()
         run: |

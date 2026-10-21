@@ -26,6 +26,8 @@
 //! which is the same bootstrap problem the object map has, and it is solved the same way:
 //! the thing that hands out memory cannot itself be handed out.
 
+#[cfg(feature = "hal-mm-exhaust-test")]
+pub mod exhaust;
 pub mod heap;
 pub mod mmio;
 pub mod numa;
