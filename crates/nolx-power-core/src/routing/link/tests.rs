@@ -1,3 +1,4 @@
+use super::super::plan_link_reprogramming;
 use super::alloc::vec;
 use super::alloc::vec::Vec;
 use super::{
@@ -34,7 +35,17 @@ fn link_aml(prs: &[u8], crs: &[u8], status: Option<u8>) -> Vec<u8> {
 }
 
 fn link_aml_with_srs_arity(prs: &[u8], crs: &[u8], status: Option<u8>, srs_arity: u8) -> Vec<u8> {
-    let mut body = b"LNK0".to_vec();
+    link_aml_named(b"LNK0", prs, crs, status, srs_arity)
+}
+
+fn link_aml_named(
+    name: &[u8; 4],
+    prs: &[u8],
+    crs: &[u8],
+    status: Option<u8>,
+    srs_arity: u8,
+) -> Vec<u8> {
+    let mut body = name.to_vec();
     body.extend(name_buffer(b"_PRS", prs));
     body.extend(name_buffer(b"_CRS", crs));
     if let Some(status) = status {
@@ -575,4 +586,254 @@ fn srs_builder_requires_an_exact_advertised_choice_and_valid_end_tag() {
     let extended_choice = possible_interrupts(&extended_possible).unwrap()[0];
     let consumer_current = template(vec![0x89, 6, 0, 0x09, 1, 20, 0, 0, 0], false);
     assert!(build_srs_template(&consumer_current, &extended_possible, extended_choice).is_err());
+}
+
+#[test]
+fn disabled_zero_mask_current_is_patched_in_place_from_the_advertised_choices() {
+    let possible = template(vec![0x23, 0x28, 0, 0x18], true);
+    let disabled = template(vec![0x23, 0, 0, 0x18], true);
+    // A zero mask is not a choice a possible-settings template may advertise; it only
+    // has meaning as the current settings of a disabled link.
+    assert!(possible_interrupts(&disabled).is_err());
+
+    let selected = possible_interrupts(&possible).unwrap()[1];
+    let configured = build_srs_template(&disabled, &possible, selected).unwrap();
+    assert_eq!(configured.len(), disabled.len());
+    assert_eq!(&configured[..4], &[0x23, 0x20, 0, 0x18]);
+    assert_eq!(possible_interrupts(&configured).unwrap(), vec![selected]);
+}
+
+#[test]
+fn empty_current_template_derives_the_candidate_from_prs_without_extra_resources() {
+    let empty = template(Vec::new(), true);
+    let possible = template(vec![0x23, 0x28, 0, 0x18], true);
+    let selected = possible_interrupts(&possible).unwrap()[0];
+    let configured = build_srs_template(&empty, &possible, selected).unwrap();
+    assert_eq!(configured.len(), possible.len());
+    assert_eq!(possible_interrupts(&configured).unwrap(), vec![selected]);
+
+    // A possible-settings template that also describes other resources must not become
+    // an _SRS argument for a link that only needs its interrupt steered.
+    let mixed = small_link_template();
+    let mixed_choice = possible_interrupts(&mixed).unwrap()[0];
+    assert_eq!(
+        build_srs_template(&empty, &mixed, mixed_choice),
+        Err(Error::Invalid)
+    );
+
+    // Multi-GSI Extended IRQ choices shrink to the one selected interrupt.
+    let extended = extended_link_template();
+    let extended_choice = possible_interrupts(&extended).unwrap()[1];
+    let configured = build_srs_template(&empty, &extended, extended_choice).unwrap();
+    assert_eq!(configured.len(), extended.len() - 4);
+    assert_eq!(&configured[..9], &[0x89, 6, 0, 0x1c, 1, 21, 0, 0, 0]);
+    assert_eq!(
+        possible_interrupts(&configured).unwrap(),
+        vec![extended_choice]
+    );
+}
+
+#[test]
+fn link_selector_repairs_a_disabled_link_instead_of_refusing_it() {
+    let possible = template(vec![0x23, 0x28, 0, 0x18], true);
+    for current in [
+        template(vec![0x23, 0, 0, 0x18], true),
+        template(Vec::new(), true),
+    ] {
+        // SeaBIOS reports a disabled PIRQ link as _STA 0x9: present and functioning,
+        // but not enabled until _SRS steers it. That status must not refuse selection.
+        let aml = link_aml(&possible, &current, Some(9));
+        let mut namespace = Namespace::new();
+        namespace.load(&aml).unwrap();
+        let link = Path::parse("\\LNK0").unwrap();
+        let selected = select_link_route(
+            &namespace,
+            &link,
+            |irq| Some(u32::from(irq)),
+            |interrupt| interrupt.gsi == 5,
+        )
+        .unwrap();
+        assert_eq!(selected.option.number, LinkIrqNumber::Isa(5));
+        assert_eq!(selected.interrupt.gsi, 5);
+        let srs = selected.srs_argument.unwrap();
+        assert_eq!(possible_interrupts(&srs).unwrap(), vec![selected.option]);
+    }
+}
+
+fn package(elements: &[Vec<u8>]) -> Vec<u8> {
+    let mut body = vec![elements.len() as u8];
+    for element in elements {
+        body.extend_from_slice(element);
+    }
+    aml_package(&[0x12], body)
+}
+
+fn dword(value: u32) -> Vec<u8> {
+    let mut encoded = vec![0x0c];
+    encoded.extend_from_slice(&value.to_le_bytes());
+    encoded
+}
+
+fn link_row(device: u32, name: &[u8; 4]) -> Vec<u8> {
+    // Absolute \PCI0.<name> reference, in the form firmware _PRT packages carry.
+    let mut source = vec![0x5c, 0x2e];
+    source.extend_from_slice(b"PCI0");
+    source.extend_from_slice(name);
+    package(&[dword(device << 16 | 0xffff), vec![0x00], source, vec![0x00]])
+}
+
+fn direct_row(device: u32, gsi: u8) -> Vec<u8> {
+    package(&[
+        dword(device << 16 | 0xffff),
+        vec![0x00],
+        vec![0x00],
+        vec![0x0a, gsi],
+    ])
+}
+
+fn root_with_prt(rows: &[Vec<u8>], links: &[Vec<u8>]) -> Vec<u8> {
+    let mut body = b"PCI0".to_vec();
+    for link in links {
+        body.extend_from_slice(link);
+    }
+    body.extend_from_slice(&[0x08]);
+    body.extend_from_slice(b"_PRT");
+    body.extend(package(rows));
+    aml_package(&[0x5b, 0x82], body)
+}
+
+#[test]
+fn link_preflight_retains_available_current_routes_without_srs() {
+    let possible = template(vec![0x23, 0x28, 0, 0x18], true);
+    let current = template(vec![0x23, 0x08, 0, 0x18], true);
+    let link = link_aml_named(b"LNK0", &possible, &current, None, 1);
+    let aml = root_with_prt(&[link_row(2, b"LNK0"), link_row(3, b"LNK0")], &[link]);
+    let mut namespace = Namespace::new();
+    namespace.load(&aml).unwrap();
+    let root = Path::parse("\\PCI0").unwrap();
+    let plan =
+        plan_link_reprogramming(&namespace, &root, |irq| Some(u32::from(irq)), |_| true).unwrap();
+    // Two rows name the same link; it is still one selection.
+    assert_eq!(plan.evaluated, 1);
+    assert!(plan.reprogramming.is_empty());
+    assert_eq!(plan.retained.len(), 1);
+    assert_eq!(plan.retained[0].1.gsi, 3);
+}
+
+#[test]
+fn link_preflight_reprograms_only_links_whose_current_route_is_unavailable() {
+    let possible_a = template(vec![0x23, 0x28, 0, 0x18], true);
+    let current_a = template(vec![0x23, 0x08, 0, 0x18], true);
+    let possible_b = template(vec![0x23, 0x20, 0x04, 0x18], true);
+    let current_b = template(vec![0x23, 0x20, 0, 0x18], true);
+    let links = [
+        link_aml_named(b"LNK0", &possible_a, &current_a, None, 1),
+        link_aml_named(b"LNK1", &possible_b, &current_b, None, 1),
+    ];
+    let aml = root_with_prt(&[link_row(2, b"LNK0"), link_row(3, b"LNK1")], &links);
+    let mut namespace = Namespace::new();
+    namespace.load(&aml).unwrap();
+    let root = Path::parse("\\PCI0").unwrap();
+    // The platform cannot program GSI3. LNK0 moves to GSI5; LNK1 already sits on GSI5
+    // with identical electrical flags, so sharing it needs no second reprogramming.
+    let plan = plan_link_reprogramming(
+        &namespace,
+        &root,
+        |irq| Some(u32::from(irq)),
+        |irq| irq.gsi != 3,
+    )
+    .unwrap();
+    assert_eq!(plan.evaluated, 2);
+    assert_eq!(plan.reprogramming.len(), 1);
+    assert_eq!(
+        plan.reprogramming[0].link,
+        Path::parse("\\PCI0.LNK0").unwrap()
+    );
+    assert_eq!(plan.reprogramming[0].selection.interrupt.gsi, 5);
+    assert!(plan.reprogramming[0].selection.srs_argument.is_some());
+    assert_eq!(
+        plan.retained,
+        vec![(
+            Path::parse("\\PCI0.LNK1").unwrap(),
+            super::super::Interrupt {
+                gsi: 5,
+                active_low: true,
+                level: true,
+                shared: true,
+            },
+        )]
+    );
+}
+
+#[test]
+fn link_preflight_never_shares_a_gsi_across_conflicting_electrical_flags() {
+    let root = Path::parse("\\PCI0").unwrap();
+    let current = template(Vec::new(), true);
+
+    // A direct _PRT row holds GSI5 at PCI default polarity. The disabled link's matching
+    // advertised choice may share it once reprogrammed.
+    let matching = template(vec![0x89, 10, 0, 0x0c, 2, 3, 0, 0, 0, 5, 0, 0, 0], true);
+    let link = link_aml_named(b"LNK0", &matching, &current, None, 1);
+    let aml = root_with_prt(&[direct_row(4, 5), link_row(2, b"LNK0")], &[link]);
+    let mut namespace = Namespace::new();
+    namespace.load(&aml).unwrap();
+    let plan = plan_link_reprogramming(&namespace, &root, |_| None, |irq| irq.gsi != 3).unwrap();
+    assert_eq!(plan.reprogramming.len(), 1);
+    assert_eq!(plan.reprogramming[0].selection.interrupt.gsi, 5);
+
+    // The same choices at the opposite polarity would have to overrule the direct row's
+    // flags to share GSI5, and GSI3 is not programmable: no route may be invented.
+    let opposite = template(vec![0x89, 10, 0, 0x08, 2, 3, 0, 0, 0, 5, 0, 0, 0], true);
+    let link = link_aml_named(b"LNK0", &opposite, &current, None, 1);
+    let aml = root_with_prt(&[direct_row(4, 5), link_row(2, b"LNK0")], &[link]);
+    let mut namespace = Namespace::new();
+    namespace.load(&aml).unwrap();
+    assert_eq!(
+        plan_link_reprogramming(&namespace, &root, |_| None, |irq| irq.gsi != 3),
+        Err(Error::NoRoute)
+    );
+}
+
+#[test]
+fn link_preflight_refuses_a_link_it_cannot_reprogram() {
+    let possible = template(vec![0x23, 0x28, 0, 0x18], true);
+    let current = template(vec![0x23, 0x08, 0, 0x18], true);
+    let link = link_aml_named(b"LNK0", &possible, &current, None, 0);
+    let aml = root_with_prt(&[link_row(2, b"LNK0")], &[link]);
+    let mut namespace = Namespace::new();
+    namespace.load(&aml).unwrap();
+    let root = Path::parse("\\PCI0").unwrap();
+    assert_eq!(
+        plan_link_reprogramming(
+            &namespace,
+            &root,
+            |irq| Some(u32::from(irq)),
+            |irq| { irq.gsi != 3 }
+        ),
+        Err(Error::Invalid)
+    );
+}
+
+#[test]
+fn link_selector_refuses_a_present_but_not_functioning_link() {
+    let possible = template(vec![0x23, 0x28, 0, 0x18], true);
+    let current = template(vec![0x23, 0, 0, 0x18], true);
+    let aml = link_aml(&possible, &current, Some(1));
+    let mut namespace = Namespace::new();
+    namespace.load(&aml).unwrap();
+    let link = Path::parse("\\LNK0").unwrap();
+    assert_eq!(
+        select_link_route(&namespace, &link, |irq| Some(u32::from(irq)), |_| true),
+        Err(Error::Invalid)
+    );
+}
+
+#[test]
+fn link_preflight_requires_the_root_routing_table() {
+    let namespace = Namespace::new();
+    let root = Path::parse("\\PCI0").unwrap();
+    assert_eq!(
+        plan_link_reprogramming(&namespace, &root, |irq| Some(u32::from(irq)), |_| true),
+        Err(Error::Invalid)
+    );
 }

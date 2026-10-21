@@ -698,6 +698,10 @@ jobs:
         run: make kernel KERNEL_FEATURES=hal-driver-net-multi-test,hal-pci-intx-poison-test 2>&1 | tee -a /tmp/job.log
       - name: Verify ACPI routes without valid Interrupt Line bytes
         run: python3 scripts/check-network-multi.py --intx-routing-only 2>&1 | tee -a /tmp/job.log
+      - name: Build disabled-link _SRS recovery proof
+        run: make kernel KERNEL_FEATURES=hal-driver-net-multi-test,hal-pci-intx-poison-test,hal-pci-link-srs-test 2>&1 | tee -a /tmp/job.log
+      - name: Verify _SRS link reprogramming restores captured e1000 traffic
+        run: python3 scripts/check-network-multi.py --link-srs-only 2>&1 | tee -a /tmp/job.log
       - name: Build combined six-storage four-NIC fixture
         run: make kernel KERNEL_FEATURES=hal-driver-multi-test,hal-driver-net-multi-test 2>&1 | tee -a /tmp/job.log
       - name: Verify all ten devices together on Q35

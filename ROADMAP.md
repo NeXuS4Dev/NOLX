@@ -1256,3 +1256,24 @@ receive/transmit pair and the e1000's firmware-routed INTx line are still static
 are fixed per driver kind, and the reclaim rule trusts each transport's own hardware proof.
 This is a bounded step towards general interrupt-resource reclamation, not a general dynamic
 allocator. M9 is not complete.
+
+
+M9 audited ACPI link `_SRS` checkpoint (2026-10-20): the host-tested `_PRS` selector,
+`_SRS` effects planner and byte-write transaction now have a production kernel backend.
+Before route publication, an APIC-mode preflight judges every `_PRT`-referenced link's
+current route against the real IOAPIC route table; a link whose current route cannot be
+programmed is steered by planning its `_SRS` and applying the journal through a backend
+restricted to the snapshot's verified PIRQ bytes and the selected route's single encoded
+value, with the snapshot refreshed and `_CRS` re-evaluated as the transaction
+postcondition. Publication still comes only from a fresh current-route discovery, and any
+refusal revokes all routes. Disabled links (zero IRQ mask, empty `_CRS`, SeaBIOS `_STA`
+0x9) are repaired from `_PRS` instead of refused. The disabled-link fixture disables every
+PIRQ byte and poisons every Interrupt Line byte: steerable PIIX links on PC recover
+through real `_SRS` writes with captured e1000 traffic on the selected GSIs, while Q35's
+fixed GSIA..GSIH routes (GSIs 16..23) are retained with zero firmware writes, which is the
+correct behavior for that hardwired APIC profile. CI run
+[39462936440](https://github.com/NeXuS4Dev/NOLX/actions/runs/39462936440) on `ee0253b`
+passed all nineteen jobs; PCI-036 is `tested-T1` and PCI-037 `tested-T2`, and the
+conformance database holds 406 assertions. Segment zero/root bus zero and the verified
+ByteAcc PIRQ profile only; general link reprogramming, nonzero-segment binding, USB hubs,
+Executive input bindings and device power/S3 remain open. M9 is not complete.
