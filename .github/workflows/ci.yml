@@ -755,12 +755,7 @@ jobs:
           status=$?
           cat /tmp/hubs.log | tee -a /tmp/job.log
           if [ "$status" -ne 0 ]; then
-            python3 - <<'ANNOTATE'
-            import pathlib
-            tail = pathlib.Path('/tmp/hubs.log').read_text(errors='replace')[-3000:]
-            escaped = tail.replace('%', '%25').replace('\r', '').replace('\n', '%0A')
-            print(f'::error title=hub-fixture::{escaped}', flush=True)
-            ANNOTATE
+            python3 scripts/annotate-failure.py "hub fixture" /tmp/hubs.log
           fi
           exit "$status"
       - name: Reject misleading interrupt proof logs
