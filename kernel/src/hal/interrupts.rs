@@ -181,6 +181,34 @@ fn read_cr2() -> u64 {
     address
 }
 
+/// Run `f` with maskable interrupts disabled, restoring the previous flag state.
+///
+/// The console writes a line one byte at a time, and the scheduler is preemptive, so a line
+/// printed with interrupts enabled can be cut in half by a switch and read as two unrelated
+/// fragments — including in the evidence a boot fixture greps for. Every formatted console
+/// write therefore runs under this guard; nesting is safe because the flag state is saved and
+/// restored rather than assumed.
+pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
+    let flags: u64;
+    // SAFETY: reading the flag register and clearing IF touch no memory. The closure runs with
+    // maskable interrupts off, and the recorded flags are restored even if it returns early.
+    unsafe {
+        // `pushfq`/`pop` are balanced, so the stack pointer is unchanged, but the pair is not
+        // `nostack`: the flag word genuinely goes through the stack.
+        asm!("pushfq", "pop {}", out(reg) flags, options(nomem, preserves_flags));
+        asm!("cli", options(nomem, nostack));
+    }
+    let result = f();
+    // SAFETY: same register, restored from the value saved above; `sti` only runs when
+    // interrupts were enabled on entry.
+    unsafe {
+        if flags & (1 << 9) != 0 {
+            asm!("sti", options(nomem, nostack));
+        }
+    }
+    result
+}
+
 fn halt_after_exception() -> ! {
     // SAFETY: the current interrupt gate has IF clear; CLI also prevents any later maskable
     // interrupt from returning to a faulting context. HLT is the fatal kernel stop state.
