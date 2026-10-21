@@ -72,13 +72,24 @@ def boot(qemu, kernel, machine):
             # The fixture deliberately takes every frame on the machine and then fills the
             # heap: on a 512 MiB guest that is a few seconds of work, and a QEMU on a loaded
             # CI runner is slower, so the deadline is generous but finite.
-            deadline = time.monotonic() + 300
+            started = time.monotonic()
+            deadline = started + 300
             while time.monotonic() < deadline:
                 text = log.read_text(errors='replace')
                 assert not FAILURES.search(text), text
                 if DONE.search(text):
                     break
                 assert process.poll() is None, text
+                # A kernel built without the feature never prints the fixture's first line;
+                # say so instead of waiting out the whole deadline.
+                assert not (
+                    time.monotonic() - started > 45
+                    and 'mm-exhaust: starting' not in text
+                    and 'NOLX: init sequence complete' in text
+                ), (
+                    f'{label}: this kernel has no mm-exhaust fixture; '
+                    'build with KERNEL_FEATURES=hal-mm-exhaust-test'
+                )
                 time.sleep(.05)
             else:
                 raise AssertionError(f'{label}: the fixture did not finish within 300 s')

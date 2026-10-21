@@ -1723,8 +1723,18 @@ The virtio-blk half of the same class was reproduced locally and instrumented:
   kernel-thread round robin and at the first idle-loop iteration, and already held when the
   ring-3 user-mode test reports completion. The window that breaks it is the M6 user-mode test.
 
-Two explanations remain open, and the evidence distinguishes them only by tracing acquires
-against releases:
+Further local work on the default image (which is affected as well — the block binding table
+is unusable after the user-mode test there too, so this is not a test-feature problem) shows
+the corruption directly: dumping the whole `BINDINGS` object before and after the user-mode
+window shows eight bytes changed, including the mutex word (0 -> 1) and several binding fields.
+A hardware watchpoint armed at the start of that window reported no write, so the symptom is
+*both* an apparently welded mutex and a written binding table; the byte that changes is the
+mutex, and the table's fields change too. The consistent reading is a stray write into the
+block-device statics during the ring-3 window, not a lock that was legitimately taken and not
+released.
+
+Because the same dump shows the fields moving as well as the mutex, the two remaining
+explanations are:
 
 1. an unbalanced acquire inside that window — the five `BINDINGS` call sites are `bind_storage`,
    `device`, `with_device`, `retained_selftest` and `shutdown_flush`;
