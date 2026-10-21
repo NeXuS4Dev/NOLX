@@ -147,6 +147,24 @@ pub fn path(name: &str) -> &str {
     }
 }
 
+/// The published name of a device incarnation, if it is still bound.
+///
+/// Names are allocated by publication order, so a consumer that must open a *specific* device
+/// asks for the name this incarnation got rather than assuming which slot it took.
+#[must_use]
+pub fn name_of(device: DeviceId) -> Option<&'static str> {
+    let slot = SLOT_OF[device.slot()].load(Ordering::Acquire);
+    if slot == NO_BINDING {
+        return None;
+    }
+    let index = usize::from(slot);
+    let bindings = BINDINGS.lock();
+    match bindings[index] {
+        Some(Binding { device: bound, .. }) if bound == device => Some(NAMES[index]),
+        _ => None,
+    }
+}
+
 /// Publish the Executive object for a newly attached device.
 ///
 /// Returns the published name, which the caller logs. Failure is not fatal to input: the
@@ -310,6 +328,20 @@ pub fn object_of(device: DeviceId) -> Option<ObjectId> {
         .map(|binding| binding.object)
 }
 
+/// The device behind an object, the inverse of [`object_of`].
+///
+/// A descriptor needs this because a path resolves to an object, not to a registry slot: the
+/// object is the security identity, the device is the queue.
+#[must_use]
+pub fn device_of(object: ObjectId) -> Option<DeviceId> {
+    BINDINGS
+        .lock()
+        .iter()
+        .flatten()
+        .find(|binding| binding.object == object)
+        .map(|binding| binding.device)
+}
+
 /// `InputDevice` create hook: a name is required and must be one this module publishes.
 ///
 /// Reusing the Device type's check (a non-empty name) would let anything be called an input
@@ -404,8 +436,14 @@ pub fn selftest(console: &mut dyn nolx_hal_core::console::HalConsole) {
     let mut second: HandleTable<ObjectId, 8> = HandleTable::new();
     let before = boot::reference_counts(object).expect("live input object");
 
-    // The name resolves to the object the binding published.
-    let resolved = boot::lookup(path) == Ok(object);
+    // The name resolves to the object the binding published, and the reverse lookup a device
+    // descriptor uses (`name_of` -> `path`) agrees with it. Without both directions, `open(2)`
+    // on a device name could reach one object while the descriptor read another.
+    // Both directions of the device binding must agree: a descriptor resolves a path to an
+    // object and then the object back to a device, so a disagreement would make `open(2)` and
+    // the queue it reads two different devices.
+    let naming_agrees = name_of(device) == Some(name) && device_of(object) == Some(device);
+    let resolved = boot::lookup(path) == Ok(object) && naming_agrees;
 
     // An interactive token receives exactly the mask the descriptor grants, and the type hook
     // runs for it.
@@ -463,7 +501,7 @@ pub fn selftest(console: &mut dyn nolx_hal_core::console::HalConsole) {
     let after = boot::reference_counts(object).expect("input object outlives its handles");
 
     let failure = if !resolved {
-        Some("the published name does not resolve to its object")
+        Some("the published name does not resolve to its object, or the reverse lookup disagreed")
     } else if !handle_ok {
         Some("an interactive token did not receive the full access mask")
     } else if !callback_ran {

@@ -96,6 +96,10 @@ pub fn report(console: &mut crate::hal::console::Console) -> bool {
     let init = process_status(INIT_PID);
     let hello = process_status(HELLO_PID);
     let tmpfs = user::tmpfs_evidence();
+    // With the input `read(2)` phase compiled in, the ring-3 descriptor table has to outlive
+    // this report: that phase opens a device descriptor through the same context, and it
+    // releases the VFS itself when it reports.
+    #[cfg(not(feature = "hal-input-read-test"))]
     user::cleanup_vfs();
 
     let hello_ok = hello.is_some_and(|(zombie, status, written)| {
@@ -144,4 +148,164 @@ pub fn report(console: &mut crate::hal::console::Console) -> bool {
         }
     }
     false
+}
+
+/// The ring-3 input `read(2)` test: a user program reads real key records from the device.
+///
+/// The evidence this phase produces is deliberately not self-serving:
+///
+/// 1. the record comes from the PS/2 IRQ path — the harness injects a key through QMP, the
+///    i8042 raises IRQ1, the decoder turns the scancode into a HID usage, and the producer
+///    publishes it into the same registry a physical keyboard feeds. Nothing here fabricates
+///    an event to hand the reader;
+/// 2. the reader is a ring-3 program using only `open`/`read`/`close`, so what the kernel
+///    reports is what a program could observe;
+/// 3. the program demands *both* edges — press then release with the same usage — and checks
+///    the class and source bytes, so a record that only loosely resembled the format would
+///    fail it;
+/// 4. the boot image stays honest when the hardware is not there: a machine without a PS/2
+///    keyboard prints that the phase was skipped instead of claiming a pass.
+///
+/// The phase is a separate ring-3 run because a device descriptor needs a live process and a
+/// mounted descriptor table, and the first phase's slots are retired when its evidence is read.
+/// It runs after the M6/M7 evidence has been reported and before the memory selftests, which
+/// take over every address space.
+#[cfg(feature = "hal-input-read-test")]
+pub mod read_test {
+    use core::fmt::Write;
+
+    use nolx_input_core::events::Source;
+    use nolx_input_core::objects::Class;
+
+    use crate::exec::user::{self, process_status};
+    use crate::hal::console::Console;
+    use crate::hal::input;
+
+    /// The marker CI greps for.
+    pub const PASS_MARKER: &str = "NOLX: input read(2) T2: ring-3 open/read/close on the PS/2 \
+        keyboard device returned the injected press and release records";
+
+    /// The status `inputread` exits with when every check held.
+    const STATUS: i32 = 42;
+    /// Bytes `inputread` writes when it succeeds.
+    const WROTE: u64 = 48;
+    /// Phase state: zero not started, one running, two reported.
+    static PHASE: crate::sync::IrqMutex<u8> = crate::sync::IrqMutex::new(0);
+    /// The pid `inputread` was given, or zero before the spawn.
+    static PID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+    /// Whether the machine had no PS/2 keyboard object to read from.
+    static SKIPPED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+    /// Whether the phase is running: started, and the reader has not exited yet.
+    #[must_use]
+    pub fn running() -> bool {
+        *PHASE.lock() == 1 && user::active()
+    }
+
+    /// Find the PS/2 keyboard's published Executive path.
+    ///
+    /// The name is allocated by publication order, so the test asks the binding which name this
+    /// incarnation got instead of assuming `\\Device\\Input0` is the keyboard.
+    fn keyboard_path() -> Option<&'static str> {
+        let mut devices = [None; 16];
+        let count = input::enumerate(&mut devices).ok()?;
+        devices
+            .into_iter()
+            .take(count)
+            .flatten()
+            .filter(|info| info.connected)
+            .find(|info| info.source == Source::Ps2Keyboard && info.class == Class::Keyboard)
+            .and_then(|info| crate::hal::input::executive::name_of(info.id))
+            .map(crate::hal::input::executive::path)
+    }
+
+    /// Start the phase once: spawn `inputread` and tell the harness to send a key.
+    pub fn begin(console: &mut Console) {
+        let mut state = PHASE.lock();
+        if *state != 0 {
+            return;
+        }
+        let Some(path) = keyboard_path() else {
+            let _ = writeln!(
+                console,
+                "NOLX: input read(2) T2: no PS/2 keyboard object on this machine; phase skipped"
+            );
+            SKIPPED.store(true, core::sync::atomic::Ordering::Release);
+            *state = 2;
+            return;
+        };
+        match user::spawn(
+            0,
+            "inputread",
+            nolx_exec_core::programs_gen::INPUTREAD_ELF,
+            &["inputread", path],
+        ) {
+            Ok(pid) => {
+                PID.store(pid, core::sync::atomic::Ordering::Release);
+                let _ = writeln!(
+                    console,
+                    "NOLX: input read(2) T2: inputread (pid {pid}) opening {path}; \
+                     send one key now"
+                );
+                *state = 1;
+            }
+            Err(error) => {
+                let _ = writeln!(console, "NOLX: input read(2) T2: spawn FAILED: {error:?}");
+                SKIPPED.store(true, core::sync::atomic::Ordering::Release);
+                *state = 2;
+            }
+        }
+    }
+
+    /// Whether the phase was skipped because the machine has no PS/2 keyboard.
+    ///
+    /// A skip is reported, not counted as a pass: the harness's marker check is what decides
+    /// whether a machine that should have a keyboard actually produced the evidence.
+    #[must_use]
+    pub fn skipped() -> bool {
+        SKIPPED.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Report the phase once the reader has exited, and return whether it passed.
+    pub fn report(console: &mut Console) -> bool {
+        {
+            let state = PHASE.lock();
+            if *state != 1 || user::active() {
+                return false;
+            }
+        }
+        let pid = PID.load(core::sync::atomic::Ordering::Acquire);
+        let status = process_status(pid);
+        let passed =
+            status.is_some_and(|(zombie, code, wrote)| zombie && code == STATUS && wrote >= WROTE);
+        let _ = writeln!(
+            console,
+            "NOLX: input read(2) T2: device descriptors still open: {}",
+            user::input::open_count()
+        );
+        match status {
+            Some((zombie, code, wrote)) => {
+                let _ = writeln!(
+                    console,
+                    "NOLX: input read(2) T2: inputread zombie={zombie} status={code} wrote={wrote} \
+                     (wanted status={STATUS} wrote>={WROTE})"
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    console,
+                    "NOLX: input read(2) T2: inputread has no process record"
+                );
+            }
+        }
+        if passed {
+            let _ = writeln!(console, "{PASS_MARKER}");
+        }
+        // The ring-3 VFS is released here: this phase is the last user of it when the feature
+        // is compiled in, and the heap selftest that follows expects it back.
+        user::cleanup_vfs();
+        *PHASE.lock() = 2;
+        passed
+    }
 }

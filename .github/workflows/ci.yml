@@ -764,6 +764,10 @@ jobs:
         run: python3 scripts/check-usb-input.py --objects --interrupts 2>&1 | tee -a /tmp/job.log
       - name: Verify PS/2 through the same input-object API
         run: python3 scripts/check-ps2-input.py --objects 2>&1 | tee -a /tmp/job.log
+      - name: Build the ring-3 input `read(2)` image
+        run: make kernel KERNEL_FEATURES=hal-input-read-test 2>&1 | tee -a /tmp/job.log
+      - name: Verify a ring-3 program reads injected key records through open/read/close
+        run: python3 scripts/check-ps2-input.py --read-t2 2>&1 | tee -a /tmp/job.log
       - name: Verify controller lifecycle, actual transfer STALL and fail-closed slot repair
         run: |
           for mode in lifecycle start-fault stop-fault recovery irq-start-fault transfer-fault; do
@@ -781,7 +785,7 @@ jobs:
       - name: Annotate USB serial logs on failure
         if: failure()
         run: |
-          for log in build/input-usb-*.log build/input-xhci-lifecycle-*.log; do
+          for log in build/input-usb-*.log build/input-xhci-lifecycle-*.log build/input-ps2-*.log; do
             tr -cd '\11\12\40-\176' < "$log" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
           done
       - uses: ./.github/actions/report-failure

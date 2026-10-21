@@ -126,3 +126,99 @@ fn print_screen_fake_shifts_and_unknown_codes_report_nothing() {
         "acknowledge and resend are not keys"
     );
 }
+
+#[test]
+fn a_read_record_encodes_every_field_the_kernel_tracks() {
+    use crate::events::{Event, Kind, PointerEvent, Source};
+    use crate::objects::Record;
+    use crate::wire;
+
+    let mut registry: crate::objects::Registry<1, 1, 4> = crate::objects::Registry::new();
+    let device = registry
+        .attach(
+            Source::Ps2Keyboard,
+            crate::objects::Class::Keyboard,
+            crate::objects::Location::Ps2Keyboard,
+        )
+        .unwrap();
+    let key = Record {
+        device,
+        event: Event {
+            source: Source::Ps2Keyboard,
+            kind: Kind::Key(crate::KeyEvent {
+                usage: 0x04,
+                pressed: true,
+            }),
+        },
+        sequence: 9,
+    };
+    assert_eq!(
+        wire::encode(&key),
+        [
+            wire::CLASS_KEYBOARD,
+            wire::SOURCE_PS2_KEYBOARD,
+            0x04,
+            0x00,
+            1,
+            0,
+            0,
+            0
+        ]
+    );
+
+    let release = Record {
+        device,
+        event: Event {
+            source: Source::UsbHid,
+            kind: Kind::Key(crate::KeyEvent {
+                usage: 0xE1,
+                pressed: false,
+            }),
+        },
+        sequence: 10,
+    };
+    assert_eq!(
+        wire::encode(&release),
+        [
+            wire::CLASS_KEYBOARD,
+            wire::SOURCE_USB_HID,
+            0xE1,
+            0x00,
+            0,
+            0,
+            0,
+            0
+        ]
+    );
+
+    // A pointer record keeps the sign of each axis: -6 is 0xfffa in the low half.
+    let motion = Record {
+        device,
+        event: Event {
+            source: Source::Ps2Mouse,
+            kind: Kind::Pointer(PointerEvent {
+                dx: -6,
+                dy: 4,
+                buttons: 1,
+            }),
+        },
+        sequence: 11,
+    };
+    let bytes = wire::encode(&motion);
+    assert_eq!(bytes[0], wire::CLASS_POINTER);
+    assert_eq!(bytes[1], wire::SOURCE_PS2_MOUSE);
+    assert_eq!(bytes[2..4], [1, 0]);
+    assert_eq!(i16::from_le_bytes([bytes[4], bytes[5]]), -6);
+    assert_eq!(i16::from_le_bytes([bytes[6], bytes[7]]), 4);
+
+    // A resync is its own class, and its value saturates rather than wrapping.
+    let resync = wire::encode_resync(Source::Ps2Keyboard, u64::MAX);
+    assert_eq!(resync[0], wire::CLASS_RESYNC);
+    assert_eq!(resync[1], wire::SOURCE_PS2_KEYBOARD);
+    assert_eq!(
+        u32::from_le_bytes(resync[4..8].try_into().unwrap()),
+        u32::MAX
+    );
+    assert_eq!(wire::RECORD_BYTES, 8);
+    assert_eq!(wire::eof(), 0);
+}

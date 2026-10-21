@@ -100,9 +100,17 @@ segment-zero board profile and the broader open M9 gates below remain incomplete
       device opened into the spawned process, and an auto-reset waitable set by the
       publication and cleared by the draining reader. Boot evidence below; INP-004/INP-005
       are `tested-T2`.
-- [ ] User-facing syscall and POSIX input-device interface on top of those objects (a
-      `read(2)`-shaped path and a scheduler-blocking wait); the Executive binding is the
-      layer below it and does not pretend to be the interface itself.
+- [x] User-facing `read(2)`-shaped path on top of those objects: `open(2)` resolves the
+      Executive name `\\Device\\InputN` (DACL-checked through the same `open` the spawn path
+      uses, `O_RDONLY` only, no synthetic VFS inode), each descriptor owns a non-blocking
+      reader bound to the device incarnation, `read(2)` returns one eight-byte record per
+      call (`nolx-input-core::wire`), `close(2)` releases the reader and a later read on that
+      number is `EBADF`, and a process exit releases whatever it still held. Empty queue is
+      `EAGAIN`; a disconnected device drains and then returns zero bytes. Evidence below;
+      INP-006..INP-008.
+- [ ] A scheduler-blocking input wait: `read(2)` on an empty queue returns `EAGAIN` instead of
+      sleeping on the device's auto-reset waitable, so a program that wants to block must
+      poll. Polling is honest, but it is not what a shell or `libc` will expect.
 - [ ] USB disconnect/hotplug cleanup and endpoint/ring ownership; do not leak controller
       resources or leave DMA active after device removal.
 - [x] Inject PS/2 keyboard/mouse events under QEMU and assert delivered event contents.

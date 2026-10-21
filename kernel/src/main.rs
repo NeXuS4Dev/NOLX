@@ -217,6 +217,10 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         let mut input_exec_reported = false;
         let mut user_test_started = false;
         let mut user_test_reported = false;
+        #[cfg(feature = "hal-input-read-test")]
+        let mut input_read_test_started = false;
+        #[cfg(feature = "hal-input-read-test")]
+        let mut input_read_test_reported = false;
         #[cfg(any(feature = "hal-power-test-s5", feature = "hal-power-quiesce-test"))]
         let mut power_test_started = false;
         loop {
@@ -281,6 +285,29 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
                 }
             }
 
+            // The ring-3 input `read(2)` phase runs after the M6/M7 evidence and before the
+            // memory selftests, which activate their own address spaces.
+            #[cfg(feature = "hal-input-read-test")]
+            {
+                if user_test_reported && !input_read_test_started {
+                    input_read_test_started = true;
+                    exec::begin_input_read_test(&mut console);
+                }
+                if input_read_test_started
+                    && !input_read_test_reported
+                    && !exec::input_read_test_running()
+                {
+                    input_read_test_reported = true;
+                    let passed = exec::report_input_read_test(&mut console);
+                    // A machine without a PS/2 keyboard legitimately has nothing to read; the
+                    // phase says so and must not fail the boot. With a keyboard present, an
+                    // inexact evidence chain is fatal.
+                    if !passed && !exec::input_read_test_skipped() {
+                        panic!("input read(2) T2 test produced an unexpected evidence chain");
+                    }
+                }
+            }
+
             let ticks = hal::timer::ticks();
             if !timer_marker_reported && ticks >= 100 {
                 let elapsed_ns = hal::timer::monotonic_ns();
@@ -295,11 +322,18 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
                 timer_marker_reported = true;
             }
 
+            // Every ring-3 phase has to finish before the memory selftests: they activate
+            // their own address spaces, which cannot interleave with live user threads.
+            #[cfg(feature = "hal-input-read-test")]
+            let ring3_done = input_read_test_reported;
+            #[cfg(not(feature = "hal-input-read-test"))]
+            let ring3_done = true;
+
             // Exercise the frame allocator once the clock is live, so the stress runs while
             // timer interrupts keep arriving instead of in the quiet window before they
             // start. A failure is fatal: a memory manager that did not survive its own self
             // test must not go on to serve allocations.
-            if timer_marker_reported && user_test_reported && !memory_selftest_done {
+            if timer_marker_reported && user_test_reported && ring3_done && !memory_selftest_done {
                 memory_selftest_done = true;
                 if let Err(message) = mm::selftest::run(&mut console) {
                     let _ = writeln!(console, "NOLX: mm selftest: FAILED: {message}");

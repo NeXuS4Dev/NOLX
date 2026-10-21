@@ -143,6 +143,68 @@ class Asm:
         self.raw(b"\x0f\x85\x00\x00\x00\x00")
         self.fixups.append((len(self.code) - 4, label, "rel32"))
 
+
+    def cmp_byte_at_rsi(self, offset: int, value: int) -> None:
+        """cmp byte [rsi + offset], imm8."""
+        self.raw(b"\x80\x7e" + offset.to_bytes(1, "little") + value.to_bytes(1, "little"))
+
+    def cmp_word_at_rsi(self, offset: int, value: int) -> None:
+        """cmp word [rsi + offset], imm16."""
+        self.raw(b"\x66\x81\x7e" + offset.to_bytes(1, "little")
+                 + value.to_bytes(2, "little"))
+
+    def cmp_dword_at_rsi(self, offset: int, value: int) -> None:
+        """cmp dword [rsi + offset], imm32."""
+        self.raw(b"\x81\x7e" + offset.to_bytes(1, "little")
+                 + value.to_bytes(4, "little"))
+
+    def mov_rdi_rsp(self) -> None:
+        """mov rdi, rsp."""
+        self.raw(b"\x48\x89\xe7")
+
+
+    def mov_r13d(self, value: int) -> None:
+        """mov r13d, imm32."""
+        self.raw(b"\x41\xbd" + value.to_bytes(4, "little", signed=True))
+
+    def dec_r13d(self) -> None:
+        """dec r13d."""
+        self.raw(b"\x41\xff\xcd")
+
+    def mov_r14d(self, value: int) -> None:
+        """mov r14d, imm32."""
+        self.raw(b"\x41\xbe" + value.to_bytes(4, "little", signed=True))
+
+    def dec_r14d(self) -> None:
+        """dec r14d."""
+        self.raw(b"\x41\xff\xce")
+
+    def movzx_r15d_word_at_rsi(self, offset: int) -> None:
+        """movzx r15d, word [rsi + offset]."""
+        self.raw(b"\x44\x0f\xb7\x7e" + offset.to_bytes(1, "little"))
+
+    def cmp_word_r15_at_rsi(self, offset: int) -> None:
+        """cmp word [rsi + offset], r15w."""
+        self.raw(b"\x66\x44\x39\x7e" + offset.to_bytes(1, "little"))
+
+    def mov_rbx_stack(self, offset: int) -> None:
+        """mov rbx, [rsp + offset]."""
+        self.raw(b"\x48\x8b\x5c\x24" + offset.to_bytes(1, "little"))
+
+    def mov_rdi_rbx(self) -> None:
+        """mov rdi, rbx."""
+        self.raw(b"\x48\x89\xdf")
+
+    def jnz(self, label: str) -> None:
+        """jnz rel32."""
+        self.raw(b"\x0f\x85\x00\x00\x00\x00")
+        self.fixups.append((len(self.code) - 4, label, "rel32"))
+
+    def jmp(self, label: str) -> None:
+        """jmp rel32."""
+        self.raw(b"\xe9\x00\x00\x00\x00")
+        self.fixups.append((len(self.code) - 4, label, "rel32"))
+
     def finish(self) -> bytes:
         for offset, label, _kind in self.fixups:
             target = self.labels[label]
@@ -348,7 +410,6 @@ def build_init() -> bytes:
     # Data labels: absolute virtual addresses in the data segment.
     asm.label("pid")
     asm.label("argv")
-    asm.label("path")
     asm.label("ok")
     asm.label("bad")
     asm.label("info")
@@ -400,6 +461,206 @@ def build_init() -> bytes:
     return bytes(image)
 
 
+# ----------------------------------------------------------------- input read test
+#
+# `inputread` is the ring-3 half of the input `read(2)` path. It opens the Executive device
+# name the kernel passes in `argv[1]`, reads records through `read(2)` until the injected key
+# arrives, checks every field of both edges, closes the descriptor, and exits 42. The kernel only reports the test as passed
+# when a program in ring 3 really read the records; the key itself comes from QMP, through the
+# i8042 IRQ and the same producer path a physical keyboard uses.
+INPUT_BASE = 0x0044_0000
+INPUT_TEXT = INPUT_BASE + 0x100
+INPUT_DATA = 0x0044_1000
+INPUT_OK_MESSAGE = b"inputread: open/read/close on \\Device\\Input0 ok\n"
+INPUT_BAD_MESSAGE = b"inputread: record mismatch\n"
+INPUT_TIMEOUT_MESSAGE = b"inputread: no key record arrived\n"
+
+# Data-segment layout, offsets from INPUT_DATA.
+INPUT_DATA_OK = 0x00
+INPUT_DATA_BAD = 0x38
+INPUT_DATA_TIMEOUT = 0x58
+INPUT_DATA_RECORD = 0x80
+INPUT_DATA_END = 0x90
+
+# The record fields the program demands: keyboard class, PS/2 keyboard source, a nonzero HID
+# usage, pressed then released with the *same* usage.
+INPUT_CLASS_KEYBOARD = 1
+INPUT_SOURCE_PS2_KEYBOARD = 1
+
+# `read(2)` results. NOLX uses its own errno numbering (crates/nolx-types/src/errno.rs): the
+# values are not the Linux ones, and a program that assumed them would misread every error.
+EAGAIN = -6
+EBADF = -8
+
+# Polling bounds: an EAGAIN attempt costs one syscall plus DELAY decrements, so a missing key
+# fails the program in seconds instead of hanging the boot image.
+INPUT_ATTEMPTS = 2_000_000
+INPUT_DELAY = 2_000
+
+
+def build_inputread() -> bytes:
+    asm = Asm(INPUT_TEXT)
+    # open(argv[1], O_RDONLY, 0): the kernel names the device it wants read.
+    asm.mov_rbx_stack(16)
+    asm.mov_rdi_rbx()
+    asm.mov_rsi(0)
+    asm.mov_rdx(0)
+    asm.mov_rax(SYS_OPEN)
+    asm.syscall()
+    asm.cmp_eax(3)  # fd 3: stdio holds 0..2
+    asm.jne("mismatch")
+    asm.mov_r12_rax()
+
+    # Poll for the first record: the press edge.
+    asm.mov_r13d(INPUT_ATTEMPTS)
+    asm.label("wait_press")
+    asm.mov_rdi_r12()
+    asm.lea("rsi", "record")
+    asm.mov_rdx(8)
+    asm.mov_rax(SYS_READ)
+    asm.syscall()
+    asm.cmp_eax(8)
+    asm.jne("wait_press_retry")
+    asm.jmp("press")
+    asm.label("wait_press_retry")
+    asm.cmp_eax(EAGAIN)
+    asm.jne("mismatch")
+    asm.mov_r14d(INPUT_DELAY)
+    asm.label("spin_press")
+    asm.dec_r14d()
+    asm.jnz("spin_press")
+    asm.dec_r13d()
+    asm.jnz("wait_press")
+    asm.jmp("no_record")
+
+    # Every field of the press record.
+    asm.label("press")
+    asm.lea("rsi", "record")
+    asm.cmp_byte_at_rsi(0, INPUT_CLASS_KEYBOARD)
+    asm.jne("mismatch")
+    asm.cmp_byte_at_rsi(1, INPUT_SOURCE_PS2_KEYBOARD)
+    asm.jne("mismatch")
+    asm.cmp_dword_at_rsi(4, 1)  # pressed
+    asm.jne("mismatch")
+    asm.cmp_word_at_rsi(2, 0)  # a key code of zero is not a key
+    asm.jne("press_code")  # fall through when nonzero
+    asm.jmp("mismatch")
+    asm.label("press_code")
+    asm.movzx_r15d_word_at_rsi(2)
+
+    # The release edge must carry the same code and the released value.
+    asm.mov_r13d(INPUT_ATTEMPTS)
+    asm.label("wait_release")
+    asm.mov_rdi_r12()
+    asm.lea("rsi", "record")
+    asm.mov_rdx(8)
+    asm.mov_rax(SYS_READ)
+    asm.syscall()
+    asm.cmp_eax(8)
+    asm.jne("wait_release_retry")
+    asm.jmp("release")
+    asm.label("wait_release_retry")
+    asm.cmp_eax(EAGAIN)
+    asm.jne("mismatch")
+    asm.mov_r14d(INPUT_DELAY)
+    asm.label("spin_release")
+    asm.dec_r14d()
+    asm.jnz("spin_release")
+    asm.dec_r13d()
+    asm.jnz("wait_release")
+    asm.jmp("no_record")
+
+    asm.label("release")
+    asm.lea("rsi", "record")
+    asm.cmp_byte_at_rsi(0, INPUT_CLASS_KEYBOARD)
+    asm.jne("mismatch")
+    asm.cmp_byte_at_rsi(1, INPUT_SOURCE_PS2_KEYBOARD)
+    asm.jne("mismatch")
+    asm.cmp_dword_at_rsi(4, 0)  # released
+    asm.jne("mismatch")
+    asm.cmp_word_r15_at_rsi(2)  # same usage as the press
+    asm.jne("mismatch")
+
+    # close(fd) must succeed, and a second read on that fd must be EBADF: closing really
+    # released the descriptor rather than leaving a device binding behind.
+    asm.mov_rdi_r12()
+    asm.mov_rax(SYS_CLOSE)
+    asm.syscall()
+    asm.cmp_eax(0)
+    asm.jne("mismatch")
+    asm.mov_rdi_r12()
+    asm.lea("rsi", "record")
+    asm.mov_rdx(8)
+    asm.mov_rax(SYS_READ)
+    asm.syscall()
+    asm.cmp_eax(EBADF)
+    asm.jne("mismatch")
+
+    asm.lea("rsi", "ok_msg")
+    asm.mov_rdx(len(INPUT_OK_MESSAGE))
+    asm.mov_rax(SYS_WRITE)
+    asm.mov_rdi(1)
+    asm.syscall()
+    asm.mov_rax(SYS_EXIT)
+    asm.mov_rdi(EXPECTED_STATUS)
+    asm.syscall()
+
+    asm.label("mismatch")
+    asm.lea("rsi", "bad_msg")
+    asm.mov_rdx(len(INPUT_BAD_MESSAGE))
+    asm.mov_rax(SYS_WRITE)
+    asm.mov_rdi(1)
+    asm.syscall()
+    asm.mov_rax(SYS_EXIT)
+    asm.mov_rdi(1)
+    asm.syscall()
+
+    asm.label("no_record")
+    asm.lea("rsi", "timeout_msg")
+    asm.mov_rdx(len(INPUT_TIMEOUT_MESSAGE))
+    asm.mov_rax(SYS_WRITE)
+    asm.mov_rdi(1)
+    asm.syscall()
+    asm.mov_rax(SYS_EXIT)
+    asm.mov_rdi(2)
+    asm.syscall()
+
+    asm.label("ok_msg")
+    asm.label("bad_msg")
+    asm.label("timeout_msg")
+    asm.label("record")
+    asm.labels["ok_msg"] = INPUT_DATA + INPUT_DATA_OK
+    asm.labels["bad_msg"] = INPUT_DATA + INPUT_DATA_BAD
+    asm.labels["timeout_msg"] = INPUT_DATA + INPUT_DATA_TIMEOUT
+    asm.labels["record"] = INPUT_DATA + INPUT_DATA_RECORD
+    code = asm.finish()
+
+    assert len(code) <= PAGE - 0x100, "inputread text grew past its first page"
+    assert INPUT_DATA_OK + len(INPUT_OK_MESSAGE) <= INPUT_DATA_BAD
+    assert INPUT_DATA_BAD + len(INPUT_BAD_MESSAGE) <= INPUT_DATA_TIMEOUT
+    assert INPUT_DATA_TIMEOUT + len(INPUT_TIMEOUT_MESSAGE) <= INPUT_DATA_RECORD
+    assert INPUT_DATA_RECORD + 8 <= INPUT_DATA_END
+
+    text_filesz = 0x100 + len(code)
+    data = bytearray(INPUT_DATA_END)
+    data[INPUT_DATA_OK:INPUT_DATA_OK + len(INPUT_OK_MESSAGE)] = INPUT_OK_MESSAGE
+    data[INPUT_DATA_BAD:INPUT_DATA_BAD + len(INPUT_BAD_MESSAGE)] = INPUT_BAD_MESSAGE
+    data[INPUT_DATA_TIMEOUT:INPUT_DATA_TIMEOUT + len(INPUT_TIMEOUT_MESSAGE)] = INPUT_TIMEOUT_MESSAGE
+
+    filesz = PAGE + len(data)
+    image = bytearray(filesz)
+    phnum = 3
+    image[0:64] = elf_header(INPUT_TEXT, 64, phnum)
+    image[64:120] = program_header(PT_LOAD, PF_R | PF_X, 0, INPUT_BASE,
+                                  text_filesz, text_filesz, PAGE)
+    image[120:176] = program_header(PT_LOAD, PF_R | PF_W, PAGE, INPUT_DATA,
+                                   len(data), len(data), PAGE)
+    image[176:232] = program_header(PT_GNU_STACK, PF_R | PF_W, 0, 0, 0, 0, 0x10)
+    image[0x100:0x100 + len(code)] = code
+    image[PAGE:] = data
+    return bytes(image)
+
+
 def rust_bytes(name: str, doc: str, data: bytes) -> list[str]:
     lines = [f"/// {doc}", "#[rustfmt::skip]", f"pub static {name}: &[u8] = &["]
     for start in range(0, len(data), 12):
@@ -412,6 +673,7 @@ def rust_bytes(name: str, doc: str, data: bytes) -> list[str]:
 def emit_rust() -> str:
     hello = build_hello()
     init = build_init()
+    inputread = build_inputread()
     o: list[str] = []
     w = o.append
     w("// " + BANNER.replace("\n", "\n// ").rstrip())
@@ -421,13 +683,22 @@ def emit_rust() -> str:
     w("//! `hello` writes one line through `nxposix_write` and exits with status 42.")
     w("//! `init` spawns `hello` through `nxposix_spawn`, observes the exit status with")
     w("//! `nxposix_waitid`, reports it, and exits 42 only when the status was exactly 42.")
+    w("//!")
+    w("//! `inputread` opens the Executive input device, reads one eight-byte record through")
+    w("//! `read(2)`, checks every field, closes the descriptor and exits 42.")
     w("")
     o.extend(rust_bytes("HELLO_ELF", f"The `hello` image: a static x86-64 ET_EXEC ELF64 ({len(hello)} bytes).", hello))
     w("")
     o.extend(rust_bytes("INIT_ELF", f"The `init` image: a static x86-64 ET_EXEC ELF64 ({len(init)} bytes).", init))
     w("")
+    o.extend(rust_bytes("INPUTREAD_ELF", f"The `inputread` image: a static x86-64 ET_EXEC ELF64 ({len(inputread)} bytes).", inputread))
+    w("")
     w("/// The embedded programs, keyed by the path `nxposix_spawn` resolves.")
-    w("pub static PROGRAMS: &[(&str, &[u8])] = &[(\"hello\", HELLO_ELF), (\"init\", INIT_ELF)];")
+    w("pub static PROGRAMS: &[(&str, &[u8])] = &[")
+    w("    (\"hello\", HELLO_ELF),")
+    w("    (\"init\", INIT_ELF),")
+    w("    (\"inputread\", INPUTREAD_ELF),")
+    w("];")
     return "\n".join(o) + "\n"
 
 

@@ -1482,3 +1482,49 @@ not have, so it is refused rather than faked.
 PWR-026 is `tested-T1` and PWR-027 `tested-T2`; run
 [39620576799](https://github.com/NeXuS4Dev/NOLX/actions/runs/39620576799) on `528f4f4` passed all 19
 jobs. **M9 is not complete.**
+
+Then the interface a program can actually call. The Executive binding published
+`\Device\InputN` and gave each spawned process a handle to it, but ring 3 still had no way to
+*read* a device: `read(2)` went straight to the `tmpfs` descriptor table. The read path now
+exists, and it is deliberately thin, because the layer below it was already correct:
+
+* `open(2)` resolves the path as an **Executive** name. It is not a VFS inode: `stat`,
+  `readdir` and `unlink` should not have to answer questions about a keyboard. The DACL check
+  runs through the same object `open` the spawn path uses, so a refused token leaves no
+  descriptor behind, and any flag combination other than `O_RDONLY` is `EACCES`.
+* Each descriptor owns its **own** reader, bound to the device *incarnation* rather than the
+  name. Two processes that open the same device cannot steal each other's records, and a
+  device that disconnects and is replaced by a later `\Device\Input0` drains its own queue and
+  then returns zero bytes instead of resolving to whatever reused the name.
+* `read(2)` returns exactly one **eight-byte record**, defined in `nolx-input-core::wire`:
+  class, source, a 16-bit little-endian code (HID usage or button mask) and a 32-bit value
+  (1/0 for a key, signed `dx`/`dy` halves for a pointer, a saturating dropped count for a
+  resync). The record exists so a program can compare it byte for byte; the resync class is
+  what keeps a lost-record report from being mistaken for an event.
+* `close(2)` releases the reader, and a later `read(2)` on that number is `EBADF` rather than
+  falling through to the VFS. `exit` releases whatever the process still held, because a
+  reader outliving its process would queue records nobody can drain.
+* An empty queue is `EAGAIN`. It is *not* a blocking wait: sleeping on the device's auto-reset
+  waitable needs a scheduler transition the syscall path does not have yet, and pretending
+  otherwise would be worse than the honest poll. That remains open.
+
+The new ring-3 image `inputread` is the evidence, and it is written so it cannot pass by
+accident. It opens the device the kernel names in `argv[1]`, polls `read(2)` until a record
+arrives, requires the **press** record to carry class 1 (keyboard), source 1 (PS/2), a nonzero
+usage and value 1, then requires the **release** record to carry the same usage and value 0,
+closes the descriptor, and requires the next `read(2)` on it to be `EBADF`. Only then does it
+exit 42. The kernel records that status, counts the bytes the program wrote, and requires the
+descriptor table to be empty before it prints
+`NOLX: input read(2) T2: ring-3 open/read/close on the PS/2 keyboard device returned the
+injected press and release records`.
+
+The key itself is not fabricated by the kernel: `scripts/check-ps2-input.py --read-t2` waits for
+the phase's "send one key now" line and only then sends a QMP `send-key`, so the record travels
+the real path — i8042, IRQ1, the scancode decoder, the producer, the registry, the descriptor's
+reader, `read(2)`, ring 3. One sandbox limitation has to be stated rather than hidden: the QEMU
+built for this environment has **no display backend** (`-display help` lists only `none`), so
+`send-key` has no route into the i8042 and the existing `check-ps2-input.py` fails here for the
+same reason. The syscall path was therefore verified in this sandbox with the record published
+through the producer entry point instead of the IRQ (status 42, 48 bytes written, descriptor
+table empty, marker printed); the QMP-keyed fixture is what CI runs, and INP-007/INP-008 stay
+`pending-T2` until that run is green.

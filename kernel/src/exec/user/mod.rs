@@ -16,6 +16,7 @@
 //! the shape "the interrupted thread keeps its own stack; return the frame of the thread
 //! to run next" -- the contract M5's round-robin switch established.
 
+pub mod input;
 pub mod loader;
 pub mod selftest;
 
@@ -456,6 +457,9 @@ pub fn exit_current(status: i32) {
     // The handles die with the process, exactly as `ExitProcess` closes them. The count stays
     // in the slot as the record of what the spawn gave it, until a new process reuses the slot.
     release_input_handles(slot);
+    // Device descriptors release their reader queues first: a reader outliving its process would
+    // keep receiving records nobody can drain.
+    input::release_process(slot);
     let pid = table.processes[slot].pid;
 
     let parent = table.processes[slot].parent;
@@ -823,6 +827,22 @@ pub fn open_file(path_user: u64, flags: u32, mode: u32) -> Result<u64, i32> {
 
     let mut guard = USER_VFS.lock();
     let (vfs, ctx) = guard.as_mut().ok_or(nolx_types::errno::ENOENT)?;
+    // A device path is an Executive name, not a file: resolve it there and allocate an fd
+    // without involving the filesystem, so `stat`/`readdir` never have to describe it.
+    let Ok(device_path) = core::str::from_utf8(path.as_bytes()) else {
+        return Err(nolx_types::errno::ENOENT);
+    };
+    if input::is_device_path(device_path) {
+        if flags & 0o3 != nolx_types::abi::open_flags::O_RDONLY {
+            return Err(nolx_types::errno::EACCES);
+        }
+        let fd = ctx.fds.alloc(nolx_vfs::fd::Descriptor::new(u64::MAX))?;
+        if let Err(code) = input::open(slot, device_path, fd) {
+            let _ = ctx.fds.close(fd);
+            return Err(code);
+        }
+        return Ok(fd as u64);
+    }
     let fd = vfs.open(ctx, path.as_bytes(), flags, mode)?;
     TMPFS_EVIDENCE.lock().opens += 1;
     Ok(fd as u64)
@@ -830,6 +850,14 @@ pub fn open_file(path_user: u64, flags: u32, mode: u32) -> Result<u64, i32> {
 
 /// Ring-3 `close(fd)` backed by `USER_VFS`.
 pub fn close_file(fd: usize) -> Result<u64, i32> {
+    if let Some(slot) = TABLE.lock().current {
+        if input::close(slot, fd) {
+            let mut guard = USER_VFS.lock();
+            let (_, ctx) = guard.as_mut().ok_or(nolx_types::errno::EBADF)?;
+            ctx.fds.close(fd)?;
+            return Ok(0);
+        }
+    }
     let mut guard = USER_VFS.lock();
     let (vfs, ctx) = guard.as_mut().ok_or(nolx_types::errno::EBADF)?;
     vfs.close(ctx, fd)?;
@@ -874,6 +902,23 @@ pub fn read_file(fd: usize, user_buffer: u64, length: u64) -> Result<u64, i32> {
     let slot = TABLE.lock().current.ok_or(nolx_types::errno::ESRCH)?;
     // SAFETY: the calling thread's slot is live and its address space is active.
     let space = unsafe { space_of(slot) };
+    // A device descriptor reads one record per call, straight into the caller's buffer. The
+    // length is judged *before* the queue is touched: refusing a short buffer must not consume
+    // the record the caller was not able to receive.
+    if input::is_device_descriptor(slot, fd) {
+        let mut record = [0u8; nolx_input_core::wire::RECORD_BYTES];
+        if length < record.len() as u64 {
+            return Err(nolx_types::errno::EINVAL);
+        }
+        return match input::read(slot, fd)? {
+            input::ReadResult::Record(bytes) => {
+                record.copy_from_slice(&bytes);
+                loader::write_user(space, user_buffer, &record).map_err(load_error_code)?;
+                Ok(record.len() as u64)
+            }
+            input::ReadResult::Eof => Ok(0),
+        };
+    }
 
     let mut done = 0u64;
     let mut chunk = [0u8; 256];
