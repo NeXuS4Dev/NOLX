@@ -747,7 +747,18 @@ jobs:
       - name: Verify PC and Q35 boot-HID input, ring wrap and disconnect reclamation
         run: python3 scripts/check-usb-input.py 2>&1 | tee -a /tmp/job.log
       - name: Verify a USB 2.0 hub descriptor, route strings, hub-port hotplug and subtree teardown
-        run: python3 scripts/check-usb-input.py --hubs 2>&1 | tee -a /tmp/job.log
+        # Keep the fixture's stderr separate: the serial dump it prints on the way out fills any
+        # annotation built from the combined stream, and the assertion is what has to be read.
+        run: |
+          set +e
+          python3 scripts/check-usb-input.py --hubs > /tmp/hubs.out 2> /tmp/hubs.err
+          status=$?
+          cat /tmp/hubs.out >> /tmp/job.log
+          cat /tmp/hubs.err >> /tmp/job.log
+          if [ "$status" -ne 0 ]; then
+            python3 scripts/annotate-failure.py "hub fixture assertion" /tmp/hubs.err 3500
+          fi
+          exit "$status"
       - name: Reject misleading interrupt proof logs
         run: python3 -m unittest discover -s scripts -p 'test_xhci_irq_checks.py' 2>&1 | tee -a /tmp/job.log
       - name: Build interrupt observer image
