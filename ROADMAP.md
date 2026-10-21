@@ -1399,9 +1399,62 @@ without leaving a handle, a write open refused with `UnsupportedAccess`, idle �
 consumed → drained verified, two process handles installed and released, and the object's
 reference counts returning to 1 -> 1. The self test asserts each of those rather than printing
 markers, and asserts that nothing was published on a machine with no input device. INP-004 and
-INP-005 are `tested-T2`; the conformance database holds 410 assertions with none waiting for a
+INP-005 are `tested-T2`; the conformance database holds 414 assertions with none waiting for a
 T2 result. Not claimed: a `read(2)`-shaped syscall and a scheduler-blocking wait — the binding
 is the layer below them, and that interface remains an open M9 item along with link
 reprogramming beyond the verified segment-zero profile, nonzero-segment binding, USB
 hubs/SuperSpeed/hotplug, the remaining AML providers and device power/S3. **M9 is not
 complete.**
+
+### M9 firmware resource decoding (2026-10-21)
+
+Before the AML operation-region providers can be built, the resources a firmware method returns
+have to be read the way the firmware writes them. The catalog decoder had been written from the
+descriptor *shapes* rather than from a template: Word (0x88) and DWord (0x87) address-space
+descriptors were taken to carry their minimum one width earlier than they do, QWord windows were
+handled separately, and an extended interrupt descriptor (0x89, fourteen bytes for three lines)
+was confused with a twenty-three byte address window. A PC boot showed the cost: the PCI root's
+own `_CRS` was refused with `InvalidRange`, all six interrupt-link devices with `InvalidLength`,
+the floppy controller with `Unsupported(42)`, and `9 resource results, 8 refusals`.
+
+The layout was settled from data rather than memory. A booted PC's DSDT was dumped out of guest
+RAM through QMP `pmemsave` (8599 bytes at `0x1ffe0040`), and each `_CRS` buffer was walked
+descriptor by descriptor. The offsets that satisfy the specification's own postcondition — with a
+non-zero length, `_MAX` must equal `_MIN + _LEN - 1` — are unambiguous: the payload is resource
+type, general flags, type flags, then five width-sized values (granularity, minimum, maximum,
+translation, length), which is `3 + 5 * width` bytes, hence 13 / 23 / 43. Read that way the root's
+bus descriptor is 0..255 with a length of 256 and its I/O and memory windows land on the real
+hardware addresses; read one width earlier they collapse into `0..0xFF00` and fail their own
+check, which is exactly the noise the boot log showed.
+
+`parse_resources` now decodes all three width forms through one function, refuses subtractive
+decode, a non-zero granularity or a non-zero translation instead of flattening them into a plain
+range, requires the window's own consistency, and keeps I/O ranges 32-bit end to end so a full
+64 KiB window is not truncated. Two descriptor kinds that real firmware emits were missing and are
+now modelled: the extended interrupt descriptor (0x89) becomes an IRQ mask — its count must match
+its length, and a line above 63 is refused rather than truncated — and the DMA descriptor (0x2A)
+becomes a channel mask. The mask widened to 64 lines because a Q35 root port publishes GSIs 16 and
+above, which a 16-bit mask cannot hold.
+
+One consequence had to be handled with it: the PCI root bridge is itself a catalog device, and its
+`_CRS` lists the apertures it *produces*. Reserving those as if they were device reservations
+emptied the very pool they define, because a reservation that covers a pool's whole free list
+leaves nothing allocatable. The catalog now records the root bridge's identity and allocation
+skips it, printing `pci: \_SB_.PCI0 root _CRS apertures govern the pool, not reserved as device
+resources`.
+
+Evidence, all from this sandbox (QEMU 11.1.50) on this revision: 105 `nolx-power-core` host tests
+pass, including one that decodes the real 156-byte `\_SB.PCI0._CRS` and requires the strict
+host-bridge decoder to agree with it about the same bytes. The PC boot now reports
+`\_SB_.PCI0 _CRS evaluated and decoded: 7 resources`, one line per link device, `16 resource
+results, 1 refusals` (the remaining refusal is the unrelated HPET `_STA`), authorizes
+`128 INTx rows` and completes ring-3 execution; Q35 reports `27 resource results, 1 refusals`.
+The absent-device fixture (pc, q35), all four virtio-blk recovery profiles (two unchanged-media
+boots each, host-mounted files, CRC `0x9ea14b00`) and the AHCI/NVMe recovery paths pass on this
+revision. CI has not run on this revision yet, so PWR-022..PWR-025 are recorded as verified in the
+sandbox and pending CI.
+
+Still open, and the reason the operation-region checkbox stays unticked: the AML providers for
+SystemIO, SystemMemory and EmbeddedControl regions, write-permission gating for them, and the
+remaining host-bridge/link-device operations that need them. Decoding resources correctly is the
+prerequisite, not the gate. **M9 is not complete.**

@@ -572,7 +572,16 @@ pub fn prepare_resources(console: &mut dyn HalConsole) {
                 }
                 for index in 0..128 {
                     if let Some(device) = super::acpi::firmware_device(index) {
-                        if let Some(resources) = device.resources {
+                        // A root bridge's _CRS describes the apertures this pool is built from;
+                        // reserving it as a device reservation would empty the pool itself.
+                        if device.aperture {
+                            let _ = writeln!(
+                                console,
+                                "pci: {} root _CRS apertures govern the pool, not reserved as device resources",
+                                device.name()
+                            );
+                        }
+                        if let Some(resources) = device.resources.filter(|_| !device.aperture) {
                             for resource in resources.iter() {
                                 match resource {
                                     nolx_power_core::Resource::Memory { base, length } => {

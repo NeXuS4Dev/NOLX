@@ -211,12 +211,6 @@ pub fn reset(device: DeviceId) {
     SIGNALED[device.slot()].store(false, Ordering::Release);
 }
 
-/// Whether the device is ready, without consuming the readiness.
-#[must_use]
-pub fn is_ready(device: DeviceId) -> bool {
-    SIGNALED[device.slot()].load(Ordering::Acquire)
-}
-
 /// Find the ready input object behind one of `table`'s handles and consume its readiness.
 ///
 /// This is the auto-reset rule: the first waiter to see the signal clears it, so two waiters

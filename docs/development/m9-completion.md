@@ -126,6 +126,11 @@ segment-zero board profile and the broader open M9 gates below remain incomplete
       needed by PCI host-bridge/link-device methods; do not mistake a partial catalog for discovery.
       The read snapshot plus the `_SRS` byte-write backend now cover the verified PIIX/ICH9
       PIRQ fields on segment zero/root bus zero; general providers remain open.
+      The step before the providers is done: firmware resource templates now decode in the
+      firmware's own field order (Word/DWord/QWord windows, extended interrupts, DMA channels),
+      so the PC boot publishes 16 device templates instead of 9 (`PWR-022..PWR-025`, verified in
+      this sandbox, CI pending) and the root bridge's producer apertures are no longer reserved
+      as device resources. Operation regions themselves are still refused.
 - [x] Replace the fixed memory allocation aperture with evaluated root `_CRS` windows on
       the bounded PC/Q35 profile; ACPI refusal never selects the no-ACPI board fallback.
 - [ ] Consume evaluated link resources for PCI interrupt routing and complete general

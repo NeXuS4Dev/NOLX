@@ -186,6 +186,12 @@ pub struct FirmwareDevice {
     pub status: u32,
     /// Fully validated `_CRS`, present only for usable devices with successful evaluation.
     pub resources: Option<power::Resources>,
+    /// True for the PCI root bridge itself.
+    ///
+    /// A root bridge's `_CRS` lists the *apertures it produces*, not resources it consumes.
+    /// Reserving those as device reservations would collapse the allocator pool they define,
+    /// so consumers of this catalog skip them.
+    pub aperture: bool,
 }
 impl FirmwareDevice {
     /// Absolute AML namespace path.
@@ -405,6 +411,9 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
     if interrupt_model_ready && matches!(root_resources(), RootResourceState::Ready(_)) {
         super::pci_intx::evaluate(&namespace, &snapshot, &platform.madt, console);
     }
+    // The catalog keeps the root bridge's identity so consumers can tell a produced aperture
+    // from a consumed reservation.
+    let root = power::root::root_path(&namespace).ok();
     let mut retained = 0;
     let mut ready = 0;
     let mut refused = table_refusals;
@@ -480,6 +489,7 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
             length: 0,
             status,
             resources,
+            aperture: root.as_ref().is_some_and(|root| root == path),
         };
         if write!(&mut device, "{path}").is_err() {
             refused += 1;

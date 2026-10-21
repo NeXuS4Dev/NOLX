@@ -47,17 +47,45 @@ pub const MAX_RESOURCES: usize = 16;
 /// One resource a device uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Resource {
-    /// Interrupt lines, one bit each: bit `n` is IRQ `n`.
+    /// Interrupt lines, one bit each: bit `n` is line `n`.
+    ///
+    /// Sixty-four lines is what the mask holds. A small IRQ descriptor only reaches line 15; an
+    /// extended interrupt descriptor names its lines individually, and on a Q35 machine those
+    /// are the 16-and-above GSIs a PCIe root port publishes. A template that names a line this
+    /// mask cannot hold is refused rather than truncated.
     Irq {
-        /// The IRQ bitmask.
-        mask: u16,
+        /// The line bitmask.
+        mask: u64,
+    },
+    /// DMA channels, one bit each: bit `n` is channel `n`. A floppy controller publishes this
+    /// alongside its I/O ports and interrupt; it is reported, and consumers that reserve address
+    /// windows ignore it.
+    Dma {
+        /// The channel bitmask.
+        mask: u8,
     },
     /// A range of I/O ports.
+    ///
+    /// The range is 32-bit because a host bridge publishes its *whole* I/O window in one
+    /// descriptor, and that window is routinely larger than a byte can count. Device-level
+    /// descriptors still hand in 16-bit values; widening happens once, here, rather than at
+    /// every consumer.
     Io {
         /// The first port.
-        base: u16,
+        base: u32,
         /// How many ports.
-        length: u8,
+        length: u32,
+    },
+    /// A range of bus numbers, as a PCI host bridge publishes them.
+    ///
+    /// This is not something to reserve: it says which bus numbers the bridge's secondary side
+    /// may use, so a decoder that turned it into memory or I/O would be describing the wrong
+    /// thing. It is reported, and consumers that only reserve address windows ignore it.
+    BusNumber {
+        /// The first bus number.
+        start: u16,
+        /// The last bus number, inclusive.
+        end: u16,
     },
     /// A range of physical memory.
     Memory {
@@ -133,9 +161,15 @@ fn le(data: &[u8], at: usize, len: usize) -> Result<u64, ResourceError> {
 
 /// Decode a `_CRS` resource template up to and including its end tag.
 ///
-/// Small descriptors carry their length in the tag: IRQ (name 0x04), fixed I/O (0x09), and I/O
-/// port (0x08). Large descriptors carry a 16-bit length: Memory32Fixed (0x06) and QWord address
-/// space (0x0A), for memory resources only. Anything else is [`ResourceError::Unsupported`].
+/// Small descriptors carry their length in the tag: IRQ (0x22/0x23), DMA (0x2A), I/O port
+/// (0x47) and fixed I/O (0x4B). Large descriptors carry a 16-bit length: Memory32Fixed (0x86),
+/// the Word (0x88), DWord (0x87) and QWord (0x8A) address-space forms, and the extended
+/// interrupt form (0x89) that a PCI interrupt-link device uses to name its interrupt. Each form
+/// is decoded to what it means — a mask, an I/O window, a memory window, a bus range — and its
+/// values are checked for consistency before anything is reported.
+///
+/// The asymmetry is deliberate: a descriptor whose type or flags this crate does not model is
+/// refused rather than mistranslated, because a wrong window is worse than a missing one.
 ///
 /// # Errors
 ///
@@ -145,6 +179,9 @@ pub fn parse_resources(bytes: &[u8]) -> Result<Resources, ResourceError> {
     let mut at = 0usize;
     loop {
         let tag = *bytes.get(at).ok_or(ResourceError::NoEnd)?;
+        // A small-descriptor type code of 0x0D/0x0E is `Word Address Space` / `DWord Address
+        // Space`; the tag byte itself carries the length, so it is matched together with the
+        // small-descriptor IRQ and I/O forms below.
         let (body, len) = if tag & 0x80 == 0 {
             (at + 1, usize::from(tag & 7))
         } else {
@@ -154,10 +191,14 @@ pub fn parse_resources(bytes: &[u8]) -> Result<Resources, ResourceError> {
         let data = bytes.get(body..end).ok_or(ResourceError::Truncated)?;
         let valid_length = match tag {
             0x22 | 0x23 => len == 2 || len == 3,
+            0x2a => len == 2,
             0x47 => len == 7,
+            0x89 => len >= 6 && (len - 2) % 4 == 0,
             0x4b => len == 3,
             0x79 => len == 1,
             0x86 => len == 9,
+            0x87 => len == 23,
+            0x88 => len == 13,
             0x8a => len == 43,
             _ => return Err(ResourceError::Unsupported(tag)),
         };
@@ -175,8 +216,29 @@ pub fn parse_resources(bytes: &[u8]) -> Result<Resources, ResourceError> {
                 return Ok(out);
             }
             0x22 | 0x23 => out.push(Resource::Irq {
-                mask: le(data, 0, 2)? as u16,
+                mask: le(data, 0, 2)?,
             })?,
+            0x2a => out.push(Resource::Dma { mask: data[0] })?,
+            0x89 => {
+                // Extended interrupt: flags, count, then one 32-bit interrupt number each. A
+                // count of zero or a length that does not match the count is a malformed
+                // template rather than a different descriptor.
+                let count = usize::from(data[1]);
+                if count == 0 || len != 2 + count * 4 {
+                    return Err(ResourceError::InvalidLength);
+                }
+                let mut mask = 0u64;
+                for index in 0..count {
+                    let line = le(data, 2 + index * 4, 4)?;
+                    // Lines above 63 do not fit the mask this crate models; refusing is better
+                    // than publishing a mask that silently omits them.
+                    if line > 63 {
+                        return Err(ResourceError::Unsupported(tag));
+                    }
+                    mask |= 1 << line;
+                }
+                out.push(Resource::Irq { mask })?;
+            }
             0x47 | 0x4b => {
                 let offset = if tag == 0x47 { 1 } else { 0 };
                 let base = le(data, offset, 2)?;
@@ -188,39 +250,98 @@ pub fn parse_resources(bytes: &[u8]) -> Result<Resources, ResourceError> {
                     return Err(ResourceError::InvalidRange);
                 }
                 out.push(Resource::Io {
-                    base: base as u16,
-                    length,
+                    base: base as u32,
+                    length: u32::from(length),
                 })?;
             }
-            0x86 | 0x8a => {
-                let (base, length) = if tag == 0x86 {
-                    (le(data, 1, 4)?, le(data, 5, 4)?)
-                } else {
-                    if data[0] != 0 || le(data, 27, 8)? != 0 {
-                        return Err(ResourceError::Unsupported(tag));
-                    }
-                    let base = le(data, 11, 8)?;
-                    let length = le(data, 35, 8)?;
-                    if length == 0
-                        || base
-                            .checked_add(length - 1)
-                            .is_none_or(|end| end > le(data, 19, 8).unwrap_or(0))
-                    {
-                        return Err(ResourceError::InvalidRange);
-                    }
-                    (base, length)
-                };
+            0x86 => {
+                // Memory32Fixed: information byte (read/write, cacheable), base, length.
+                let info = data[0];
+                let base = le(data, 1, 4)?;
+                let length = le(data, 5, 4)?;
+                if info & !0x03 != 0 {
+                    return Err(ResourceError::Unsupported(tag));
+                }
                 if length == 0
                     || base.checked_add(length).is_none()
-                    || (tag == 0x86 && base + length > 0x1_0000_0000)
+                    || base + length > 0x1_0000_0000
                 {
                     return Err(ResourceError::InvalidRange);
                 }
                 out.push(Resource::Memory { base, length })?;
             }
+            0x87 | 0x88 | 0x8a => out.push(decode_address_space(tag, data)?)?,
             _ => return Err(ResourceError::Unsupported(tag)),
         }
         at = end;
+    }
+}
+
+/// Decode a Word (0x88), DWord (0x87) or QWord (0x8a) address-space descriptor.
+///
+/// Field order, as ACPI 6.x and every firmware template sampled from QEMU emits it: resource
+/// type, general flags, type-specific flags, then five width-sized values — granularity,
+/// minimum, maximum, translation offset, length. That is `3 + 5 * width` payload bytes, which is
+/// why the Word form is 13 bytes, the DWord form 23 and the QWord form 43. Reading the quadruple
+/// one width earlier (the obvious guess, since the first four fields are one byte each) turns the
+/// i440fx bus descriptor `02 0c 00 | 00 00 | 00 00 | 00 ff | 00 00 | 00 01` into the range
+/// 0..0xFF00 and fails its own consistency check; the layout here instead yields 0..0x00FF with a
+/// length of 256, which is what the firmware means.
+///
+/// Only fixed, positively-decoded, untranslated windows are accepted: a descriptor that asks for
+/// subtractive decode, a non-zero granularity or a non-zero translation offset says something
+/// this crate does not model, and is refused instead of being flattened into a plain range.
+///
+/// # Errors
+///
+/// [`ResourceError::InvalidRange`] for an empty, backwards, overflowing or internally
+/// inconsistent window (`_MAX` must be `_MIN + _LEN - 1`), and [`ResourceError::Unsupported`]
+/// for a flag combination or resource type this crate does not model.
+fn decode_address_space(tag: u8, data: &[u8]) -> Result<Resource, ResourceError> {
+    let width = match tag {
+        0x88 => 2usize,
+        0x87 => 4usize,
+        0x8a => 8usize,
+        _ => return Err(ResourceError::Unsupported(tag)),
+    };
+    let resource_type = *data.first().ok_or(ResourceError::Truncated)?;
+    let general_flags = *data.get(1).ok_or(ResourceError::Truncated)?;
+    let type_flags = *data.get(2).ok_or(ResourceError::Truncated)?;
+    let granularity = le(data, 3, width)?;
+    let min = le(data, 3 + width, width)?;
+    let max = le(data, 3 + 2 * width, width)?;
+    let translation = le(data, 3 + 3 * width, width)?;
+    let length = le(data, 3 + 4 * width, width)?;
+
+    // General flags: bit 0 usage (producer or consumer), bit 1 subtractive decode, bits 2 and 3
+    // "minimum is fixed" and "maximum is fixed". Consumers of this crate reserve windows either
+    // way, so bit 0 is not refused; subtractive decode and a non-fixed bound are.
+    if general_flags & !1 != 0x0c || granularity != 0 || translation != 0 {
+        return Err(ResourceError::Unsupported(tag));
+    }
+    if length == 0 || min > max || min.checked_add(length).is_none() || min + length - 1 != max {
+        return Err(ResourceError::InvalidRange);
+    }
+    match resource_type {
+        // Memory: the three defined type-specific bits (read/write, cacheable, range type).
+        0 if type_flags & !0x07 == 0 => Ok(Resource::Memory { base: min, length }),
+        // I/O ports: type-specific flags are the decode width. 16-bit decode is what a host
+        // bridge publishes and what a device in the first 64 KiB uses; QEMU also emits 10-bit
+        // decode for legacy ISA ranges. Both are real; 0 and 2 are reserved encodings.
+        1 if matches!(type_flags, 0x01 | 0x03) => {
+            let base = u32::try_from(min).map_err(|_| ResourceError::InvalidRange)?;
+            let length = u32::try_from(length).map_err(|_| ResourceError::InvalidRange)?;
+            Ok(Resource::Io { base, length })
+        }
+        // Bus numbers: an inclusive range, no type-specific flags defined.
+        2 if type_flags == 0 => {
+            let end = max.min(u64::from(u16::MAX));
+            Ok(Resource::BusNumber {
+                start: min as u16,
+                end: end as u16,
+            })
+        }
+        _ => Err(ResourceError::Unsupported(resource_type)),
     }
 }
 

@@ -65,19 +65,29 @@ fn a_fixed_io_and_a_fixed_memory_descriptor_are_decoded() {
 
 #[test]
 fn a_qword_memory_descriptor_takes_its_minimum_and_length() {
-    // QWord address space, type 0 (memory): tag 0x8A, length 43.
-    let mut qword = vec![0x8A, 43, 0x00, 0x00, 0x00, 0x00];
-    qword.extend_from_slice(&0u64.to_le_bytes()); // granularity
-    qword.extend_from_slice(&0x1_0000_0000u64.to_le_bytes()); // minimum
-    qword.extend_from_slice(&0x1_0000_1FFFu64.to_le_bytes()); // maximum
-    qword.extend_from_slice(&0u64.to_le_bytes()); // translation
-    qword.extend_from_slice(&0x2000u64.to_le_bytes()); // length
-    qword.extend_from_slice(&[0x79, 0x00]);
+    /// A QWord Address Space descriptor: tag 0x8A, forty-three payload bytes, laid out as
+    /// type, general flags, type flags, then granularity, minimum, maximum, translation and
+    /// length, each eight bytes wide.
+    fn qword(resource_type: u8, min: u64, max: u64, length: u64) -> Vec<u8> {
+        let mut out = vec![0x8A, 43, 0x00, resource_type, 0x0c, 0x03];
+        out.extend_from_slice(&0u64.to_le_bytes()); // granularity
+        out.extend_from_slice(&min.to_le_bytes());
+        out.extend_from_slice(&max.to_le_bytes());
+        out.extend_from_slice(&0u64.to_le_bytes()); // translation
+        out.extend_from_slice(&length.to_le_bytes());
+        out.extend_from_slice(&[0x79, 0x00]);
+        out
+    }
+
+    // The window above 4 GiB that the host bridge publishes.
     assert_eq!(
-        parse_resources(&qword).unwrap().iter().collect::<Vec<_>>(),
+        parse_resources(&qword(0, 0x1_0000_0000, 0x1_7FFF_FFFF, 0x8000_0000))
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
         [Resource::Memory {
             base: 0x1_0000_0000,
-            length: 0x2000
+            length: 0x8000_0000
         }]
     );
 }
@@ -96,10 +106,10 @@ fn a_template_without_an_end_tag_or_cut_short_is_refused() {
 
 #[test]
 fn an_unknown_descriptor_is_refused_and_named() {
-    // Name 5 (DMA), two bytes: tag 0x2A.
+    // Small-descriptor name 6 is reserved: tag 0x32, two bytes.
     assert_eq!(
-        parse_resources(&[0x2A, 0x01, 0x00, 0x79, 0x00]),
-        Err(ResourceError::Unsupported(0x2A))
+        parse_resources(&[0x32, 0x01, 0x00, 0x79, 0x00]),
+        Err(ResourceError::Unsupported(0x32))
     );
 }
 
@@ -294,4 +304,279 @@ fn every_truncation_of_a_resource_template_is_refused() {
         assert!(parse_resources(&bytes[..end]).is_err());
     }
     assert_eq!(parse_resources(&bytes).unwrap().len(), 2);
+}
+
+#[test]
+fn a_word_address_space_descriptor_is_decoded_for_memory_io_and_bus_numbers() {
+    /// A Word Address Space descriptor: tag 0x88, thirteen payload bytes — resource type,
+    /// general flags, type flags, then five two-byte values (granularity, minimum, maximum,
+    /// translation, length). This is the layout QEMU's DSDT uses for the PCI root's bus range
+    /// and its two I/O windows; see `a_real_host_bridge_resource_template_decodes`.
+    fn word(resource_type: u8, flags: u8, min: u16, max: u16, length: u16) -> Vec<u8> {
+        let mut out = vec![0x88, 13, 0x00, resource_type, 0x0c, flags];
+        out.extend_from_slice(&0u16.to_le_bytes()); // granularity
+        out.extend_from_slice(&min.to_le_bytes());
+        out.extend_from_slice(&max.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // translation
+        out.extend_from_slice(&length.to_le_bytes());
+        out.extend_from_slice(&[0x79, 0x00]);
+        out
+    }
+
+    assert_eq!(
+        parse_resources(&word(0, 0x03, 0xE000, 0xE0FF, 0x100))
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
+        [Resource::Memory {
+            base: 0xE000,
+            length: 0x100
+        }]
+    );
+    assert_eq!(
+        parse_resources(&word(1, 0x03, 0x0300, 0x03FF, 0x100))
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
+        [Resource::Io {
+            base: 0x0300,
+            length: 0x100
+        }]
+    );
+    // A host bridge publishes its secondary bus range this way: type 2, no type flags, and a
+    // length of 256 for the 0..255 inclusive range.
+    assert_eq!(
+        parse_resources(&word(2, 0x00, 0x00, 0xFF, 0x100))
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
+        [Resource::BusNumber {
+            start: 0x00,
+            end: 0xFF
+        }]
+    );
+    // Subtractive decode is not modelled, so it is refused rather than flattened into a range.
+    let mut subtractive = word(1, 0x03, 0x0300, 0x03FF, 0x100);
+    subtractive[4] = 0x0e;
+    assert_eq!(
+        parse_resources(&subtractive),
+        Err(ResourceError::Unsupported(0x88))
+    );
+    // Neither is a translated window: minimum and maximum would no longer be addresses here.
+    let mut translated = word(1, 0x03, 0x0300, 0x03FF, 0x100);
+    translated[12] = 0x01;
+    assert_eq!(
+        parse_resources(&translated),
+        Err(ResourceError::Unsupported(0x88))
+    );
+}
+
+#[test]
+fn a_dword_address_space_descriptor_takes_the_whole_io_window() {
+    /// A DWord Address Space descriptor: tag 0x87, twenty-three payload bytes.
+    fn dword(resource_type: u8, flags: u8, min: u32, max: u32, length: u32) -> Vec<u8> {
+        let mut out = vec![0x87, 23, 0x00, resource_type, 0x0c, flags];
+        out.extend_from_slice(&0u32.to_le_bytes()); // granularity
+        out.extend_from_slice(&min.to_le_bytes());
+        out.extend_from_slice(&max.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes()); // translation
+        out.extend_from_slice(&length.to_le_bytes());
+        out.extend_from_slice(&[0x79, 0x00]);
+        out
+    }
+
+    // The I/O window a host bridge really publishes is wider than a byte can count: this is the
+    // case an 8-bit length would silently truncate.
+    assert_eq!(
+        parse_resources(&dword(1, 0x03, 0x0000, 0xFFFF, 0x1_0000))
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
+        [Resource::Io {
+            base: 0x0000,
+            length: 0x1_0000
+        }]
+    );
+    assert_eq!(
+        parse_resources(&dword(0, 0x03, 0x8000_0000, 0x8FFF_FFFF, 0x1000_0000))
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
+        [Resource::Memory {
+            base: 0x8000_0000,
+            length: 0x1000_0000
+        }]
+    );
+}
+
+#[test]
+fn an_address_space_descriptor_with_an_inconsistent_window_is_refused() {
+    /// The same DWord shape with a chosen payload and a lie about the tag's length.
+    fn dword_with(resource_type: u8, min: u32, max: u32, length: u32, len_byte: u8) -> Vec<u8> {
+        let mut out = vec![0x87, len_byte, 0x00, resource_type, 0x0c, 0x03];
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&min.to_le_bytes());
+        out.extend_from_slice(&max.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&length.to_le_bytes());
+        out.extend_from_slice(&[0x79, 0x00]);
+        out
+    }
+
+    // A window that claims more than its own maximum is lying about one of the two.
+    assert_eq!(
+        parse_resources(&dword_with(0, 0x1000, 0x1FFF, 0x2000, 23)),
+        Err(ResourceError::InvalidRange)
+    );
+    // An empty window is not a resource.
+    assert_eq!(
+        parse_resources(&dword_with(0, 0x1000, 0x1FFF, 0, 23)),
+        Err(ResourceError::InvalidRange)
+    );
+    // Minimum above maximum is backwards.
+    assert_eq!(
+        parse_resources(&dword_with(2, 0x20, 0x10, 0x100, 23)),
+        Err(ResourceError::InvalidRange)
+    );
+    // Device-specific (0xC0…0xFF) and extended (0x80…) types are refused, not coerced.
+    assert_eq!(
+        parse_resources(&dword_with(0xC0, 0, 0xFF, 0x100, 23)),
+        Err(ResourceError::Unsupported(0xC0))
+    );
+    // The tag carries a fixed length; a template that disagrees is malformed.
+    assert_eq!(
+        parse_resources(&dword_with(0, 0x1000, 0x1FFF, 0x1000, 24)),
+        Err(ResourceError::InvalidLength)
+    );
+}
+
+#[test]
+fn an_extended_interrupt_descriptor_becomes_an_irq_mask() {
+    /// An extended interrupt descriptor: flags, count, then 32-bit interrupt numbers.
+    fn extended(flags: u8, lines: &[u32]) -> Vec<u8> {
+        let length = 2 + lines.len() * 4;
+        let mut out = vec![0x89, length as u8, 0x00, flags, lines.len() as u8];
+        for line in lines {
+            out.extend_from_slice(&line.to_le_bytes());
+        }
+        out.extend_from_slice(&[0x79, 0x00]);
+        out
+    }
+
+    // What QEMU's interrupt-link devices return from `_CRS`: one shared, consumer interrupt.
+    assert_eq!(
+        parse_resources(&extended(0x09, &[5]))
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
+        [Resource::Irq { mask: 1 << 5 }]
+    );
+    // And the three-line form the same devices carry in `_PRS` (5, 10, 11).
+    assert_eq!(
+        parse_resources(&extended(0x09, &[5, 10, 11]))
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
+        [Resource::Irq {
+            mask: (1 << 5) | (1 << 10) | (1 << 11)
+        }]
+    );
+    // A count that disagrees with the length is malformed, and a line this crate cannot
+    // represent in its 16-bit mask is refused rather than dropped.
+    assert_eq!(
+        parse_resources(&[0x89, 0x07, 0x00, 0x09, 0x02, 5, 0, 0, 0, 0x79, 0x00]),
+        Err(ResourceError::InvalidLength)
+    );
+    // A Q35 root port's GSI link device names a line above the 16 a small IRQ descriptor can
+    // reach, so the mask is wider than that descriptor's.
+    assert_eq!(
+        parse_resources(&extended(0x09, &[16]))
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
+        [Resource::Irq { mask: 1 << 16 }]
+    );
+    assert_eq!(
+        parse_resources(&extended(0x09, &[64])),
+        Err(ResourceError::Unsupported(0x89))
+    );
+}
+
+#[test]
+fn a_dma_descriptor_becomes_a_channel_mask() {
+    // The floppy controller publishes DMA channel 2 with no transfer-type bits set.
+    assert_eq!(
+        parse_resources(&[0x2A, 0x04, 0x00, 0x79, 0x00])
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
+        [Resource::Dma { mask: 0x04 }]
+    );
+}
+
+#[test]
+fn a_real_host_bridge_resource_template_decodes() {
+    /// The PCI root's `_CRS` exactly as QEMU's i440fx firmware returns it, dumped from the DSDT
+    /// of a booted machine (156 bytes): a bus range, the fixed 0xCF8 configuration window, two
+    /// I/O windows, a DWord window over the 640 KiB-1 MiB hole, a DWord window over the PCI
+    /// aperture, and the QWord window above 4 GiB.
+    const PCI0_CRS: [u8; 156] = [
+        0x88, 0x0d, 0x00, 0x02, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00,
+        0x01, 0x47, 0x01, 0xf8, 0x0c, 0xf8, 0x0c, 0x01, 0x08, 0x88, 0x0d, 0x00, 0x01, 0x0c, 0x03,
+        0x00, 0x00, 0x00, 0x00, 0xf7, 0x0c, 0x00, 0x00, 0xf8, 0x0c, 0x88, 0x0d, 0x00, 0x01, 0x0c,
+        0x03, 0x00, 0x00, 0x00, 0x0d, 0xff, 0xff, 0x00, 0x00, 0x00, 0xf3, 0x87, 0x17, 0x00, 0x00,
+        0x0c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x00, 0xff, 0xff, 0x0b, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x87, 0x17, 0x00, 0x00, 0x0c, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0xff, 0xff, 0xbf, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0xc0, 0xde, 0x8a, 0x2b, 0x00, 0x00, 0x0c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0x7f, 0x01,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
+        0x00, 0x00, 0x00, 0x00, 0x79, 0x00,
+    ];
+
+    assert_eq!(
+        parse_resources(&PCI0_CRS)
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
+        [
+            Resource::BusNumber {
+                start: 0,
+                end: 0xFF
+            },
+            Resource::Io {
+                base: 0x0CF8,
+                length: 8
+            },
+            Resource::Io {
+                base: 0x0000,
+                length: 0x0CF8
+            },
+            Resource::Io {
+                base: 0x0D00,
+                length: 0xF300
+            },
+            Resource::Memory {
+                base: 0x000A_0000,
+                length: 0x2_0000
+            },
+            Resource::Memory {
+                base: 0x2000_0000,
+                length: 0xDEC0_0000
+            },
+            Resource::Memory {
+                base: 0x1_0000_0000,
+                length: 0x8000_0000
+            },
+        ]
+    );
+
+    // The strict host-bridge decoder reads the same bytes the same way: both see one bus range
+    // and the same fixed, positively-decoded, untranslated windows.
+    let root = crate::root::parse(&PCI0_CRS).expect("root decoder accepts the same template");
+    let windows: Vec<_> = root.iter().collect();
+    assert_eq!(windows.len(), 7);
+    assert!(windows
+        .iter()
+        .any(|w| w.space == crate::root::Space::Bus && w.start == 0 && w.end == 256));
 }
