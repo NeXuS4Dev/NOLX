@@ -35,10 +35,29 @@ use crate::sync::{IrqMutex, SyncCell};
 /// The fixed number of user processes the table holds.
 pub const MAX_USER_PROCESSES: usize = 4;
 
-/// Kernel stack size per user thread: the entry stubs build a full frame here, and the
-/// loader runs on it with its load plan -- 32 KiB so a spawn can never borrow against the
-/// statics that sit below the stack.
-pub const KERNEL_STACK_SIZE: usize = 32 * 1024;
+/// Kernel stack size per user thread.
+///
+/// A spawn is not a shallow call: it takes the process table lock, builds a PTE store, copies
+/// the kernel half of a PML4 and writes a fresh `VadTree` -- and that tree alone is
+/// `SPACE_NODES` descriptors, about 26 KiB of temporary when it is materialised by value. Four
+/// slots at 32 KiB left a nested spawn (a ring-3 parent creating its child) with under 6 KiB of
+/// headroom, which is how a 26 KiB frame once ran off the top of slot 0 and overwrote the block
+/// layer's binding table. 128 KiB keeps a whole tree temporary at a fifth of the stack; the
+/// sentinels below make the next such mistake loud instead of silent.
+pub const KERNEL_STACK_SIZE: usize = 128 * 1024;
+
+/// The sentinel word repeated in the guard bands on both ends of a [`KernelStack`].
+pub const STACK_GUARD: u64 = 0x4E4F_4C58_5354_4143; // "NOLXSTAC"
+
+/// How many sentinel words each guard band holds: 512 words, 4 KiB.
+///
+/// Both ends are banded. The processor's stack grows down, but a *materialised* temporary can
+/// also be written past the top when a large frame is built before the stack pointer is
+/// lowered -- exactly what the hardware watchpoint caught, where the overwriting `memcpy`
+/// started 0x30 bytes above the top of the stack. A band narrower than that offset would be
+/// stepped straight over, so the band is a whole page's worth: a run-off has to be shifted by
+/// more than 4 KiB to escape, and by then it has already destroyed the band it skipped.
+pub const STACK_GUARD_WORDS: usize = 512;
 
 /// User stack size, committed eagerly for the initial image and growable below.
 pub const USER_STACK_SIZE: u64 = 64 * 1024;
@@ -155,12 +174,53 @@ static SPACES: [SyncCell<MaybeUninit<Space>>; MAX_USER_PROCESSES] =
     [const { SyncCell::new(MaybeUninit::uninit()) }; MAX_USER_PROCESSES];
 
 /// A ring-0 stack per process slot, holding the entry frame the stubs edit.
+///
+/// The body is banded by [`STACK_GUARD_WORDS`] sentinels on both sides, so a frame that runs
+/// off either end hits a sentinel instead of an unrelated static in .bss. [`KernelStack::top`]
+/// returns the address the stack pointer starts at, and [`KernelStack::guard_intact`] reads the
+/// bands back.
 #[repr(C, align(16))]
-pub struct KernelStack(pub [u8; KERNEL_STACK_SIZE]);
+pub struct KernelStack {
+    low_guard: [u64; STACK_GUARD_WORDS],
+    body: [u8; KERNEL_STACK_SIZE],
+    high_guard: [u64; STACK_GUARD_WORDS],
+}
+
+impl KernelStack {
+    const fn empty() -> Self {
+        Self {
+            low_guard: [STACK_GUARD; STACK_GUARD_WORDS],
+            body: [0; KERNEL_STACK_SIZE],
+            high_guard: [STACK_GUARD; STACK_GUARD_WORDS],
+        }
+    }
+
+    /// The address the stack pointer starts at: the first byte after the stack body.
+    fn top(&mut self) -> u64 {
+        // SAFETY: the body is exactly `KERNEL_STACK_SIZE` bytes of this object, and the pointer
+        // is formed from the field itself rather than from a guess about layout.
+        let base = core::ptr::addr_of_mut!(self.body).cast::<u8>() as u64;
+        base + KERNEL_STACK_SIZE as u64
+    }
+
+    /// Whether every sentinel word in both bands still holds [`STACK_GUARD`].
+    fn guard_intact(&self) -> bool {
+        self.low_guard
+            .iter()
+            .chain(self.high_guard.iter())
+            .all(|word| *word == STACK_GUARD)
+    }
+
+    /// Re-arm both bands, for a slot being reused by a new process.
+    fn rearm(&mut self) {
+        self.low_guard = [STACK_GUARD; STACK_GUARD_WORDS];
+        self.high_guard = [STACK_GUARD; STACK_GUARD_WORDS];
+    }
+}
 
 /// Stable kernel-stack storage for each process slot.
 static KERNEL_STACKS: [SyncCell<KernelStack>; MAX_USER_PROCESSES] =
-    [const { SyncCell::new(KernelStack([0; KERNEL_STACK_SIZE])) }; MAX_USER_PROCESSES];
+    [const { SyncCell::new(KernelStack::empty()) }; MAX_USER_PROCESSES];
 
 /// The address space of `slot`, as a mutable borrow of stable storage.
 ///
@@ -317,6 +377,26 @@ pub fn process_status(pid: u64) -> Option<(bool, i32, u64)> {
     })
 }
 
+/// Panic if the running process's kernel stack ran past its sentinels.
+///
+/// The kernel stack is the one place a deep call tree can silently destroy unrelated kernel
+/// state: .bss follows every stack, so an overflow lands on whatever the linker put next.
+/// Checking the sentinels costs four comparisons on the exit path and turns that into an
+/// immediate, named failure.
+fn check_stack_guard() {
+    let table = TABLE.lock();
+    let Some(slot) = table.current else {
+        return;
+    };
+    // SAFETY: the slot is the running one, so its stack is exclusively owned by this thread
+    // and the shared borrow lasts no longer than this check.
+    let stack = unsafe { &*KERNEL_STACKS[slot].get() };
+    assert!(
+        stack.guard_intact(),
+        "the kernel stack of process slot {slot} overflowed into .bss"
+    );
+}
+
 /// Terminate the calling process: POSIX `exit`, minus the library's flushing.
 ///
 /// The frame switch itself happens in [`on_syscall`], which sees the zombie and parks the
@@ -324,6 +404,9 @@ pub fn process_status(pid: u64) -> Option<(bool, i32, u64)> {
 /// kept, and a parent blocked in `waitid` is woken with its result already written into
 /// its own frame and address space.
 pub fn exit_current(status: i32) {
+    // A process that exits is the last moment its kernel stack is still the one it ran on, so
+    // this is where an overflow is caught before the slot is reused.
+    check_stack_guard();
     let mut table = TABLE.lock();
     let Some(slot) = table.current else {
         return;
@@ -571,12 +654,26 @@ fn spawn_impl(
     let place = unsafe { &mut *SPACES[slot].get() };
     let space = space::AddressSpace::create_in_place(place).ok_or(SetupError::AddressSpace)?;
 
+    // Creating a space writes a `VadTree` descriptor array of tens of kilobytes, and the
+    // caller's own kernel stack is what it is written through. Check the caller's sentinels
+    // *here*, while the damage is still attributable, instead of discovering it later as an
+    // unrelated subsystem that stopped answering.
+    if let Some(caller) = table.current {
+        // SAFETY: the calling thread owns its slot's stack for as long as it runs.
+        let caller_stack = unsafe { &*KERNEL_STACKS[caller].get() };
+        assert!(
+            caller_stack.guard_intact(),
+            "spawn from process slot {caller} overflowed its kernel stack"
+        );
+    }
+
     let entry = loader::load(space, image, path, argv).map_err(SetupError::Load)?;
 
     // SAFETY: the slot is free; its kernel stack is exclusively this thread's until the
     // slot is released.
     let stack = unsafe { &mut *KERNEL_STACKS[slot].get() };
-    let stack_top = core::ptr::from_mut(stack).cast::<u8>() as u64 + KERNEL_STACK_SIZE as u64;
+    stack.rearm();
+    let stack_top = stack.top();
     let frame = initialize_user_stack(stack_top, entry.rip, entry.rsp);
 
     let thread_id = ThreadId::new(FIRST_USER_THREAD + slot as u64);

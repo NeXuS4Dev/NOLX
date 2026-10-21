@@ -53,13 +53,14 @@ if [[ ! -w "$PREFIX_PARENT" ]]; then
 fi
 
 echo "Extracting to $RUST_PREFIX..."
-"${WRITE_CMD[@]}" "RUST_PREFIX='$RUST_PREFIX' python3 -" <<'PY'
+"${WRITE_CMD[@]}" "RUST_PREFIX='$RUST_PREFIX' python3 -" <<'PYEXTRACT'
 import os
 import pathlib
 import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 
 target = pathlib.Path(os.environ["RUST_PREFIX"])
 target.mkdir(parents=True, exist_ok=True)
@@ -78,29 +79,57 @@ for package in ("arena_rust_toolchain_data1", "arena_rust_toolchain_data2",
 if not parts:
     raise SystemExit("no toolchain payload parts were installed")
 
-combined = pathlib.Path("/tmp/nolx-toolchain.tar.zst")
+combined = pathlib.Path(tempfile.mkdtemp()) / "toolchain.tar.zst"
 with open(combined, "wb") as output:
     for part in parts:
         with open(part, "rb") as source:
             shutil.copyfileobj(source, output, length=1024 * 1024)
 
+# Decompress to a real tar file. Both the `zstd` binary and the Python module are accepted,
+# and the module is installed from the same index when a minimal image has neither.
+plain = combined.with_suffix("")
 if shutil.which("zstd"):
-    with open(combined, "rb") as source, \
-            subprocess.Popen(["zstd", "-d", "-c"], stdin=source,
-                             stdout=subprocess.PIPE) as zstd, \
-            tarfile.open(fileobj=zstd.stdout, mode="r|") as archive:
-        archive.extractall(target)
+    with open(combined, "rb") as source, open(plain, "wb") as output:
+        subprocess.run(["zstd", "-d", "-q", "-c"], stdin=source, stdout=output, check=True)
 else:
     try:
         import zstandard
     except ImportError:
-        raise SystemExit("neither `zstd` nor the `zstandard` module is available")
+        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
+                        "--break-system-packages", "zstandard"], check=True)
+        import zstandard
     with open(combined, "rb") as source, \
             zstandard.ZstdDecompressor().stream_reader(source) as reader, \
-            tarfile.open(fileobj=reader, mode="r|") as archive:
-        archive.extractall(target)
-combined.unlink(missing_ok=True)
-PY
+            open(plain, "wb") as output:
+        shutil.copyfileobj(reader, output, length=1024 * 1024)
+
+# The payload is an archive of a `prefix/` tree (the same layout rustup installs), and it may
+# carry macOS AppleDouble `._` files. Extract to a scratch directory first, then move the one
+# useful top-level directory into place: extracting straight into `target` produced
+# <prefix>/prefix/bin/cargo, which the verification below (correctly) rejected.
+scratch = pathlib.Path(tempfile.mkdtemp())
+with tarfile.open(plain, "r:") as archive:
+    members = [m for m in archive.getmembers() if not os.path.basename(m.name).startswith("._")]
+    archive.extractall(scratch, members=members)
+
+entries = [entry for entry in scratch.iterdir() if not entry.name.startswith("._")]
+root = scratch
+if len(entries) == 1 and entries[0].is_dir() and (entries[0] / "bin").is_dir():
+    root = entries[0]
+for entry in root.iterdir():
+    if entry.name.startswith("._"):
+        continue
+    destination = target / entry.name
+    if destination.exists():
+        if destination.is_dir():
+            shutil.rmtree(destination)
+        else:
+            destination.unlink()
+    shutil.move(str(entry), str(destination))
+
+shutil.rmtree(scratch, ignore_errors=True)
+combined.parent and shutil.rmtree(combined.parent, ignore_errors=True)
+PYEXTRACT
 
 # ---------------------------------------------------------------------------
 # 3. Verify. A script that prints success without a compiler is worse than one

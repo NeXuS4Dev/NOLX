@@ -1688,68 +1688,69 @@ bindings, remaining AML operation-region providers, device power policy and S3. 
 complete.**
 
 
-## Known red CI jobs and their diagnosis (2026-10-21)
+## The seven red CI jobs: kernel-stack overflow in `spawn` (2026-10-21)
 
-Seven jobs were already failing on `main` before the M9 exhaustion work began, and they fail
-identically on this branch: *Native PCI BAR and nested bridge resource recovery*,
-*Multi-controller storage identity and lifecycle*, *ACPI S5, six-driver shutdown and
-fail-closed DMA refusal*, *AHCI and NVMe checked failure recovery*, *Multi-adapter network wire
-identity and lifecycle*, *Persistent five-driver hardware lifecycle*, and *Virtio-blk checked
-failure recovery*. They first failed on `8036bf7b` (the self-contained bootstrap change) while
-`39406985079` on `ab2a8d05` had zero failures, so the trigger is that revision, not any
-fixture in this checkpoint; the only functional changes in it were Clippy-only rewrites and
-the toolchain pin moving from 1.88.0 to 1.97.0.
+Seven jobs were failing on `8036bf7b` and on every revision after it: *Native PCI BAR and
+nested bridge resource recovery*, *Multi-controller storage identity and lifecycle*, *ACPI S5,
+six-driver shutdown and fail-closed DMA refusal*, *AHCI and NVMe checked failure recovery*,
+*Multi-adapter network wire identity and lifecycle*, *Persistent five-driver hardware
+lifecycle*, and *Virtio-blk checked failure recovery*. Run
+[39406985079](https://github.com/NeXuS4Dev/NOLX/actions/runs/39406985079) on `ab2a8d05` had
+zero failures, so the regression arrived with `8036bf7b`.
 
-The CI logs cannot be fetched from this environment, but the `report-failure` action posts
-each failing job's serial log as a pull-request comment, which is readable. That shows the
-first network job step now failing is the e1000 recovery fixture (`recovery.rs:180`,
-`driver_start::start(dev).unwrap()` → `Err(OpFailed)`, immediately after
-`recovered(dev, …)` and `e1000-recovery: exchange=0`): a start that re-acquires the shared
-GSI route after a checked stop is refused. The same fixture passed on `ab2a8d05`, whose
-`e1000/recovery.rs` is unchanged except for Clippy rewrites, so this is the 1.97.0 toolchain
-bump changing behaviour rather than a functional edit in this checkpoint.
+The fixtures failed **silently**: a boot reached its first block request and then hung, with no
+panic, no exception and no output at all — which is why the CI logs looked like a timeout
+rather than a fault. The cause was found by bisecting inside the failing boot with QEMU
+hardware watchpoints and QMP memory dumps, and it is a stack overflow:
 
-The virtio-blk half of the same class was reproduced locally and instrumented:
+* `spawn_impl` runs on the **calling process's 32 KiB kernel stack**. It calls
+  `AddressSpace::create_in_place`, which initialises the space field by field — except for the
+  VAD tree, written as `addr_of_mut!((*space).vads).write(VadTree::new(…))`. That argument is
+  materialised as a by-value temporary: `SPACE_NODES = 256` descriptors, 0x6800 bytes, about
+  26 KiB of stack.
+* A hardware watchpoint on the *virtual* address of the `blockdev::BINDINGS` mutex word
+  reported the offending writes, both from `memcpy+0x8` called by
+  `AddressSpace::create_in_place`: `rdx = 0x6800` bytes copied **upwards from 0x30 bytes above
+  the top of slot 0's kernel stack**, i.e. straight into `.bss`.
+* QMP dumps of the whole `BINDINGS` object taken before and after the ring-3 window show
+  exactly eight bytes changed: the mutex word (`0 -> 1`) and five binding records. Every later
+  block request then spins at the `lock cmpxchg` of `blockdev::device` with interrupts masked —
+  the fixture's "hang". The ring-3 test itself uses a `tmpfs`, so it never touches the block
+  layer: the damage is done by the *spawn*, not by anything the test asks for.
+* The `.bss` neighbourhood explains why the failure looked network- and power-shaped as well:
+  `virtio_*`, `pci`, `tables` and the e1000 fixture's `REFUSALS`/`MODE` statics sit in the same
+  region. The previously recorded `e1000/recovery.rs` `Err(OpFailed)` panic is consistent with
+  a corrupted fixture state rather than a route re-acquisition bug.
 
-* `hal-virtio-blk-recovery-test` on PC with QEMU 11.1.50 reaches
-  `virtio-blk-recovery: transport target=transitional peer=modern` and then hangs — not a panic.
-* Markers placed around every step localise the hang to the first call that touches the block
-  binding table (they narrow it to `blockdev::device`, which is
-  `BINDINGS.lock().0.find(handle)`).
-* An RSP watchpoint on the lock word (`BINDINGS` + 0x230, the compiler's field order) shows the
-  byte at 1 while the CPU spins at the `lock cmpxchg` in `blockdev::device`, with interrupts
-  masked. The guard is genuinely never released; this is not a stale read.
-* Probes after each boot phase show the lock healthy during initialization, during the
-  kernel-thread round robin and at the first idle-loop iteration, and already held when the
-  ring-3 user-mode test reports completion. The window that breaks it is the M6 user-mode test.
+Fix (this revision):
 
-Further local work on the default image (which is affected as well — the block binding table
-is unusable after the user-mode test there too, so this is not a test-feature problem) shows
-the corruption directly: dumping the whole `BINDINGS` object before and after the user-mode
-window shows eight bytes changed, including the mutex word (0 -> 1) and several binding fields.
-A hardware watchpoint armed at the start of that window reported no write, so the symptom is
-*both* an apparently welded mutex and a written binding table; the byte that changes is the
-mutex, and the table's fields change too. The consistent reading is a stray write into the
-block-device statics during the ring-3 window, not a lock that was legitimately taken and not
-released.
+* `KERNEL_STACK_SIZE` is 128 KiB instead of 32 KiB, so a whole `VadTree` temporary occupies a
+  fifth of the stack rather than all of it.
+* `KernelStack` is banded by 4 KiB of `NOLXSTAC` sentinels on **both** ends. The band has to be
+  a page wide, not a few words: the observed write started 0x30 bytes above the top, which
+  steps over any narrow band.
+* The sentinels are checked at two points where a mistake is still attributable:
+  `spawn_impl` right after `create_in_place` (the caller's stack is the one that was written
+  through) and `exit_current` (the last moment the process's own stack is the live one).
+* Proof the guard is live, not decoration: rebuilt with the old 32 KiB stack, the same fixture
+  that used to hang now stops with
+  `PANIC: panicked at kernel/src/exec/user/mod.rs: spawn from process slot 0 overflowed its
+  kernel stack`. With 128 KiB and the bands the boot is clean.
 
-Because the same dump shows the fields moving as well as the mutex, the two remaining
-explanations are:
+Local results on this revision (QEMU 11.1.50 in this sandbox; Rust 1.97.0). The sandbox QEMU is
+built without slirp, so fixtures that need `-netdev user` (e1000/virtio-net recovery,
+network-multi, the NIC profiles of power-s5/power-quiesce, the mixed profile of storage-multi
+and the e1000 leg of driver-lifecycle) cannot run here and stay CI-only:
 
-1. an unbalanced acquire inside that window — the five `BINDINGS` call sites are `bind_storage`,
-   `device`, `with_device`, `retained_selftest` and `shutdown_flush`;
-2. a stray write into `.bss` that happens to land on the lock byte, which the user-mode test
-   could cause through a bad address-space or page-table operation. The watchpoint trace does
-   show writes to that byte from `memcpy`-shaped code inlined into `nolx_kernel_main`, which no
-   legitimate acquire explains.
+| Fixture | Result |
+| --- | --- |
+| `check-virtio-blk-recovery.py` | **PASS**, 4 profiles × 2 unchanged-media boots, 15 durable exchanges each |
+| `check-ahci-nvme-recovery.py` | **PASS**, PC and Q35, AHCI and NVMe |
+| `check-storage-multi.py` | **PASS**, 9 non-NIC profiles including `virtio-blk-pc-bridge` |
+| `check-driver-lifecycle.py` | **PASS**, virtio-blk, AHCI and NVMe three-cycle lifecycles |
+| `check-power-s5.py` | **PASS**, PC and Q35 QMP guest shutdown |
+| `check-absent-devices.py` | **PASS**, PC and Q35 |
 
-Note that the ring-3 test's filesystem is a `tmpfs` (`USER_VFS` is `VirtualFileSystem` over
-`Tmpfs`), so it does not reach the block layer itself; that rules out a stale block-device
-reference from the syscall path but not hypothesis 2.
-
-Next step: trace acquires and releases of `BINDINGS` across the user-mode window, and audit the
-ring-3 entry/exit and page-table paths for a write that can land outside its own object. Until
-that is fixed, those seven jobs are red and M9 cannot be declared done.
-
-Only executable evidence checks an item: host-test passes, QEMU boot fixtures with captured
-serial/pcap/disk evidence, and CI runs cited by revision. **M9 is not complete.**
+The seven jobs and the network fixtures are decided by CI on this revision; until that run is
+green, and until the open M9 gates at the top of this file have executable evidence, **M9 is
+not complete.**
