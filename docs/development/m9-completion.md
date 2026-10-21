@@ -1654,14 +1654,15 @@ repair that made running any QEMU fixture possible in this environment.
   host target's `core` library is compiled with it; without it the first core-library `movups`
   raised #UD. `make bootcheck` still passes.
 
-Local verification: Q35 xHCI exhaust fixture, Q35 absent-device fixture, the full default boot
-self-tests, `cargo test --lib --bins` and `--tests` (832 tests), `cargo fmt --check`, host
-Clippy, `make bootcheck`, and `tools/conformance-report.py --check` (406 assertions, 0
-problems). Not executed here: the e1000/virtio-net fixtures (no user-mode network backend in
-the portable QEMU) and PC-machine fixtures (this QEMU's SeaBIOS exposes no usable RSDP on the
-i440FX profile in this sandbox, so ACPI-dependent paths were exercised on Q35). The CI run for
-this revision is what promotes PCI-031 to `tested-T2`, and it is the first execution of the two
-network phases.
+Local verification: the xHCI exhaust fixture on both PC and Q35, the absent-device fixture on
+both PC and Q35, a mixed boot with virtio-blk/AHCI/NVMe/xHCI-keyboard (1221 block requests
+dispatched and completed, all three retained reads verified), the untouched boot self-tests,
+`cargo test --lib --bins` and `--tests` (832 tests), `cargo fmt --check`, host Clippy,
+`make bootcheck`, `make fscheck`, `make usercheck`, the unsafe-block audit and
+`tools/conformance-report.py --check` (406 assertions, 0 problems). Not executed here: the
+e1000/virtio-net fixtures, because this sandbox's portable QEMU has no user-mode network
+backend. The CI run for this revision is what promotes PCI-031 to `tested-T2`, and it is the
+first execution of the two network phases.
 
 Open after this checkpoint, unchanged: general `_PRT`/link `_SRS` reprogramming beyond the
 verified segment-zero PIIX/ICH9 profile, native nonzero-segment binding, USB hubs/SuperSpeed/

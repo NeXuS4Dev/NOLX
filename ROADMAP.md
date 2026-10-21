@@ -1316,10 +1316,12 @@ trampoline now enables SSE before long mode, because the host target's `core` li
 compiled with it and the first core-library `movups` raised #UD. With those three fixes the
 tree builds and boots under the pinned 1.97.0 toolchain on the host-target fallback.
 
-Local evidence for this checkpoint: the xHCI exhaust fixture passed on Q35 with QEMU 11.1.50
-(128 candidates, `NoVector` refusal, reacquisition, final DMA 0), the absent-device fixture
-passed on Q35, and the untouched boot self-tests, 832 host tests, `cargo fmt`, host Clippy and
-the conformance check passed. The e1000/virtio-net fixtures could not run here because this
+Local evidence for this checkpoint: the xHCI exhaust fixture passed on both PC and Q35 with
+QEMU 11.1.50 (128 candidates, `NoVector` refusal, reacquisition, final DMA 0), the
+absent-device fixture passed on both machines, a mixed virtio-blk/AHCI/NVMe/xHCI-keyboard boot
+dispatched and completed 1221 block requests with all three retained reads verified, and the
+untouched boot self-tests, 832 host tests, `cargo fmt`, host Clippy, the filesystem/ELF/safety
+checks and the conformance check passed. The e1000/virtio-net fixtures could not run here because this
 QEMU build has no user-mode network backend, so their first execution is CI. The e1000
 `NoVector` distinction and the two network phases compile under their feature sets. This
 closes the missing xHCI and network exhaustion fixtures behind PCI-031; it does not close
