@@ -1123,12 +1123,16 @@ impl Host {
                 let Some(device) = self.devices[index].as_ref() else {
                     return false;
                 };
-                if matches!(device.health, Health::Active) {
+                // Only a *retiring* device is swept. A quarantined one is pinned on purpose:
+                // its Disable Slot was never proven, so retrying here would release it behind
+                // the repair path's back and let a fault fixture (or a real stuck device)
+                // pretend the cleanup succeeded.
+                if !matches!(device.health, Health::Retiring(_)) {
                     return false;
                 }
-                // A device that still has a child *in this table* is not a leaf. A child that
-                // is retiring as well still counts: it has not been released yet, and a hub
-                // must not be torn down while a slot below it is still being disabled.
+                // A device that still has a retiring child *in this table* is not a leaf: that
+                // child has not been released yet, and a hub must not be torn down while a slot
+                // below it is still being disabled.
                 !self
                     .devices
                     .iter()
@@ -1138,6 +1142,7 @@ impl Host {
                         other != index
                             && child.route != device.route
                             && child.port == device.port
+                            && matches!(child.health, Health::Retiring(_))
                             && hub::route_under(child.route, device.route)
                     })
             });
