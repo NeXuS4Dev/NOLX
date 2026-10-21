@@ -222,15 +222,6 @@ impl Default for Console {
 }
 
 impl fmt::Write for Console {
-    /// A whole formatted write is one line, so it runs with maskable interrupts disabled.
-    ///
-    /// Without this, a timer switch in the middle of a `writeln!` lets another thread's output
-    /// land inside the line; the serial log then holds two fragments and a fixture that greps
-    /// for the line fails on a boot that never misbehaved.
-    fn write_fmt(&mut self, args: fmt::Arguments<'_>) -> fmt::Result {
-        super::interrupts::without_interrupts(|| fmt::write(self, args))
-    }
-
     fn write_str(&mut self, text: &str) -> fmt::Result {
         // `fmt::Write` callers expect `\n` alone to mean a new line, while the terminal
         // wants CR LF. Translate here so callers can just use `writeln!`.

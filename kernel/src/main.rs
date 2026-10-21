@@ -229,8 +229,18 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         #[cfg(any(feature = "hal-power-test-s5", feature = "hal-power-quiesce-test"))]
         let mut power_test_started = false;
         loop {
-            hal::xhci::poll_events(&mut console);
-            hal::input::report_events(&mut console);
+            // Device polling prints, and the round-robin phase checks the exact interleaving of
+            // its own output: a hub or HID device completing enumeration inside that window
+            // splits the trace it is comparing. The phase is twelve timer quanta, so holding
+            // device work until it finishes costs the devices nothing and keeps both pieces of
+            // evidence exact.
+            // `round_robin_reported`, not `round_robin_complete()`: the workers finish their
+            // letters one iteration before this loop prints the trace's ` complete: ...` suffix,
+            // so the gate has to stay shut until the whole line is out.
+            if round_robin_reported {
+                hal::xhci::poll_events(&mut console);
+                hal::input::report_events(&mut console);
+            }
             // A process suspended in `poll(2)` is completed here, outside any interrupt and
             // outside the syscall: the request is re-evaluated against the queues the producers
             // just filled, and the caller's frame is resumed with the count of ready
