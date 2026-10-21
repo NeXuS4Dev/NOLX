@@ -746,7 +746,7 @@ jobs:
         run: python3 scripts/check-absent-devices.py 2>&1 | tee -a /tmp/job.log
       - name: Verify PC and Q35 boot-HID input, ring wrap and disconnect reclamation
         run: python3 scripts/check-usb-input.py 2>&1 | tee -a /tmp/job.log
-      - name: Verify a USB 2.0 hub: descriptors, route strings, hub-port hotplug and subtree teardown
+      - name: Verify a USB 2.0 hub descriptor, route strings, hub-port hotplug and subtree teardown
         run: python3 scripts/check-usb-input.py --hubs 2>&1 | tee -a /tmp/job.log
       - name: Reject misleading interrupt proof logs
         run: python3 -m unittest discover -s scripts -p 'test_xhci_irq_checks.py' 2>&1 | tee -a /tmp/job.log
