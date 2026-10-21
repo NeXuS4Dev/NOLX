@@ -45,7 +45,9 @@ use nolx_mm_core::buddy::{Buddy, BuddyStats, Frame, FreeError, MAX_ORDER};
 use nolx_mm_core::magazine::{Allocated, FrameCache, FrameCacheStats};
 use store::{DirectMapStore, MAX_MANAGED_FRAMES};
 
-pub use phys::{direct, physical, DIRECT_MAP_BASE, KERNEL_IMAGE_BASE};
+pub use phys::{
+    direct, direct_ptr, physical, DIRECT_MAP_BASE, DIRECT_MAP_BYTES, KERNEL_IMAGE_BASE,
+};
 
 /// The boot processor's index into the per-processor structures.
 pub const BOOT_CPU: usize = 0;

@@ -1454,7 +1454,23 @@ boots each, host-mounted files, CRC `0x9ea14b00`) and the AHCI/NVMe recovery pat
 revision. CI has not run on this revision yet, so PWR-022..PWR-025 are recorded as verified in the
 sandbox and pending CI.
 
-Still open, and the reason the operation-region checkbox stays unticked: the AML providers for
-SystemIO, SystemMemory and EmbeddedControl regions, write-permission gating for them, and the
-remaining host-bridge/link-device operations that need them. Decoding resources correctly is the
-prerequisite, not the gate. **M9 is not complete.**
+Then the providers themselves. `aml::FieldLocation` now resolves a `Field` element either to the
+PCI configuration byte it always supported or to a region field — space, byte address, bit width,
+bit shift and the unit width its access flags declare — and a `RegionFieldReader` provider serves
+`SystemMemory`, `SystemIo` and `EmbeddedControl` spaces. The evaluator keeps the masking and
+shifting: a provider is asked only for naturally aligned units, only inside the region the table
+declared, and only after the field's alignment and bounds have been checked, so a provider cannot
+widen a field or be talked into an address outside it. Every region read is journaled in
+`MethodEffects::region_reads`, because the value a method computed now depends on live hardware.
+
+The kernel's provider (`kernel/src/hal/aml_region.rs`) answers only for windows another validated
+table named: the HPET register block from the ACPI HPET table, mapped through the MMIO window
+(0xFED0_0000 sits above the two-gigabyte direct map), and the FADT's PM1a control block as ports.
+That turned the last refusal on both machines into a real result: the HPET device's own `_STA`
+reads its vendor and period registers through the region, so a PC boot now reports
+`\_SB_.HPET _STA=0xf, defaulted=false`, `17 resource results, 0 refusals`, and Q35 reports
+`28 resource results, 0 refusals`, both completing ring-3 execution. Region *writes* are still
+refused — a write is a hardware effect with its own permission question — and an embedded
+controller needs a handshake this kernel does not have, so both are refused rather than faked.
+PWR-026 is `tested-T1` and PWR-027 `tested-T2` in the sandbox; CI has not run on this revision.
+**M9 is not complete.**

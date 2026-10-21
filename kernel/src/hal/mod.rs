@@ -11,6 +11,7 @@
 
 pub mod acpi;
 pub mod ahci;
+pub mod aml_region;
 pub mod apic;
 pub mod blockdev;
 pub mod console;
@@ -315,6 +316,24 @@ pub unsafe fn inl(port: u16) -> u32 {
     // SAFETY: the caller asserts the port is valid, and `out("eax")` ties the result to the
     // register the instruction writes.
     unsafe { core::arch::asm!("in eax, dx", out("eax") value, in("dx") port, options(nostack)) };
+    value
+}
+
+/// Read a 16-bit value from an I/O port.
+///
+/// # Safety
+///
+/// As [`inb`], and one 16-bit port access is a single instruction, so it is atomic with respect
+/// to other CPUs' accesses to the same port.
+#[inline]
+pub unsafe fn inw(port: u16) -> u16 {
+    let value: u16;
+    // The same reasoning as [`inb`]: a port read is a side effect, so neither `nomem` nor
+    // `preserves_flags` is claimed.
+    //
+    // SAFETY: the caller asserts the port is valid, and `out("ax")` ties the result to the
+    // register the instruction writes.
+    unsafe { core::arch::asm!("in ax, dx", out("ax") value, in("dx") port, options(nostack)) };
     value
 }
 

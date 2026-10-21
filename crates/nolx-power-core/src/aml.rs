@@ -160,6 +160,59 @@ pub trait FieldReader {
     /// Return a snapshot value, or refuse a location not covered by the provider.
     fn read(&self, field: PciField) -> Result<u64, Error>;
 }
+/// One operation-region space this crate can hand to a caller's provider.
+///
+/// `PciConfig` is absent on purpose: a PCI configuration field has its own address type and its
+/// own journal, so the two never share a provider. `EmbeddedControl` is modelled as an address
+/// space and a provider may serve it, but the kernel has no embedded controller and refuses it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegionSpace {
+    /// Physical memory, behind a device's memory-mapped registers.
+    SystemMemory,
+    /// I/O ports.
+    SystemIo,
+    /// Embedded controller data space.
+    EmbeddedControl,
+}
+
+/// A field inside a firmware-declared operation region, handed to a caller's provider.
+///
+/// The provider is asked for naturally aligned `access`-byte units; the field's own masking and
+/// shifting stay in this crate, so a provider cannot widen a field by accident.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionField {
+    /// Which space the region names.
+    pub space: RegionSpace,
+    /// Absolute byte address of the first unit that holds the field.
+    pub address: u64,
+    /// Field width in bits, at most 64.
+    pub bits: u8,
+    /// How far the field starts into the first unit, in bits.
+    pub shift: u8,
+    /// Unit width in bytes: 1, 2, 4 or 8.
+    pub access: u8,
+}
+
+/// Caller-supplied reads of operation-region fields, in units the provider chooses to trust.
+///
+/// A provider must return the little-endian value of `bytes` at an address it is willing to
+/// touch; this crate has already bounded the address to the region the firmware declared, so a
+/// provider only has to decide whether *that* region is one it will read. A read that cannot be
+/// confirmed is an error, never a fabricated value.
+pub trait RegionFieldReader {
+    /// Read one naturally aligned unit, or refuse the space or the address.
+    fn read(&self, space: RegionSpace, address: u64, bytes: u8) -> Result<u64, Error>;
+}
+
+/// One operation-region field value read during method evaluation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionFieldRead {
+    /// The field, as the provider saw it.
+    pub field: RegionField,
+    /// The extracted field value, already shifted and masked.
+    pub value: u64,
+}
+
 /// One root-bus-zero PCI field value read while planning a method.
 ///
 /// Shadow reads from fields already written in the AML method are not included; they are satisfied
@@ -215,6 +268,12 @@ pub struct MethodEffects {
     pub reads: Vec<PciFieldRead>,
     /// Ordered field-write intents. Hardware is untouched until a separate transaction applies them.
     pub writes: Vec<PciFieldWrite>,
+    /// Operation-region field values read during evaluation, in the order they were read.
+    ///
+    /// Region reads have no journal of their own because nothing here writes to a region: the
+    /// list exists so a caller can see which hardware a method looked at before it trusted the
+    /// result.
+    pub region_reads: Vec<RegionFieldRead>,
 }
 const MAX_FIELD_WRITE_PERMISSIONS: usize = 32;
 const MAX_FIELD_READS: usize = 64;
@@ -441,6 +500,22 @@ enum Kind<'a> {
     },
     External,
 }
+/// One resolved `Field` element: a PCI configuration byte or a region field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FieldLocation {
+    /// A root-bus-zero PCI configuration byte, with its own provider and journal.
+    Pci(PciField),
+    /// A field inside a SystemMemory, SystemIo or EmbeddedControl operation region.
+    Region {
+        /// The field, bounds already checked against the region.
+        field: RegionField,
+        /// The region's base address.
+        base: u64,
+        /// The region's length in bytes.
+        length: u64,
+    },
+}
+
 #[derive(Clone)]
 struct Object<'a> {
     path: Path,
@@ -555,6 +630,7 @@ pub struct Namespace<'a> {
     value_bytes: usize,
     integer_mask: u64,
     reader: Option<&'a dyn FieldReader>,
+    regions: Option<&'a dyn RegionFieldReader>,
 }
 impl Default for Namespace<'_> {
     fn default() -> Self {
@@ -576,11 +652,20 @@ impl<'a> Namespace<'a> {
             value_bytes: 0,
             integer_mask: u64::MAX,
             reader: None,
+            regions: None,
         }
     }
     /// Install a read-only provider; ordinary evaluation without one still refuses fields.
     pub fn set_field_reader(&mut self, reader: &'a dyn FieldReader) {
         self.reader = Some(reader);
+    }
+    /// Install the provider that serves operation-region fields.
+    ///
+    /// Without one, a method that touches a SystemMemory, SystemIo or EmbeddedControl field is
+    /// refused exactly as before; installing one authorizes the regions that provider answers
+    /// for, and nothing else.
+    pub fn set_region_reader(&mut self, regions: &'a dyn RegionFieldReader) {
+        self.regions = Some(regions);
     }
     /// Notify a supported firmware interrupt-model method. Only the complete side-effect-free
     /// shape Store(Arg0, named integer) is accepted; validation precedes the single mutation.
@@ -1122,6 +1207,7 @@ impl<'a> Namespace<'a> {
             result,
             reads: effects.reads,
             writes: effects.writes,
+            region_reads: effects.region_reads,
         })
     }
     /// Evaluate a device member, distinguishing an absent member from failure inside one.
@@ -1216,6 +1302,7 @@ impl<'a> Namespace<'a> {
         };
         self.constant(value.clone(), depth + 1).map(Some)
     }
+    /// Where one `Field` element lives, resolved against its operation region.
     fn field_location(
         &self,
         region: &Name,
@@ -1223,29 +1310,33 @@ impl<'a> Namespace<'a> {
         bits: usize,
         flags: u8,
         depth: usize,
-    ) -> Result<PciField, Error> {
-        if bits != 8 || !bit.is_multiple_of(8) || flags != 1 {
-            return Err(Error::Unsupported(0x5b81));
-        }
+    ) -> Result<FieldLocation, Error> {
         let index = self.resolve(region)?;
         let object = &self.objects[index];
         let Kind::Region {
-            space: 2,
+            space,
             base,
             length,
         } = &object.kind
         else {
             return Err(Error::Unsupported(0x5b80));
         };
-        let offset = bit / 8;
-        if offset >= self.constant(length.clone(), depth + 1)?.integer()? {
+        let base = self.constant(base.clone(), depth + 1)?.integer()?;
+        let length = self.constant(length.clone(), depth + 1)?.integer()?;
+        if base.checked_add(length).is_none() {
             return Err(Error::Limit);
         }
-        let offset = self
-            .constant(base.clone(), depth + 1)?
-            .integer()?
-            .checked_add(offset)
-            .ok_or(Error::Limit)?;
+        if *space != 2 {
+            return Self::region_field(*space, base, length, bit, bits, flags);
+        }
+        if bits != 8 || !bit.is_multiple_of(8) || flags != 1 {
+            return Err(Error::Unsupported(0x5b81));
+        }
+        let offset = bit / 8;
+        if offset >= length {
+            return Err(Error::Limit);
+        }
+        let offset = base.checked_add(offset).ok_or(Error::Limit)?;
         if offset >= 256 {
             return Err(Error::Limit);
         }
@@ -1274,12 +1365,117 @@ impl<'a> Namespace<'a> {
                 }
             }
         }
-        Ok(PciField {
+        Ok(FieldLocation::Pci(PciField {
             address: address as u32,
             offset: offset as u16,
             bytes: 1,
+        }))
+    }
+
+    /// Resolve a field in a SystemMemory, SystemIo or EmbeddedControl region.
+    ///
+    /// The access width comes from the field's own flags: `AnyAcc` is read one byte at a time,
+    /// which is always valid, and `ByteAcc`/`WordAcc`/`DWordAcc`/`QWordAcc` fix it at 1, 2, 4 or
+    /// 8 bytes. A wider unit must start on its own alignment, because that is what the firmware
+    /// assumes when it declares one. The lock rule is *not* refused: this crate never takes the
+    /// ACPI global lock, so a `Lock` field is left to the provider to serialize, and the update
+    /// rule only affects writes, which are refused below. Everything is bounded to the region's
+    /// own `base`/`length` before a provider sees an address.
+    fn region_field(
+        space: u8,
+        base: u64,
+        length: u64,
+        bit: u64,
+        bits: usize,
+        flags: u8,
+    ) -> Result<FieldLocation, Error> {
+        let space = match space {
+            0 => RegionSpace::SystemMemory,
+            1 => RegionSpace::SystemIo,
+            3 => RegionSpace::EmbeddedControl,
+            _ => return Err(Error::Unsupported(0x5b80)),
+        };
+        if bits == 0 || bits > 64 {
+            return Err(Error::Unsupported(0x5b81));
+        }
+        let access = match flags & 0x0f {
+            0 => 1u8,
+            1 => 1,
+            2 => 2,
+            3 => 4,
+            4 => 8,
+            _ => return Err(Error::Unsupported(0x5b81)),
+        };
+        let first = bit / 8;
+        let shift = bit % 8;
+        let bytes = (shift + bits as u64).div_ceil(8);
+        let last = first.checked_add(bytes).ok_or(Error::Limit)?;
+        if last > length {
+            return Err(Error::Limit);
+        }
+        let address = base.checked_add(first).ok_or(Error::Limit)?;
+        if address % u64::from(access) != 0 {
+            return Err(Error::Unsupported(0x5b81));
+        }
+        // Every aligned unit the field touches must stay inside the region, not just the field.
+        let units = last
+            .div_ceil(u64::from(access))
+            .checked_mul(u64::from(access))
+            .ok_or(Error::Limit)?;
+        if units > length {
+            return Err(Error::Limit);
+        }
+        Ok(FieldLocation::Region {
+            field: RegionField {
+                space,
+                address,
+                bits: bits as u8,
+                shift: shift as u8,
+                access,
+            },
+            base,
+            length,
         })
     }
+
+    /// Read one region field through the caller's provider.
+    fn read_region(
+        &self,
+        provider: &dyn RegionFieldReader,
+        field: &RegionField,
+        base: u64,
+        length: u64,
+    ) -> Result<u64, Error> {
+        let access = u64::from(field.access);
+        let first = field.address.checked_sub(base).ok_or(Error::Limit)?;
+        let bytes = (u64::from(field.shift) + u64::from(field.bits)).div_ceil(8);
+        let last = first.checked_add(bytes).ok_or(Error::Limit)?;
+        if first % access != 0 || last > length {
+            return Err(Error::Limit);
+        }
+        let mut raw = 0u128;
+        let mut at = first;
+        while at < last {
+            let unit = at.checked_add(access).ok_or(Error::Limit)?;
+            if unit > length {
+                return Err(Error::Limit);
+            }
+            let value = provider.read(field.space, base + at, field.access)?;
+            if field.access < 8 && value >> (u32::from(field.access) * 8) != 0 {
+                return Err(Error::Type);
+            }
+            raw |= u128::from(value) << ((at - first) * 8);
+            at = unit;
+        }
+        let mask = if field.bits == 64 {
+            u64::MAX
+        } else {
+            (1u64 << field.bits) - 1
+        };
+        let value = (raw >> field.shift) as u64 & mask;
+        Ok(value & self.integer_mask)
+    }
+
     fn field(
         &self,
         region: &Name,
@@ -1289,7 +1485,23 @@ impl<'a> Namespace<'a> {
         depth: usize,
         effects: &mut EvaluationEffects<'_>,
     ) -> Result<Value, Error> {
-        let field = self.field_location(region, bit, bits, flags, depth)?;
+        let location = self.field_location(region, bit, bits, flags, depth)?;
+        let field = match location {
+            FieldLocation::Pci(field) => field,
+            FieldLocation::Region {
+                field,
+                base,
+                length,
+            } => {
+                let provider = self.regions.ok_or(Error::Unsupported(0x5b81))?;
+                let value = self.read_region(provider, &field, base, length)?;
+                if effects.region_reads.len() >= MAX_FIELD_READS {
+                    return Err(Error::Limit);
+                }
+                effects.region_reads.push(RegionFieldRead { field, value });
+                return Ok(Value::Integer(value));
+            }
+        };
         if let Some(write) = effects
             .writes
             .iter()
@@ -1568,8 +1780,20 @@ impl<'a> Namespace<'a> {
                             bits,
                             flags,
                         } => {
-                            let field =
-                                self.field_location(region, *bit, *bits, *flags, depth + 1)?;
+                            let field = match self.field_location(
+                                region,
+                                *bit,
+                                *bits,
+                                *flags,
+                                depth + 1,
+                            )? {
+                                FieldLocation::Pci(field) => field,
+                                // A region write is a hardware effect this crate does not
+                                // model: reads are provided, writes are still refused.
+                                FieldLocation::Region { .. } => {
+                                    return Err(Error::Unsupported(0x5b80));
+                                }
+                            };
                             let value =
                                 u8::try_from(value.integer()? & 0xff).map_err(|_| Error::Type)?;
                             let allowed = effects.permissions.is_some_and(|permissions| {
@@ -1728,6 +1952,7 @@ struct EvaluationEffects<'a> {
     permissions: Option<&'a [PciFieldWritePermission]>,
     reads: Vec<PciFieldRead>,
     writes: Vec<PciFieldWrite>,
+    region_reads: Vec<RegionFieldRead>,
 }
 impl<'a> EvaluationEffects<'a> {
     fn read_only() -> Self {
@@ -1735,6 +1960,7 @@ impl<'a> EvaluationEffects<'a> {
             permissions: None,
             reads: Vec::new(),
             writes: Vec::new(),
+            region_reads: Vec::new(),
         }
     }
     fn with_permissions(permissions: &'a [PciFieldWritePermission]) -> Self {
@@ -1742,6 +1968,7 @@ impl<'a> EvaluationEffects<'a> {
             permissions: Some(permissions),
             reads: Vec::new(),
             writes: Vec::new(),
+            region_reads: Vec::new(),
         }
     }
 }

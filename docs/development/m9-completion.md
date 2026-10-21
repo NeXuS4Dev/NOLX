@@ -130,7 +130,18 @@ segment-zero board profile and the broader open M9 gates below remain incomplete
       firmware's own field order (Word/DWord/QWord windows, extended interrupts, DMA channels),
       so the PC boot publishes 16 device templates instead of 9 (`PWR-022..PWR-025`, verified in
       this sandbox, CI pending) and the root bridge's producer apertures are no longer reserved
-      as device resources. Operation regions themselves are still refused.
+      as device resources.
+      Region *reads* are provided: `Field` elements over SystemMemory, SystemIo and
+      EmbeddedControl regions resolve to bounded fields read through a caller's
+      `RegionFieldReader`, with unit widths from the access flags, alignment and region bounds
+      enforced before the provider is called, and every read journaled (`PWR-026`). The kernel
+      authorizes only windows another validated table named — the HPET block, the FADT PM1a
+      control block — so the HPET device's own `_STA` now reads its registers: a PC boot reports
+      `\_SB_.HPET _STA=0xf, defaulted=false` and `17 resource results, 0 refusals`, Q35 reports
+      `28 resource results, 0 refusals` (`PWR-027`, sandbox only). Still open, and why this box
+      stays unticked: region *writes* (a hardware effect with its own permission question),
+      an embedded-controller handshake the kernel does not have, and the remaining AML
+      operations beyond the verified read paths.
 - [x] Replace the fixed memory allocation aperture with evaluated root `_CRS` windows on
       the bounded PC/Q35 profile; ACPI refusal never selects the no-ACPI board fallback.
 - [ ] Consume evaluated link resources for PCI interrupt routing and complete general

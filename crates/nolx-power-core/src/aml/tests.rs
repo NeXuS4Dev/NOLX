@@ -853,6 +853,7 @@ fn transaction_effects(reads: &[(PciField, u8)], writes: &[(PciField, u8)]) -> M
                 value: *value,
             })
             .collect(),
+        region_reads: Vec::new(),
     }
 }
 
@@ -1019,4 +1020,232 @@ fn pci_write_transaction_reports_unverified_rollback() {
         Err(PciFieldWriteTransactionError::RollbackFailed)
     );
     assert_eq!(backend.values, vec![(field, 2)]);
+}
+
+/// An `OperationRegion` plus a `Field` over it, with the elements' bit widths chosen by name.
+fn region_fixture(
+    space: u8,
+    base: u32,
+    length: u16,
+    flags: u8,
+    elements: &[(&[u8; 4], u16)],
+) -> Vec<u8> {
+    let mut out = vec![0x5b, 0x80];
+    out.extend_from_slice(b"MEMR");
+    out.push(space);
+    out.extend_from_slice(&[0x0c]);
+    out.extend_from_slice(&base.to_le_bytes());
+    out.extend_from_slice(&[0x0b]);
+    out.extend_from_slice(&length.to_le_bytes());
+    let mut body = b"MEMR".to_vec();
+    body.push(flags);
+    for (name, bits) in elements {
+        body.extend_from_slice(*name);
+        if *bits < 0x40 {
+            body.push(*bits as u8);
+        } else {
+            body.extend_from_slice(&[0x40 | (*bits & 15) as u8, (*bits >> 4) as u8]);
+        }
+    }
+    out.extend(pkg(&[0x5b, 0x81], body));
+    out
+}
+
+/// A provider over a fixed byte image, remembering the spaces it was asked for.
+struct Region {
+    base: u64,
+    bytes: &'static [u8],
+    space: std::cell::Cell<Option<RegionSpace>>,
+}
+
+impl RegionFieldReader for Region {
+    fn read(&self, space: RegionSpace, address: u64, bytes: u8) -> Result<u64, Error> {
+        self.space.set(Some(space));
+        let offset = address.checked_sub(self.base).ok_or(Error::Limit)? as usize;
+        let unit = self
+            .bytes
+            .get(offset..offset + usize::from(bytes))
+            .ok_or(Error::Limit)?;
+        Ok(unit
+            .iter()
+            .rev()
+            .fold(0u64, |v, b| (v << 8) | u64::from(*b)))
+    }
+}
+
+#[test]
+fn system_memory_region_fields_read_through_a_provider() {
+    // The shape QEMU's HPET device uses: a SystemMemory region over the HPET page, a DWordAcc
+    // field, and a _STA method that reads it.
+    let mut device = b"HPET".to_vec();
+    device.extend(region_fixture(
+        0,
+        0xFED0_0000,
+        0x0400,
+        0x03,
+        &[(b"VEND", 32), (b"PRD_", 32)],
+    ));
+    device.extend(method(b"_STA", 0, &[0xa4, b'V', b'E', b'N', b'D']));
+    device.extend(method(b"_UID", 0, &[0xa4, b'P', b'R', b'D', b'_']));
+    let bytes = pkg(&[0x5b, 0x82], device);
+    let provider = Region {
+        base: 0xFED0_0000,
+        bytes: &[0x34, 0x12, 0x86, 0x80, 0x00, 0x00, 0x04, 0x00],
+        space: std::cell::Cell::new(None),
+    };
+    let mut ns = Namespace::new();
+    ns.load(&bytes).unwrap();
+    // Without a provider the field is still refused, exactly as before.
+    assert_eq!(
+        ns.evaluate(&path("\\HPET._STA"), &[]),
+        Err(Error::Unsupported(0x5b81))
+    );
+    ns.set_region_reader(&provider);
+    assert_eq!(
+        ns.evaluate(&path("\\HPET._STA"), &[]),
+        Ok(Value::Integer(0x8086_1234))
+    );
+    assert_eq!(
+        ns.evaluate(&path("\\HPET._UID"), &[]),
+        Ok(Value::Integer(0x0004_0000))
+    );
+    assert_eq!(provider.space.get(), Some(RegionSpace::SystemMemory));
+    // The read is journaled with the field the provider saw, so a caller can audit what a
+    // method looked at before it trusted the result.
+    let effects = ns
+        .plan_device_method(&path("\\HPET"), *b"_STA", &[], &[])
+        .unwrap();
+    assert_eq!(effects.result, Some(Value::Integer(0x8086_1234)));
+    assert_eq!(
+        effects.region_reads,
+        [RegionFieldRead {
+            field: RegionField {
+                space: RegionSpace::SystemMemory,
+                address: 0xFED0_0000,
+                bits: 32,
+                shift: 0,
+                access: 4
+            },
+            value: 0x8086_1234
+        }]
+    );
+}
+
+#[test]
+fn region_fields_are_bounded_aligned_and_never_written() {
+    // A field that runs past the region's end is refused before a provider sees an address.
+    let mut device = b"OVRN".to_vec();
+    device.extend(region_fixture(
+        0,
+        0x1000,
+        4,
+        0x03,
+        &[(b"RSVD", 32), (b"NEXT", 32)],
+    ));
+    device.extend(method(b"_STA", 0, &[0xa4, b'N', b'E', b'X', b'T']));
+    let bytes = pkg(&[0x5b, 0x82], device);
+    let provider = Region {
+        base: 0x1000,
+        bytes: &[0; 8],
+        space: std::cell::Cell::new(None),
+    };
+    let mut ns = Namespace::new();
+    ns.set_region_reader(&provider);
+    ns.load(&bytes).unwrap();
+    assert_eq!(ns.evaluate(&path("\\OVRN._STA"), &[]), Err(Error::Limit));
+
+    // A DWord field that does not start on a DWord boundary is not something to read as one.
+    let mut device = b"ALGN".to_vec();
+    device.extend(region_fixture(0, 0x1002, 0x10, 0x03, &[(b"WORD", 32)]));
+    device.extend(method(b"_STA", 0, &[0xa4, b'W', b'O', b'R', b'D']));
+    let bytes = pkg(&[0x5b, 0x82], device);
+    let mut ns = Namespace::new();
+    ns.set_region_reader(&provider);
+    ns.load(&bytes).unwrap();
+    assert_eq!(
+        ns.evaluate(&path("\\ALGN._STA"), &[]),
+        Err(Error::Unsupported(0x5b81))
+    );
+}
+
+#[test]
+fn byte_access_composes_units_and_extracts_a_shifted_field() {
+    // AnyAcc with a field that starts four bits in: two byte reads, then shift and mask.
+    let mut device = b"NIBL".to_vec();
+    device.extend(region_fixture(
+        0,
+        0x2000,
+        0x10,
+        0x00,
+        &[(b"RSVD", 4), (b"LOW_", 8)],
+    ));
+    device.extend(method(b"_STA", 0, &[0xa4, b'L', b'O', b'W', b'_']));
+    let bytes = pkg(&[0x5b, 0x82], device);
+    let provider = Region {
+        base: 0x2000,
+        bytes: &[0xAB, 0xCD, 0xEF, 0x01],
+        space: std::cell::Cell::new(None),
+    };
+    let mut ns = Namespace::new();
+    ns.set_region_reader(&provider);
+    ns.load(&bytes).unwrap();
+    // Raw little-endian 0xCDAB >> 4 = 0xCDA, masked to eight bits = 0xDA.
+    assert_eq!(
+        ns.evaluate(&path("\\NIBL._STA"), &[]),
+        Ok(Value::Integer(0xDA))
+    );
+
+    // The same field through a Device method plan, so the journal shows the byte unit width.
+    let effects = ns
+        .plan_device_method(&path("\\NIBL"), *b"_STA", &[], &[])
+        .unwrap();
+    assert_eq!(effects.region_reads.len(), 1);
+    assert_eq!(effects.region_reads[0].field.access, 1);
+    assert_eq!(effects.region_reads[0].field.shift, 4);
+}
+
+#[test]
+fn writing_a_region_field_is_refused_with_the_region_error() {
+    let mut device = b"WRIT".to_vec();
+    device.extend(region_fixture(0, 0x3000, 0x10, 0x03, &[(b"VEND", 32)]));
+    device.extend(method(
+        b"_SRS",
+        0,
+        &[0x70, 0x0a, 0x01, b'V', b'E', b'N', b'D'],
+    ));
+    let bytes = pkg(&[0x5b, 0x82], device);
+    let provider = Region {
+        base: 0x3000,
+        bytes: &[0; 4],
+        space: std::cell::Cell::new(None),
+    };
+    let mut ns = Namespace::new();
+    ns.set_region_reader(&provider);
+    ns.load(&bytes).unwrap();
+    // Reads are provided; a write is a hardware effect this crate does not model, so the
+    // method is refused rather than silently doing nothing.
+    assert_eq!(
+        ns.plan_device_method(&path("\\WRIT"), *b"_SRS", &[], &[]),
+        Err(Error::Unsupported(0x5b80))
+    );
+    // An embedded-controller region reaches the provider as its own space; the kernel has no
+    // controller, so the provider's refusal is what the method reports.
+    let mut device = b"ECTL".to_vec();
+    device.extend(region_fixture(3, 0x0062, 0x01, 0x01, &[(b"ECFT", 8)]));
+    device.extend(method(b"_STA", 0, &[0xa4, b'E', b'C', b'F', b'T']));
+    let bytes = pkg(&[0x5b, 0x82], device);
+    struct Refuse;
+    impl RegionFieldReader for Refuse {
+        fn read(&self, space: RegionSpace, _: u64, _: u8) -> Result<u64, Error> {
+            assert_eq!(space, RegionSpace::EmbeddedControl);
+            Err(Error::Unsupported(0x5b80))
+        }
+    }
+    let mut ns = Namespace::new();
+    ns.set_region_reader(&Refuse);
+    ns.load(&bytes).unwrap();
+    assert_eq!(
+        ns.evaluate(&path("\\ECTL._STA"), &[]),
+        Err(Error::Unsupported(0x5b80))
+    );
 }

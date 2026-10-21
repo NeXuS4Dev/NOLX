@@ -290,8 +290,50 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
     #[cfg(feature = "hal-pci-link-srs-test")]
     super::pci_intx::disable_links_for_test(console);
     let snapshot = super::pci_intx::Snapshot::capture();
+    // Operation-region reads are authorized only for blocks another validated table named.
+    let regions = {
+        let mut regions = super::aml_region::RegionWindows::empty();
+        if let Some(hpet) = &platform.hpet {
+            if hpet.base.address_space_id != 0 {
+                let _ = writeln!(
+                    console,
+                    "aml: HPET registers at {:#x} are not memory; no HPET region window",
+                    hpet.base.address
+                );
+            } else if regions.authorize_memory(hpet.base.address, 1024) {
+                let _ = writeln!(
+                    console,
+                    "aml: operation-region window HPET memory {:#x}..{:#x}",
+                    hpet.base.address,
+                    hpet.base.address + 1024
+                );
+            }
+        }
+        if let Some(fadt) = &platform.fadt {
+            let bytes = u64::from(if fadt.pm1_control_bytes == 0 {
+                2
+            } else {
+                fadt.pm1_control_bytes
+            });
+            if regions.authorize_io(u64::from(fadt.pm1a_control), bytes) {
+                let _ = writeln!(
+                    console,
+                    "aml: operation-region window PM1a control I/O {:#x}..{:#x}",
+                    fadt.pm1a_control,
+                    u64::from(fadt.pm1a_control) + bytes
+                );
+            }
+        }
+        let _ = writeln!(
+            console,
+            "aml: operation-region provider: {} authorized window(s), region writes refused",
+            regions.len()
+        );
+        regions
+    };
     let mut namespace = Namespace::with_dsdt_revision(dsdt.bytes()[8]);
     namespace.set_field_reader(&snapshot);
+    namespace.set_region_reader(&regions);
     match namespace.load(&dsdt.bytes()[36..]) {
         Ok(()) => {
             loaded += 1;
