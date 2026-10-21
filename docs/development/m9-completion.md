@@ -106,8 +106,12 @@ segment-zero board profile and the broader open M9 gates below remain incomplete
       reader bound to the device incarnation, `read(2)` returns one eight-byte record per
       call (`nolx-input-core::wire`), `close(2)` releases the reader and a later read on that
       number is `EBADF`, and a process exit releases whatever it still held. Empty queue is
-      `EAGAIN`; a disconnected device drains and then returns zero bytes. Evidence below;
-      INP-006..INP-008.
+      `EAGAIN`; a disconnected device drains and then returns zero bytes. The boot fixture
+      (`scripts/check-ps2-input.py --read-t2`, `hal-input-read-test` image) injects one key
+      through QMP, so the record travels the real i8042/IRQ1/decoder/producer/registry path
+      into a ring-3 `read(2)`, and run
+      [39633910912](https://github.com/NeXuS4Dev/NOLX/actions/runs/39633910912) on `7f0d208`
+      passed all 19 jobs with it. INP-006 is `tested-T1`, INP-007/INP-008 `tested-T2`.
 - [ ] A scheduler-blocking input wait: `read(2)` on an empty queue returns `EAGAIN` instead of
       sleeping on the device's auto-reset waitable, so a program that wants to block must
       poll. Polling is honest, but it is not what a shell or `libc` will expect.

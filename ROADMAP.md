@@ -1521,10 +1521,18 @@ injected press and release records`.
 The key itself is not fabricated by the kernel: `scripts/check-ps2-input.py --read-t2` waits for
 the phase's "send one key now" line and only then sends a QMP `send-key`, so the record travels
 the real path — i8042, IRQ1, the scancode decoder, the producer, the registry, the descriptor's
-reader, `read(2)`, ring 3. One sandbox limitation has to be stated rather than hidden: the QEMU
-built for this environment has **no display backend** (`-display help` lists only `none`), so
-`send-key` has no route into the i8042 and the existing `check-ps2-input.py` fails here for the
-same reason. The syscall path was therefore verified in this sandbox with the record published
-through the producer entry point instead of the IRQ (status 42, 48 bytes written, descriptor
-table empty, marker printed); the QMP-keyed fixture is what CI runs, and INP-007/INP-008 stay
-`pending-T2` until that run is green.
+reader, `read(2)`, ring 3. That ordering is not a detail: the first CI attempt failed with
+`status=2` because the fixture's pre-injection gate waited for the kernel's 100-tick marker,
+which is printed by the idle loop — and a running user thread keeps the idle loop off the CPU,
+so the marker only appears after the phase is over. The gate now waits for the phase's own
+"send one key now" line, which is printed before the program polls.
+
+Two limitations are stated rather than hidden. The QEMU built for this sandbox has **no display
+backend** (`-display help` lists only `none`), so `send-key` has no route into the i8042 and even
+the pre-existing `check-ps2-input.py` fails here; the syscall path was verified locally by
+publishing the record through the same producer entry point (status 42, 48 bytes written,
+descriptor table empty, marker printed), and the QMP-keyed fixture is what CI runs. Run
+[39633910912](https://github.com/NeXuS4Dev/NOLX/actions/runs/39633910912) on `7f0d208` passed
+all 19 jobs with the new step in it, so INP-007/INP-008 are `tested-T2`. The second limitation
+is the descriptor's shape: `read(2)` on an empty queue is `EAGAIN`, not a sleep, because the
+syscall path has no scheduler transition onto the device's auto-reset waitable yet.
