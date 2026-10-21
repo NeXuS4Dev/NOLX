@@ -220,6 +220,13 @@ struct Host {
     controller: u32,
     reports: usize,
     commands_usable: bool,
+    /// A transfer event that arrived for a slot whose device was briefly out of the table.
+    ///
+    /// A hub class request takes the hub out of `devices` so the transfer machinery can borrow
+    /// the controller and the device separately. The hub's own status-change completion can
+    /// arrive in that window; recording it here lets the request put the pipe back instead of
+    /// leaving it armed nowhere, which would silently turn hotplug into 100 ms polling.
+    orphan: Option<(u8, u8)>,
     #[cfg(feature = "hal-xhci-transfer-fault-test")]
     owner: usize,
 }
@@ -258,6 +265,7 @@ impl Host {
         }
         let slot = usb::event_slot(&event);
         let Some(device) = self.devices.iter_mut().flatten().find(|d| d.slot == slot) else {
+            self.orphan = Some((slot, wire::endpoint(&event)));
             return;
         };
         if !matches!(device.health, Health::Active) {
@@ -873,12 +881,43 @@ impl Host {
         length: u16,
     ) -> Result<[u8; 4], Failure> {
         let mut device = self.devices[index].take().ok_or(Failure::Unsupported)?;
+        let (slot, dci) = (device.slot, device.role.pipe().0);
+        self.orphan = None;
         let result = match self.control(&mut device, request, length) {
             Ok(()) => Ok(device.data.read_array::<4>(0)),
             Err(error) => Err(error),
         };
+        let swallowed = self
+            .orphan
+            .take()
+            .is_some_and(|(s, e)| s == slot && e == dci);
         self.devices[index] = Some(device);
+        if swallowed {
+            // A status-change completion was consumed while the hub was out of the table. Its
+            // transfer is gone, so put a fresh one on the ring; otherwise the endpoint would
+            // never complete again and hotplug would depend on the idle backstop alone.
+            self.rearm(index);
+        }
         result
+    }
+
+    /// Arm the device's interrupt endpoint again, if it is still active.
+    fn rearm(&mut self, index: usize) {
+        let Some(mut device) = self.devices[index].take() else {
+            return;
+        };
+        if matches!(device.health, Health::Active) {
+            let (dci, length) = device.role.pipe();
+            device.pending =
+                device
+                    .interrupt
+                    .put(device.data.address(512), length, 1 << 10 | 1 << 5);
+            let doorbell = self.doorbell + u64::from(device.slot) * 4;
+            if self.regs.write32(doorbell, u32::from(dci)).is_err() {
+                device.retire(Cause::Doorbell);
+            }
+        }
+        self.devices[index] = Some(device);
     }
 
     /// Poll one hub's ports: acknowledge changes, and attach or retire what the ports report.
@@ -1110,39 +1149,6 @@ impl Host {
     }
 
     fn scan(&mut self, console: &mut dyn HalConsole) -> Result<(), Failure> {
-        // TEMP heartbeat
-        {
-            static N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-            let n = N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            if n % 100 == 0 {
-                let mut buf = [0u8; 24];
-                let head = b"probe-scan\n";
-                buf[..head.len()].copy_from_slice(head);
-                let mut v = n;
-                let mut at = head.len();
-                if v == 0 {
-                    buf[at] = b'0';
-                    at += 1;
-                } else {
-                    let mut d = [0u8; 10];
-                    let mut l = 0;
-                    while v > 0 {
-                        d[l] = b'0' + (v % 10) as u8;
-                        v /= 10;
-                        l += 1;
-                    }
-                    while l > 0 {
-                        l -= 1;
-                        buf[at] = d[l];
-                        at += 1;
-                    }
-                }
-                buf[at] = b'\n';
-                if let Ok(s) = core::str::from_utf8(&buf[..=at]) {
-                    crate::hal::console::raw_put_str(s);
-                }
-            }
-        }
         // 1. A root port that lost its device takes everything behind it with it.
         for port in 1..=self.ports {
             let connected = self
@@ -1282,6 +1288,7 @@ pub(super) fn start(
         controller,
         reports: 0,
         commands_usable: true,
+        orphan: None,
         #[cfg(feature = "hal-xhci-transfer-fault-test")]
         owner: dev,
     });
