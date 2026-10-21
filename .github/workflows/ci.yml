@@ -788,12 +788,14 @@ jobs:
         # Annotations are capped at ten per step, and a whole serial dump is thousands of lines,
         # so annotate the tail of the step output (where the assertion is) plus the newest log.
         if: failure()
+        # `set +e`: an annotation step must never add a failure of its own, and `ls` exits 2
+        # when no log matches.
         run: |
+          set +e
           python3 scripts/annotate-failure.py "job log" /tmp/job.log 6000
           newest=$(ls -t build/input-usb-*.log build/input-xhci-lifecycle-*.log build/input-ps2-*.log 2>/dev/null | head -1)
-          if [ -n "$newest" ]; then
-            python3 scripts/annotate-failure.py "$(basename "$newest")" "$newest" 2500
-          fi
+          [ -n "$newest" ] && python3 scripts/annotate-failure.py "$(basename "$newest")" "$newest" 2500
+          exit 0
       - uses: ./.github/actions/report-failure
         if: failure()
 
