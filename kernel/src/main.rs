@@ -214,6 +214,7 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         #[cfg(feature = "hal-driver-lifecycle-test")]
         let mut lifecycle_test_done = false;
         let mut round_robin_reported = false;
+        let mut input_exec_reported = false;
         let mut user_test_started = false;
         let mut user_test_reported = false;
         #[cfg(any(feature = "hal-power-test-s5", feature = "hal-power-quiesce-test"))]
@@ -257,6 +258,12 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
                 if !exec::report_round_robin(&mut console) {
                     panic!("round-robin context-switch test produced an unexpected trace");
                 }
+            }
+            // The input devices are attached by now, so the Executive binding can be checked
+            // before the ring-3 phase binds the same handles into the first process.
+            if !input_exec_reported && round_robin_reported {
+                input_exec_reported = true;
+                hal::input::executive_selftest(&mut console);
             }
 
             // The M6 ring-3 phase runs right after the kernel-thread round-robin, while the

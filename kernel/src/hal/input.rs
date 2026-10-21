@@ -8,6 +8,9 @@ use nolx_input_core::{
     objects::Registry,
 };
 const DEVICES: usize = 16;
+/// The Executive binding: names, security, handles and the waitable for these objects.
+pub(crate) mod executive;
+pub(crate) use executive::{bind_process, process_token, release_process};
 struct State {
     registry: Registry<DEVICES, 32, 64>,
     console: [Option<(DeviceId, ReaderId)>; DEVICES],
@@ -75,13 +78,32 @@ pub(super) fn register(
     state.console[index] = Some((id, reader));
     drop(state);
     let _=writeln!(console,"input: object attached device={}:{} source={source:?} class={class:?} location={location:?}",id.slot(),id.generation());
+    // The Executive object is best-effort: a namespace or header shortage must not take the
+    // kernel-side device with it, so a refusal is reported and the object still works.
+    match executive::publish(id, class) {
+        Ok(name) => {
+            let _=writeln!(console,"input: executive object \\Device\\{name} published type={} access=read|synchronize",executive::TYPE_NAME);
+        }
+        Err(error) => {
+            let _ = writeln!(console, "input: executive binding refused: {error:?}");
+        }
+    }
     Ok(id)
 }
 pub(super) fn publish(id: DeviceId, kind: Kind) -> Result<(), Error> {
-    STATE.lock().registry.publish(id, kind)
+    let published = STATE.lock().registry.publish(id, kind);
+    if published.is_ok() {
+        // Set the waitable before the record is observable, so a waiter that wakes on it can
+        // always read the report that made it ready.
+        executive::signal(id);
+    }
+    published
 }
 pub(super) fn disconnect(id: DeviceId) -> Result<(), Error> {
-    STATE.lock().registry.disconnect(id)
+    let result = STATE.lock().registry.disconnect(id);
+    // The name goes away with the device: a stale path must not find a retired incarnation.
+    executive::withdraw(id);
+    result
 }
 /// Consume console subscriptions through the public read API, without holding the registry
 /// while printing. Other readers retain their own queues and disconnected object references.
@@ -126,7 +148,12 @@ pub fn report_events(console: &mut dyn HalConsole) {
                     );
                     break;
                 }
-                Ok(Read::Empty) => break,
+                Ok(Read::Empty) => {
+                    // Drained: the device is no longer ready, which is the auto-reset half of
+                    // the waitable's contract.
+                    executive::reset(id);
+                    break;
+                }
                 Err(error) => panic!("input console stale subscription: {error:?}"),
             }
         }
@@ -138,4 +165,9 @@ mod tests;
 #[cfg(feature = "hal-input-object-test")]
 pub fn hardware_selftest(console: &mut dyn HalConsole) {
     tests::step(console);
+}
+
+/// Run the Executive binding's boot checks. Called once from the kernel idle loop.
+pub fn executive_selftest(console: &mut dyn HalConsole) {
+    executive::selftest(console);
 }

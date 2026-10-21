@@ -40,8 +40,15 @@ pub mod rights {
     pub const READ_CONTROL: u32 = 1 << 4;
     /// Change the DACL.
     pub const WRITE_DAC: u32 = 1 << 5;
+    /// Wait on the object's signaled state.
+    ///
+    /// A waitable is not readable data: an input device, an event or a timer can be waited on
+    /// without being read, and a caller that may only read cannot necessarily wait. Keeping the
+    /// right separate is what lets a device grant "read the reports" and "wait for a report" as
+    /// two decisions, which is exactly how the input bindings use it.
+    pub const SYNCHRONIZE: u32 = 1 << 6;
     /// Every right defined here.
-    pub const ALL: u32 = READ | WRITE | EXECUTE | DELETE | READ_CONTROL | WRITE_DAC;
+    pub const ALL: u32 = READ | WRITE | EXECUTE | DELETE | READ_CONTROL | WRITE_DAC | SYNCHRONIZE;
     /// The rights the integrity label restricts.
     pub const WRITE_CLASS: u32 = WRITE | DELETE | WRITE_DAC;
 }

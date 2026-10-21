@@ -1371,3 +1371,37 @@ pass; this sandbox's QEMU has no user-mode network backend, so the e1000/virtio-
 and the NIC profiles remain CI-only. Still open, unchanged: general `_PRT`/link `_SRS`
 reprogramming beyond segment zero, native nonzero-segment binding, USB hubs/SuperSpeed/hotplug,
 Executive input bindings, remaining AML providers and device power/S3. **M9 is not complete.**
+
+
+M9 Executive input-bindings checkpoint (2026-10-21): input devices are Executive objects. Each
+device the kernel input registry attaches publishes a new `InputDevice` type at
+`\Device\InputN`, with the four properties the completion gate asked for.
+
+The namespace holds only names the binding itself produces: the type's create hook refuses any
+name outside the sixteen it owns, so nothing else can call itself an input device, and a
+disconnect withdraws the binding so a stale path cannot resolve to a retired incarnation. The
+descriptor names SYSTEM as owner, refuses POSIX user 1001 before considering grants, and grants
+user 1000 `READ | SYNCHRONIZE`; the type's access mask carries no `WRITE` bit, so no handle can
+ever inject input — producers stay kernel drivers. The self test also asserts that a
+low-integrity token is *allowed*, because an input report is not lower-integrity data and the
+descriptor deliberately carries no label.
+
+`spawn` opens one handle per published device into the new process's own handle table under the
+process token, and `exit` closes them, with the ring-3 spawn reporting
+`input executive: init holds 2 input handle(s) from spawn`. Readiness is per device, auto-reset
+and interrupt-safe: the publication path sets an atomic flag before the record becomes
+observable, the first waiter to observe it clears it, and a draining reader clears it again, so
+two waiters can never act on one event.
+
+Boot evidence from `NOLX: input executive selftest` on PC and Q35 under QEMU 11.1.50 in this
+sandbox: two objects published, `\Device\Input0` granted read+synchronize, user 1001 refused
+without leaving a handle, a write open refused with `UnsupportedAccess`, idle → signaled →
+consumed → drained verified, two process handles installed and released, and the object's
+reference counts returning to 1 -> 1. The self test asserts each of those rather than printing
+markers, and asserts that nothing was published on a machine with no input device. INP-004 and
+INP-005 are `tested-T2`; the conformance database holds 410 assertions with none waiting for a
+T2 result. Not claimed: a `read(2)`-shaped syscall and a scheduler-blocking wait — the binding
+is the layer below them, and that interface remains an open M9 item along with link
+reprogramming beyond the verified segment-zero profile, nonzero-segment binding, USB
+hubs/SuperSpeed/hotplug, the remaining AML providers and device power/S3. **M9 is not
+complete.**

@@ -243,6 +243,17 @@ static BUILTIN_TYPES: &[ObjectType] = &[
         delete: None,
         validate_access: None,
     },
+    // Added after the original fifteen so their indices stay stable: a crash dump from an
+    // older build still names the same types.
+    ObjectType {
+        name: crate::hal::input::executive::TYPE_NAME,
+        create: Some(crate::hal::input::executive::create),
+        open: Some(crate::hal::input::executive::open),
+        parse: None,
+        close: Some(crate::hal::input::executive::close),
+        delete: Some(crate::hal::input::executive::delete),
+        validate_access: Some(crate::hal::input::executive::validate_access),
+    },
 ];
 
 /// Register the built-in object types.

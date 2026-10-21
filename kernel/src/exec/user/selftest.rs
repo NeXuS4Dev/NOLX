@@ -55,6 +55,14 @@ pub fn begin(console: &mut crate::hal::console::Console) {
         &["init"],
     ) {
         Ok(pid) if pid == INIT_PID => {
+            // The Executive handles the process was given are part of the spawn: report them
+            // before ring 3 runs so the evidence does not depend on what the program does.
+            if let Some(handles) = user::input_handles(pid) {
+                let _ = writeln!(
+                    console,
+                    "NOLX: input executive: init holds {handles} input handle(s) from spawn"
+                );
+            }
             let _ = writeln!(
                 console,
                 "NOLX: user mode T2: init spawned (pid {pid}), entering ring 3"

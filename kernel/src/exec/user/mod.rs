@@ -24,6 +24,7 @@ use core::mem::MaybeUninit;
 use nolx_exec_core::scheduler::{Policy, Scheduler, SchedulerError, ThreadState};
 use nolx_exec_core::ThreadId;
 use nolx_hal_core::interrupt::InterruptFrame;
+use nolx_obj_core::handle::HandleTable;
 use nolx_vfs::fd::DescriptorTable;
 use nolx_vfs::tmpfs::Tmpfs;
 use nolx_vfs::vfs::{FsInstance, ProcessVfsContext, VirtualFileSystem};
@@ -99,6 +100,11 @@ pub struct UserProcess {
     pub written: u64,
     /// The kernel stack top published to `TSS.RSP0` while this thread runs.
     pub kernel_stack_top: u64,
+    /// Input-device handles this process was given at spawn.
+    ///
+    /// Kept after exit as the spawn's record; the handles themselves are closed when the
+    /// process exits, and a slot reused by a new process starts from zero again.
+    pub input_handles: u8,
 }
 
 impl UserProcess {
@@ -115,6 +121,7 @@ impl UserProcess {
             wait_pid: 0,
             written: 0,
             kernel_stack_top: 0,
+            input_handles: 0,
         }
     }
 }
@@ -217,6 +224,14 @@ impl KernelStack {
         self.high_guard = [STACK_GUARD; STACK_GUARD_WORDS];
     }
 }
+
+/// Executive handles each process slot holds, created at spawn and closed at exit.
+///
+/// The table is per slot rather than per thread because handles belong to the process, and it
+/// is created lazily: a `HandleTable` asserts its capacity in `new`, which cannot run in a
+/// static initialiser. A slot that never spawned anything holds `None`.
+static PROCESS_HANDLES: [SyncCell<Option<HandleTable<crate::obj::boot::ObjectId, 4>>>;
+    MAX_USER_PROCESSES] = [const { SyncCell::new(None) }; MAX_USER_PROCESSES];
 
 /// Stable kernel-stack storage for each process slot.
 static KERNEL_STACKS: [SyncCell<KernelStack>; MAX_USER_PROCESSES] =
@@ -397,6 +412,31 @@ fn check_stack_guard() {
     );
 }
 
+/// Open the Executive's input objects for the process in `slot`.
+///
+/// A refusal is not a spawn failure: a machine with no input hardware simply gives the process
+/// no handles, and a table shortage is reported by the count the caller records.
+fn bind_input_handles(slot: usize) -> u8 {
+    // SAFETY: `slot` is the slot this single-threaded spawn is populating, and no other code
+    // reaches its table until the process starts running.
+    let table = unsafe { &mut *PROCESS_HANDLES[slot].get() };
+    let table = table.get_or_insert_with(HandleTable::new);
+    // A refusal is not a spawn failure: the process simply starts without input handles, and
+    // the count the caller records is what the boot report shows.
+    crate::hal::input::bind_process(table, &crate::hal::input::process_token())
+        .map_or(0, |opened| opened as u8)
+}
+
+/// Close the process's Executive handles. Called once, when the slot is retired.
+fn release_input_handles(slot: usize) {
+    // SAFETY: the slot's process has exited, so nothing else can reach this table.
+    let table = unsafe { &mut *PROCESS_HANDLES[slot].get() };
+    if let Some(table) = table.as_mut() {
+        crate::hal::input::release_process(table);
+    }
+    *table = None;
+}
+
 /// Terminate the calling process: POSIX `exit`, minus the library's flushing.
 ///
 /// The frame switch itself happens in [`on_syscall`], which sees the zombie and parks the
@@ -413,6 +453,9 @@ pub fn exit_current(status: i32) {
     };
     table.processes[slot].zombie = true;
     table.processes[slot].exit_status = status;
+    // The handles die with the process, exactly as `ExitProcess` closes them. The count stays
+    // in the slot as the record of what the spawn gave it, until a new process reuses the slot.
+    release_input_handles(slot);
     let pid = table.processes[slot].pid;
 
     let parent = table.processes[slot].parent;
@@ -693,9 +736,19 @@ fn spawn_impl(
         wait_pid: 0,
         written: 0,
         kernel_stack_top: stack_top,
+        input_handles: bind_input_handles(slot),
     };
     table.frames[slot] = frame as usize;
     Ok(pid)
+}
+
+/// Input handles the process with `pid` was given at spawn, for the boot report.
+#[must_use]
+pub fn input_handles(pid: u64) -> Option<u8> {
+    let table = TABLE.lock();
+    table
+        .slot_by_pid(pid)
+        .map(|slot| table.processes[slot].input_handles)
 }
 
 /// Whether any user thread is still runnable or running.

@@ -93,8 +93,16 @@ segment-zero board profile and the broader open M9 gates below remain incomplete
       batches, safe stop/re-arm and explicit no-capability/PIC-only polling fallbacks (below).
 - [x] HID boot keyboard/mouse reports delivered to bounded kernel input event objects,
       with independent subscriptions, source/device identity, state resync and stale-handle refusal.
-- [ ] Executive/process-handle, security/namespace and waitable/user-facing input bindings;
-      the kernel object API below is not a new syscall or POSIX input-device interface.
+- [x] Executive/process-handle, security/namespace and waitable input bindings: every
+      attached device publishes an `InputDevice` object at `\\Device\\InputN` with a DACL
+      (SYSTEM owner; user 1001 refused; user 1000 read+synchronize), a type mask without any
+      write right, a per-incarnation name that is withdrawn on disconnect, one handle per
+      device opened into the spawned process, and an auto-reset waitable set by the
+      publication and cleared by the draining reader. Boot evidence below; INP-004/INP-005
+      are `tested-T2`.
+- [ ] User-facing syscall and POSIX input-device interface on top of those objects (a
+      `read(2)`-shaped path and a scheduler-blocking wait); the Executive binding is the
+      layer below it and does not pretend to be the interface itself.
 - [ ] USB disconnect/hotplug cleanup and endpoint/ring ownership; do not leak controller
       resources or leave DMA active after device removal.
 - [x] Inject PS/2 keyboard/mouse events under QEMU and assert delivered event contents.
@@ -1769,3 +1777,55 @@ a revision where the `.bss` statics they rely on are intact, so PCI-031 moved fr
 
 The open M9 gates at the top of this file still need executable evidence, so **M9 is not
 complete.**
+
+
+## Executive input bindings (2026-10-21)
+
+The input registry is a kernel-side structure: bounded, allocation-free, and reachable only by
+kernel code. This checkpoint puts the layer above it in place, without pretending it is a
+syscall interface.
+
+**What now exists.** Every device the registry attaches publishes an Executive object of a new
+`InputDevice` type at `\Device\InputN`, and that object carries the four things the gate asked
+for:
+
+* *Namespace.* The name is one of sixteen literals the binding owns, and the type's create hook
+  refuses anything else, so "input device" cannot be claimed by an object the binding did not
+  publish. `disconnect` withdraws the binding, so a stale path can never resolve to a retired
+  incarnation.
+* *Security.* The descriptor names SYSTEM as owner, refuses POSIX user 1001 outright (a deny ACE
+  evaluated before the grants), and grants user 1000 `READ | SYNCHRONIZE`. The type's access mask
+  contains no `WRITE` bit at all: producers are kernel drivers, and no handle can ever carry the
+  right to inject input. There is no integrity label, because an input report is not
+  lower-integrity data than the process that reads it — the self test asserts that a
+  low-integrity token is still allowed, which keeps the descriptor honest instead of decorative.
+* *Process handles.* `spawn` opens one handle per published device into the new process's own
+  handle table, under the process token; `exit` closes them exactly as `ExitProcess` would. The
+  ring-3 spawn reports the count (`init holds 2 input handle(s) from spawn`), and the object's
+  reference counts return to their pre-open values when the handles close.
+* *Waitable.* Readiness is per device, auto-reset and interrupt-safe: the publication path sets
+  an atomic flag before the record is observable, the first waiter to see it clears it, and a
+  draining reader clears it again. Two waiters therefore cannot both act on one event.
+
+**Boot evidence** (`NOLX: input executive selftest`, PC and Q35, QEMU 11.1.50, this sandbox):
+
+```
+input: executive object \Device\Input0 published type=InputDevice access=read|synchronize
+NOLX: input executive selftest: 2 object(s) under \Device\Input*, \Device\Input0 granted
+  read+synchronize, user 1001 refused without a handle, write refused by the type mask,
+  wait auto-reset and drain verified, 2 process handle(s) installed and released,
+  references 1 -> 1
+NOLX: input executive: init holds 2 input handle(s) from spawn
+```
+
+The self test is not a marker-only check: it resolves the published name, compares the granted
+mask, requires the refused identity to leave an empty table, requires a write open to fail with
+`UnsupportedAccess`, counts the type's open hook, drives the readiness state machine through
+idle → signaled → consumed → drained, binds and releases a scratch process table, and requires
+the object's reference counts to return. On a machine with no input device it asserts that
+nothing was published instead. `scripts/check-absent-devices.py` still passes on both machines.
+
+**Still open, and why.** The object, the handle and the waitable exist; a `read(2)`-shaped
+syscall and a scheduler-blocking wait do not. The wait here is a ready/not-ready check, not a
+blocked thread, and exposing reports to ring 3 belongs to the syscall layer rather than to this
+binding. INP-004 and INP-005 are `tested-T2`; the syscall half stays an open M9 item.
