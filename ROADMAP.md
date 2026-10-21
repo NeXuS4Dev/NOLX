@@ -1328,3 +1328,46 @@ closes the missing xHCI and network exhaustion fixtures behind PCI-031; it does 
 general interrupt-resource reclamation, nonzero-segment binding, USB hubs/SuperSpeed/hotplug,
 Executive input bindings, the remaining AML providers or device power/S3. PCI-031 stays
 `pending-T2` until the CI run for this revision passes. **M9 is not complete.**
+
+
+M9 kernel-stack overflow checkpoint (2026-10-21): the seven CI jobs that had been red since
+`8036bf7b` — *Native PCI BAR and nested bridge resource recovery*, *Multi-controller storage
+identity and lifecycle*, *ACPI S5, six-driver shutdown and fail-closed DMA refusal*, *AHCI and
+NVMe checked failure recovery*, *Multi-adapter network wire identity and lifecycle*,
+*Persistent five-driver hardware lifecycle* and *Virtio-blk checked failure recovery* — were
+all one bug, and it was not in any of the subsystems they name.
+
+`AddressSpace::create_in_place` wrote every field of a new address space in place except the
+VAD tree, which it passed to `write()` as `VadTree::new(..)`. That argument is materialised as
+a by-value temporary — 256 node descriptors, 0x6800 bytes — and `spawn_impl` runs on the
+*calling* process's kernel stack. Those stacks were 32 KiB, so the first ring-3 spawn (init
+creating its child) wrote a 26 KiB frame that started 0x30 bytes above the top of slot 0's
+stack and ran into `.bss`, overwriting `blockdev::BINDINGS` — its mutex word (0 → 1) and five
+binding records. Every later block request then spun at the `lock cmpxchg` in
+`blockdev::device` with interrupts masked. The fixtures were not timing out on I/O; they were
+waiting forever on a mutex that a stack overflow had welded shut, with no panic and no output.
+
+The evidence is a hardware watchpoint on the *virtual* address of the binding-table lock
+(`memcpy+0x8`, `rdx = 0x6800`, destination above the stack top, called from
+`create_in_place`), QMP dumps of the whole `BINDINGS` object before and after the ring-3 window
+showing exactly the eight changed bytes, and the `.bss` neighbourhood that explains why the
+same corruption looked like e1000 route refusal and like an S5 quiesce failure.
+
+The fix is in `kernel/src/exec/user/mod.rs`: kernel stacks are 128 KiB, each stack is banded by
+4 KiB of `NOLXSTAC` sentinels on both ends (a narrow band would have been stepped over — the
+observed write began 0x30 bytes past the top), and the bands are checked in `spawn_impl`
+immediately after `create_in_place` and in `exit_current`. Rebuilt at the old 32 KiB size, the
+fixture that used to hang now stops with `spawn from process slot 0 overflowed its kernel
+stack`; at 128 KiB the boot is clean.
+
+Verification: CI run [39609375684](https://github.com/NeXuS4Dev/NOLX/actions/runs/39609375684)
+on `e16ee67` passed all 19 jobs on 2026-10-21, the first fully green run since `ab2a8d05`. The
+same run is the first execution of the network exhaustion phases on a revision whose statics
+are intact, so PCI-031 moves from `pending-T2` to `tested-T2`; the conformance database holds
+408 assertions with none waiting for a T2 result. Locally (QEMU 11.1.50, Rust 1.97.0) the
+virtio-blk, AHCI and NVMe checked-recovery fixtures, the nine non-NIC storage-multi profiles,
+the three storage legs of driver-lifecycle, power-s5 on PC and Q35, and absent-devices all
+pass; this sandbox's QEMU has no user-mode network backend, so the e1000/virtio-net fixtures
+and the NIC profiles remain CI-only. Still open, unchanged: general `_PRT`/link `_SRS`
+reprogramming beyond segment zero, native nonzero-segment binding, USB hubs/SuperSpeed/hotplug,
+Executive input bindings, remaining AML providers and device power/S3. **M9 is not complete.**

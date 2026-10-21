@@ -143,8 +143,13 @@ segment-zero board profile and the broader open M9 gates below remain incomplete
       `scripts/check-absent-devices.py` now covers the absent-controller half of this item
       (see the 2026-10-21 checkpoint).
 - [x] Separate virtio/AHCI/NVMe disk boots with persistent file checksums (same CI run).
-- [ ] Assertion database, README and roadmap agree on the final state and cite CI evidence.
-- [ ] All checks on the final revision pass. Only then change M9 to **done**.
+- [x] Assertion database, README and roadmap agree on the final state and cite CI evidence
+      (408 assertions, 0 problems, 0 `pending-T2`; README and ROADMAP both cite run
+      [39609375684](https://github.com/NeXuS4Dev/NOLX/actions/runs/39609375684) on `e16ee67`).
+- [x] All checks on the final revision pass: run
+      [39609375684](https://github.com/NeXuS4Dev/NOLX/actions/runs/39609375684) on `e16ee67`
+      passed all 19 jobs on 2026-10-21. This item gates the *checks*; the boot-test item above is
+      still open, so M9 stays **in progress**.
 
 ## Verified progress in PR #15 (2026-10-16)
 
@@ -1676,10 +1681,13 @@ both PC and Q35, the allocator-exhaustion fixture on both PC and Q35, a mixed bo
 dispatched and completed, all three retained reads verified), the untouched boot self-tests,
 `cargo test --lib --bins` and `--tests` (832 tests), `cargo fmt --check`, host Clippy,
 `make bootcheck`, `make fscheck`, `make usercheck`, the unsafe-block audit and
-`tools/conformance-report.py --check` (406 assertions, 0 problems). Not executed here: the
+`tools/conformance-report.py --check` (then 406 assertions, 0 problems). Not executed here: the
 e1000/virtio-net fixtures, because this sandbox's portable QEMU has no user-mode network
-backend. The CI run for this revision is what promotes PCI-031 to `tested-T2`, and it is the
-first execution of the two network phases.
+backend. *(Superseded: run
+[39609375684](https://github.com/NeXuS4Dev/NOLX/actions/runs/39609375684) on `e16ee67` executed
+both network phases and the USB/input job and promoted PCI-031 to `tested-T2`; the database now
+holds 408 assertions with none waiting for a T2 result — see the stack-overflow section at the
+end of this file.)*
 
 Open after this checkpoint, unchanged: general `_PRT`/link `_SRS` reprogramming beyond the
 verified segment-zero PIIX/ICH9 profile, native nonzero-segment binding, USB hubs/SuperSpeed/
@@ -1751,6 +1759,13 @@ and the e1000 leg of driver-lifecycle) cannot run here and stay CI-only:
 | `check-power-s5.py` | **PASS**, PC and Q35 QMP guest shutdown |
 | `check-absent-devices.py` | **PASS**, PC and Q35 |
 
-The seven jobs and the network fixtures are decided by CI on this revision; until that run is
-green, and until the open M9 gates at the top of this file have executable evidence, **M9 is
-not complete.**
+CI **passed**: run
+[39609375684](https://github.com/NeXuS4Dev/NOLX/actions/runs/39609375684) on `e16ee67` — all 19
+jobs, including the seven that had been red since `8036bf7b`, the two network recovery fixtures
+and the USB/input job. That run is also the first execution of the network exhaustion phases on
+a revision where the `.bss` statics they rely on are intact, so PCI-031 moved from
+`pending-T2` to `tested-T2`: with it, no assertion in the database is waiting for a T2 result
+(408 assertions, 402 with a passing automated test, 0 problems).
+
+The open M9 gates at the top of this file still need executable evidence, so **M9 is not
+complete.**
