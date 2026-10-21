@@ -1670,5 +1670,51 @@ hotplug and general endpoint recovery, Executive/process-handle/security/waitabl
 bindings, remaining AML operation-region providers, device power policy and S3. **M9 is not
 complete.**
 
+
+## Known red CI jobs and their diagnosis (2026-10-21)
+
+Seven jobs were already failing on `main` before the M9 exhaustion work began, and they fail
+identically on this branch: *Native PCI BAR and nested bridge resource recovery*,
+*Multi-controller storage identity and lifecycle*, *ACPI S5, six-driver shutdown and
+fail-closed DMA refusal*, *AHCI and NVMe checked failure recovery*, *Multi-adapter network wire
+identity and lifecycle*, *Persistent five-driver hardware lifecycle*, and *Virtio-blk checked
+failure recovery*. They first failed on `8036bf7b` (the self-contained bootstrap change) while
+`39406985079` on `ab2a8d05` had zero failures, so the trigger is that revision, not any
+fixture in this checkpoint; the only functional changes in it were Clippy-only rewrites and
+the toolchain pin moving from 1.88.0 to 1.97.0.
+
+The CI logs cannot be fetched from this environment (the failure-annotation step exists for
+exactly that reason), so the failure was reproduced locally and instrumented:
+
+* `hal-virtio-blk-recovery-test` on PC with QEMU 11.1.50 reaches
+  `virtio-blk-recovery: transport target=transitional peer=modern` and then hangs — not a panic.
+* Markers placed around every step localise the hang to the first call that touches the block
+  binding table (they narrow it to `blockdev::device`, which is
+  `BINDINGS.lock().0.find(handle)`).
+* An RSP watchpoint on the lock word (`BINDINGS` + 0x230, the compiler's field order) shows the
+  byte at 1 while the CPU spins at the `lock cmpxchg` in `blockdev::device`, with interrupts
+  masked. The guard is genuinely never released; this is not a stale read.
+* Probes after each boot phase show the lock healthy during initialization, during the
+  kernel-thread round robin and at the first idle-loop iteration, and already held when the
+  ring-3 user-mode test reports completion. The window that breaks it is the M6 user-mode test.
+
+Two explanations remain open, and the evidence distinguishes them only by tracing acquires
+against releases:
+
+1. an unbalanced acquire inside that window — the five `BINDINGS` call sites are `bind_storage`,
+   `device`, `with_device`, `retained_selftest` and `shutdown_flush`;
+2. a stray write into `.bss` that happens to land on the lock byte, which the user-mode test
+   could cause through a bad address-space or page-table operation. The watchpoint trace does
+   show writes to that byte from `memcpy`-shaped code inlined into `nolx_kernel_main`, which no
+   legitimate acquire explains.
+
+Note that the ring-3 test's filesystem is a `tmpfs` (`USER_VFS` is `VirtualFileSystem` over
+`Tmpfs`), so it does not reach the block layer itself; that rules out a stale block-device
+reference from the syscall path but not hypothesis 2.
+
+Next step: trace acquires and releases of `BINDINGS` across the user-mode window, and audit the
+ring-3 entry/exit and page-table paths for a write that can land outside its own object. Until
+that is fixed, those seven jobs are red and M9 cannot be declared done.
+
 Only executable evidence checks an item: host-test passes, QEMU boot fixtures with captured
 serial/pcap/disk evidence, and CI runs cited by revision. **M9 is not complete.**
