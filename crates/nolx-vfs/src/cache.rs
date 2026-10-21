@@ -448,7 +448,7 @@ impl CacheManager {
         for k in tail_keys {
             map.pages.remove(&k);
         }
-        if new_size % (CACHE_PAGE_SIZE as u64) != 0 {
+        if !new_size.is_multiple_of(CACHE_PAGE_SIZE as u64) {
             let last_page = new_size / (CACHE_PAGE_SIZE as u64);
             let keep = (new_size % (CACHE_PAGE_SIZE as u64)) as usize;
             if let Some(page) = map.pages.get_mut(&last_page) {

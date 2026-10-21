@@ -1,6 +1,6 @@
 # Pin the toolchain: the ring-3 boot path must build identically everywhere.
-# 1.88.0 is the toolchain the M6 user-mode bring-up is verified against.
+# Updated to 1.97.0 (latest stable) per project policy change 2026-10-21.
 [toolchain]
-channel = "1.88.0"
+channel = "1.97.0"
 components = ["rustfmt", "clippy"]
 targets = ["x86_64-unknown-none"]

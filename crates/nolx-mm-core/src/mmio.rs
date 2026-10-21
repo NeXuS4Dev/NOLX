@@ -154,7 +154,7 @@ pub const fn check_access(region_bytes: u64, offset: u64, width: u64) -> Result<
     if width != 1 && width != 2 && width != 4 {
         return Err(MmioError::BadWidth);
     }
-    if offset % width != 0 {
+    if !offset.is_multiple_of(width) {
         return Err(MmioError::Misaligned);
     }
     match offset.checked_add(width) {
