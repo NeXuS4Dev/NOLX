@@ -194,8 +194,7 @@ impl RegionFieldWriteBackend for RegionWindows {
             // Read-modify-write per unit: only the field's own bits change, and any bit outside
             // the field keeps whatever the device holds.
             let unit_offset = at;
-            let mut unit =
-                self.read(window.space, window.start + offset + at, field.access)?;
+            let mut unit = self.read(window.space, window.start + offset + at, field.access)?;
             let mut bit = at * 8;
             while bit < (at + access) * 8 {
                 let field_bit = bit - u64::from(field.shift);
