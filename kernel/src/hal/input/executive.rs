@@ -252,11 +252,11 @@ pub fn bind_process<const N: usize>(
     token: &Token,
 ) -> Result<usize, ObjError> {
     let mut opened = 0;
-    for index in 0..MAX_BINDINGS {
-        if BINDINGS.lock()[index].is_none() {
+    for (binding, name) in BINDINGS.lock().iter().zip(NAMES) {
+        if binding.is_none() {
             continue;
         }
-        boot::open(path(NAMES[index]), token, table, INPUT_ACCESS)?;
+        boot::open(path(name), token, table, INPUT_ACCESS)?;
         opened += 1;
     }
     Ok(opened)
