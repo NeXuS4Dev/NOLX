@@ -4,9 +4,8 @@ Source: NOLX M9 -- `ROADMAP.md` (Devices and drivers, virtio-blk) and `crates/no
 `crates/nolx-mm-core/src/mmio.rs`, `kernel/src/mm/mmio.rs`. This file covers the uncached
 windows that device registers are mapped through, the host-testable rules of the virtio 1.x
 PCI transport, and the block device's request format. VIO-001 to VIO-010 are the host-tested rules
-(`tested-T1`); VIO-011 and VIO-012 are the boot-level probe (`pending-T2`). MMIO-001 to MMIO-004 are `tested-T1` for the
-window rules; MMIO-005 is the boot check that maps the local APIC through the window. No device
-has been driven yet, so no virtio row is claimed as `tested-T2`.
+(`tested-T1`); VIO-011 through VIO-016 are the boot-level probe, round-trip, flush and MSI-X queue-vector rules: VIO-011, VIO-012, VIO-014 and VIO-015 are `tested-T2` with on-disk checksum evidence, and VIO-013 and VIO-016 are `tested-T1`. MMIO-001 to MMIO-004 are `tested-T1` for the
+window rules; MMIO-005 is the boot check that maps the local APIC through the window.
 
 Rows are pipe-delimited: `ID | specification reference | status | test`.
 
