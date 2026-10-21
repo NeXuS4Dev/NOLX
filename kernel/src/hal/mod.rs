@@ -337,6 +337,18 @@ pub unsafe fn inw(port: u16) -> u16 {
     value
 }
 
+/// Write a 16-bit value to an I/O port.
+///
+/// # Safety
+///
+/// As [`outb`]: the port must be valid and the caller must accept the immediate device side
+/// effect of one 16-bit store.
+#[inline]
+pub unsafe fn outw(port: u16, value: u16) {
+    // SAFETY: the caller asserts the port is valid and accepts the write, exactly as `outb`.
+    unsafe { core::arch::asm!("out dx, ax", in("dx") port, in("ax") value, options(nostack)) };
+}
+
 /// Write a 32-bit value to an I/O port.
 ///
 /// # Safety

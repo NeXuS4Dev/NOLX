@@ -326,7 +326,7 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
         }
         let _ = writeln!(
             console,
-            "aml: operation-region provider: {} authorized window(s), region writes refused",
+            "aml: operation-region provider: {} authorized window(s), writes permission-gated",
             regions.len()
         );
         regions

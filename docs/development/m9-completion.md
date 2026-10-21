@@ -138,10 +138,14 @@ segment-zero board profile and the broader open M9 gates below remain incomplete
       authorizes only windows another validated table named — the HPET block, the FADT PM1a
       control block — so the HPET device's own `_STA` now reads its registers: a PC boot reports
       `\_SB_.HPET _STA=0xf, defaulted=false` and `17 resource results, 0 refusals`, Q35 reports
-      `28 resource results, 0 refusals` (`PWR-027`, sandbox only). Still open, and why this box
-      stays unticked: region *writes* (a hardware effect with its own permission question),
-      an embedded-controller handshake the kernel does not have, and the remaining AML
-      operations beyond the verified read paths.
+      `28 resource results, 0 refusals` (`PWR-027`, sandbox only). Region *writes* are planned
+      too, but only against a caller's exact field-and-value permission: the intent is journaled,
+      applied by a transaction that re-checks permissions, reads before writing, verifies the
+      readback and restores attempted writes in reverse order, and the kernel backend writes only
+      inside the same authorized windows (`PWR-028`, host-tested; no PC/Q35 method in this
+      profile writes a region field, so no fixture exercises it yet). Still open, and why this
+      box stays unticked: an embedded-controller handshake the kernel does not have, a
+      firmware-exercised write path, and the remaining AML operations beyond the verified ones.
 - [x] Replace the fixed memory allocation aperture with evaluated root `_CRS` windows on
       the bounded PC/Q35 profile; ACPI refusal never selects the no-ACPI board fallback.
 - [ ] Consume evaluated link resources for PCI interrupt routing and complete general

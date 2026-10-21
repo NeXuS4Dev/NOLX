@@ -854,6 +854,7 @@ fn transaction_effects(reads: &[(PciField, u8)], writes: &[(PciField, u8)]) -> M
             })
             .collect(),
         region_reads: Vec::new(),
+        region_writes: Vec::new(),
     }
 }
 
@@ -1205,7 +1206,7 @@ fn byte_access_composes_units_and_extracts_a_shifted_field() {
 }
 
 #[test]
-fn writing_a_region_field_is_refused_with_the_region_error() {
+fn writing_a_region_field_needs_an_exact_permission_and_is_journaled() {
     let mut device = b"WRIT".to_vec();
     device.extend(region_fixture(0, 0x3000, 0x10, 0x03, &[(b"VEND", 32)]));
     device.extend(method(
@@ -1222,12 +1223,34 @@ fn writing_a_region_field_is_refused_with_the_region_error() {
     let mut ns = Namespace::new();
     ns.set_region_reader(&provider);
     ns.load(&bytes).unwrap();
-    // Reads are provided; a write is a hardware effect this crate does not model, so the
-    // method is refused rather than silently doing nothing.
+    // Without a permission the write is refused, not silently dropped.
     assert_eq!(
         ns.plan_device_method(&path("\\WRIT"), *b"_SRS", &[], &[]),
-        Err(Error::Unsupported(0x5b80))
+        Err(Error::WriteDenied)
     );
+    // A permission for a different value does not authorize this one.
+    let field = RegionField {
+        space: RegionSpace::SystemMemory,
+        address: 0x3000,
+        bits: 32,
+        shift: 0,
+        access: 4,
+    };
+    let wrong = RegionFieldWritePermission::from_values(field, &[7]).unwrap();
+    assert_eq!(
+        ns.plan_device_method_with_regions(&path("\\WRIT"), *b"_SRS", &[], &[], &[wrong]),
+        Err(Error::WriteDenied)
+    );
+    // The exact value is journaled as an intent; hardware is still untouched.
+    let allowed = RegionFieldWritePermission::from_values(field, &[1]).unwrap();
+    let effects = ns
+        .plan_device_method_with_regions(&path("\\WRIT"), *b"_SRS", &[], &[], &[allowed])
+        .unwrap();
+    assert_eq!(
+        effects.region_writes,
+        [RegionFieldWrite { field, value: 1 }]
+    );
+
     // An embedded-controller region reaches the provider as its own space; the kernel has no
     // controller, so the provider's refusal is what the method reports.
     let mut device = b"ECTL".to_vec();
@@ -1248,4 +1271,96 @@ fn writing_a_region_field_is_refused_with_the_region_error() {
         ns.evaluate(&path("\\ECTL._STA"), &[]),
         Err(Error::Unsupported(0x5b80))
     );
+}
+
+/// A backend over one four-byte register that refuses a chosen write.
+struct Register {
+    value: u32,
+    refuse: bool,
+    writes: usize,
+}
+
+impl RegionFieldWriteBackend for Register {
+    type Error = ();
+
+    fn read_field(&mut self, _: RegionField) -> Result<u64, ()> {
+        Ok(u64::from(self.value))
+    }
+
+    fn write_field(&mut self, _: RegionField, value: u64) -> Result<(), ()> {
+        if self.refuse {
+            return Err(());
+        }
+        self.writes += 1;
+        self.value = value as u32;
+        Ok(())
+    }
+}
+
+#[test]
+fn a_region_write_transaction_applies_verifies_and_rolls_back() {
+    let field = RegionField {
+        space: RegionSpace::SystemMemory,
+        address: 0x3000,
+        bits: 32,
+        shift: 0,
+        access: 4,
+    };
+    let permission = RegionFieldWritePermission::from_values(field, &[1]).unwrap();
+    let effects = MethodEffects {
+        result: None,
+        reads: Vec::new(),
+        writes: Vec::new(),
+        region_reads: Vec::new(),
+        region_writes: vec![RegionFieldWrite { field, value: 1 }],
+    };
+    let mut register = Register {
+        value: 0,
+        refuse: false,
+        writes: 0,
+    };
+    assert_eq!(
+        apply_region_field_writes(&effects, &[permission], &mut register),
+        Ok(())
+    );
+    assert_eq!((register.value, register.writes), (1, 1));
+
+    // Without a matching permission nothing is written at all.
+    let denied = RegionFieldWritePermission::from_values(field, &[9]).unwrap();
+    let mut register = Register {
+        value: 0,
+        refuse: false,
+        writes: 0,
+    };
+    assert_eq!(
+        apply_region_field_writes(&effects, &[denied], &mut register),
+        Err(RegionWriteTransactionError::PermissionDenied)
+    );
+    assert_eq!((register.value, register.writes), (0, 0));
+
+    // A refused write is rolled back and reported, and a duplicate journal entry is refused
+    // before the first backend operation.
+    let mut register = Register {
+        value: 0,
+        refuse: true,
+        writes: 0,
+    };
+    assert_eq!(
+        apply_region_field_writes(&effects, &[permission], &mut register),
+        Err(RegionWriteTransactionError::Write(()))
+    );
+    let mut twice = effects.clone();
+    twice
+        .region_writes
+        .push(RegionFieldWrite { field, value: 1 });
+    let mut register = Register {
+        value: 0,
+        refuse: false,
+        writes: 0,
+    };
+    assert_eq!(
+        apply_region_field_writes(&twice, &[permission], &mut register),
+        Err(RegionWriteTransactionError::DuplicateField)
+    );
+    assert_eq!(register.writes, 0);
 }

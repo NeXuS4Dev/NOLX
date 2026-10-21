@@ -14,7 +14,9 @@
 //! permission model.
 
 use crate::mm::mmio;
-use nolx_power_core::aml::{Error, RegionFieldReader, RegionSpace};
+use nolx_power_core::aml::{
+    Error, RegionField, RegionFieldReader, RegionFieldWriteBackend, RegionSpace,
+};
 
 /// How many firmware windows this provider will answer for.
 pub const MAX_WINDOWS: usize = 4;
@@ -161,6 +163,134 @@ impl RegionFieldReader for RegionWindows {
             // An eight-byte unit on a 32-bit device register is two accesses that a device could
             // interleave; and an embedded controller needs its own handshake, which this kernel
             // does not have. Neither is guessed at.
+            _ => Err(Error::Unsupported(0x5b80)),
+        }
+    }
+}
+
+impl RegionFieldWriteBackend for RegionWindows {
+    type Error = Error;
+
+    fn read_field(&mut self, field: RegionField) -> Result<u64, Error> {
+        self.read_units(&field)
+    }
+
+    fn write_field(&mut self, field: RegionField, value: u64) -> Result<(), Error> {
+        let access = u64::from(field.access);
+        let bytes = (u64::from(field.shift) + u64::from(field.bits)).div_ceil(8);
+        let window = self
+            .find(
+                field.space,
+                field.address,
+                field
+                    .address
+                    .checked_add(bytes)
+                    .ok_or(Error::Unsupported(0x5b80))?,
+            )
+            .ok_or(Error::Unsupported(0x5b80))?;
+        let offset = field.address - window.start;
+        let mut at = 0;
+        while at < bytes {
+            // Read-modify-write per unit: only the field's own bits change, and any bit outside
+            // the field keeps whatever the device holds.
+            let unit_offset = at;
+            let mut unit =
+                self.read(window.space, window.start + offset + at, field.access)?;
+            let mut bit = at * 8;
+            while bit < (at + access) * 8 {
+                let field_bit = bit - u64::from(field.shift);
+                if field_bit < u64::from(field.bits) {
+                    let mask = 1u64 << bit;
+                    if (value >> field_bit) & 1 == 1 {
+                        unit |= mask;
+                    } else {
+                        unit &= !mask;
+                    }
+                } else if bit < u64::from(field.shift) + u64::from(field.bits) {
+                    let mask = 1u64 << bit;
+                    unit &= !mask;
+                }
+                bit += 1;
+            }
+            self.write(
+                window.space,
+                window.start + offset + unit_offset,
+                unit,
+                field.access,
+            )?;
+            at += access;
+        }
+        Ok(())
+    }
+}
+
+impl RegionWindows {
+    /// Read a whole field through the same bounded unit path the evaluator uses.
+    fn read_units(&self, field: &RegionField) -> Result<u64, Error> {
+        let access = u64::from(field.access);
+        let bytes = (u64::from(field.shift) + u64::from(field.bits)).div_ceil(8);
+        let end = field
+            .address
+            .checked_add(bytes)
+            .ok_or(Error::Unsupported(0x5b80))?;
+        self.find(field.space, field.address, end)
+            .ok_or(Error::Unsupported(0x5b80))?;
+        let mut raw = 0u128;
+        let mut at = 0;
+        while at < bytes {
+            let unit = self.read(field.space, field.address + at, field.access)?;
+            raw |= u128::from(unit) << (at * 8);
+            at += access;
+        }
+        let mask = if field.bits == 64 {
+            u64::MAX
+        } else {
+            (1u64 << field.bits) - 1
+        };
+        Ok((raw >> field.shift) as u64 & mask)
+    }
+
+    /// Write one aligned unit inside an authorized window.
+    fn write(&self, space: RegionSpace, address: u64, value: u64, bytes: u8) -> Result<(), Error> {
+        let end = address
+            .checked_add(u64::from(bytes))
+            .ok_or(Error::Unsupported(0x5b80))?;
+        let window = self
+            .find(space, address, end)
+            .ok_or(Error::Unsupported(0x5b80))?;
+        let offset = address - window.start;
+        match (space, bytes) {
+            (RegionSpace::SystemMemory, 1) => window
+                .mapped
+                .ok_or(Error::Unsupported(0x5b80))?
+                .write8(offset, value as u8)
+                .map_err(|_| Error::Unsupported(0x5b80)),
+            (RegionSpace::SystemMemory, 2) => window
+                .mapped
+                .ok_or(Error::Unsupported(0x5b80))?
+                .write16(offset, value as u16)
+                .map_err(|_| Error::Unsupported(0x5b80)),
+            (RegionSpace::SystemMemory, 4) => window
+                .mapped
+                .ok_or(Error::Unsupported(0x5b80))?
+                .write32(offset, value as u32)
+                .map_err(|_| Error::Unsupported(0x5b80)),
+            // SAFETY: the port lies inside a window the kernel authorized from a parsed table,
+            // and the caller has an exact write permission for the field.
+            (RegionSpace::SystemIo, 1) => {
+                unsafe { super::outb(address as u16, value as u8) };
+                Ok(())
+            }
+            // SAFETY: as the byte case above, one 16-bit port store to an authorized port.
+            (RegionSpace::SystemIo, 2) => {
+                unsafe { super::outw(address as u16, value as u16) };
+                Ok(())
+            }
+            // SAFETY: as the byte case above, one 32-bit port store to an authorized port.
+            (RegionSpace::SystemIo, 4) => {
+                unsafe { super::outl(address as u16, value as u32) };
+                Ok(())
+            }
             _ => Err(Error::Unsupported(0x5b80)),
         }
     }

@@ -1469,8 +1469,15 @@ table named: the HPET register block from the ACPI HPET table, mapped through th
 That turned the last refusal on both machines into a real result: the HPET device's own `_STA`
 reads its vendor and period registers through the region, so a PC boot now reports
 `\_SB_.HPET _STA=0xf, defaulted=false`, `17 resource results, 0 refusals`, and Q35 reports
-`28 resource results, 0 refusals`, both completing ring-3 execution. Region *writes* are still
-refused — a write is a hardware effect with its own permission question — and an embedded
-controller needs a handshake this kernel does not have, so both are refused rather than faked.
+`28 resource results, 0 refusals`, both completing ring-3 execution. Region writes then follow the same discipline the PCI
+byte writes already used: a `Field` store becomes an intent only when the caller declared a
+permission for that exact field *and* value, the intent is journaled with the value masked to the
+field width, and applying the journal re-checks every permission, reads each field before
+writing, verifies the readback and restores attempted writes in reverse order when anything
+fails. The kernel backend writes only inside the windows it already authorized, through the
+mapped region or the port primitives. What that does **not** buy yet is firmware coverage: no
+PC/Q35 method in this profile writes a region field, so the write path is host-tested rather than
+boot-exercised (`PWR-028`), and an embedded controller still needs a handshake this kernel does
+not have, so it is refused rather than faked.
 PWR-026 is `tested-T1` and PWR-027 `tested-T2` in the sandbox; CI has not run on this revision.
 **M9 is not complete.**

@@ -274,6 +274,8 @@ pub struct MethodEffects {
     /// list exists so a caller can see which hardware a method looked at before it trusted the
     /// result.
     pub region_reads: Vec<RegionFieldRead>,
+    /// Ordered region field-write intents, exactly like `writes` but for operation regions.
+    pub region_writes: Vec<RegionFieldWrite>,
 }
 const MAX_FIELD_WRITE_PERMISSIONS: usize = 32;
 const MAX_FIELD_READS: usize = 64;
@@ -621,6 +623,198 @@ impl<'a> Reader<'a> {
             search: search && count == 1,
         })
     }
+}
+
+/// One operation-region field write produced by bounded method planning.
+///
+/// Hardware is untouched by the evaluator: this is an intent, and
+/// [`apply_region_field_writes`] applies it only with an exact permission and a verified
+/// readback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionFieldWrite {
+    /// The field written, as resolved against its region.
+    pub field: RegionField,
+    /// The value to write, already masked to the field's width.
+    pub value: u64,
+}
+
+/// How many distinct values one region permission may authorize.
+pub const MAX_REGION_VALUES: usize = 8;
+
+/// Caller-declared allowed values for one exact region field.
+///
+/// Permissions are data rather than callbacks: planning cannot trigger hidden hardware effects,
+/// and a field that is not listed here cannot be written at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionFieldWritePermission {
+    /// Exact field authorized by this permission.
+    pub field: RegionField,
+    values: [u64; MAX_REGION_VALUES],
+    count: usize,
+}
+
+impl RegionFieldWritePermission {
+    /// Authorize the listed values for one field. An empty list denies every write.
+    pub fn from_values(field: RegionField, allowed: &[u64]) -> Result<Self, Error> {
+        if allowed.len() > MAX_REGION_VALUES {
+            return Err(Error::Limit);
+        }
+        let mut values = [0u64; MAX_REGION_VALUES];
+        values[..allowed.len()].copy_from_slice(allowed);
+        Ok(Self {
+            field,
+            values,
+            count: allowed.len(),
+        })
+    }
+
+    fn allows(self, value: u64) -> bool {
+        self.values[..self.count].contains(&value)
+    }
+}
+
+/// Field-granular access used by a caller-owned region write transaction.
+///
+/// The backend sees the field's absolute address, width, shift and unit width, so it can build
+/// the aligned unit accesses itself; it must restrict itself to the region the field belongs to
+/// and serialize the transaction against other users of that region.
+pub trait RegionFieldWriteBackend {
+    /// Transport failure type.
+    type Error;
+    /// Read the field's current value.
+    fn read_field(&mut self, field: RegionField) -> Result<u64, Self::Error>;
+    /// Write the field's value.
+    fn write_field(&mut self, field: RegionField, value: u64) -> Result<(), Self::Error>;
+}
+
+/// Failure while applying a region write journal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RegionWriteTransactionError<BackendError> {
+    /// The journal or permission list exceeded the bounded capacity.
+    Limit,
+    /// A write was not authorized by an exact permission.
+    PermissionDenied,
+    /// A field is not self-consistent.
+    InvalidField,
+    /// The same field appears twice in the journal or the permissions.
+    DuplicateField,
+    /// The backend could not read a field.
+    Read(BackendError),
+    /// The backend could not write a field.
+    Write(BackendError),
+    /// A readback did not return the value written.
+    ReadbackMismatch,
+    /// Restoring an attempted write did not verify.
+    RollbackFailed,
+}
+
+fn valid_region_field(field: RegionField) -> bool {
+    matches!(field.access, 1 | 2 | 4 | 8)
+        && field.bits > 0
+        && field.bits <= 64
+        && u16::from(field.shift) + u16::from(field.bits) <= 64
+        && field.address.is_multiple_of(u64::from(field.access))
+}
+
+fn restore_region_writes<B: RegionFieldWriteBackend>(
+    backend: &mut B,
+    previous: &[RegionFieldWrite],
+) -> bool {
+    let mut restored = true;
+    for write in previous.iter().rev() {
+        let _ = backend.write_field(write.field, write.value);
+        if !matches!(backend.read_field(write.field), Ok(value) if value == write.value) {
+            restored = false;
+        }
+    }
+    restored
+}
+
+/// Apply authorized region field writes, verify each readback, and roll back on failure.
+///
+/// Every write is authorized and every field validated before the first backend operation, then
+/// writes are applied in AML order. A write error, a readback mismatch or a failed rollback is
+/// reported separately: the caller must quarantine the device rather than assume the region kept
+/// its old contents.
+pub fn apply_region_field_writes<B: RegionFieldWriteBackend>(
+    effects: &MethodEffects,
+    permissions: &[RegionFieldWritePermission],
+    backend: &mut B,
+) -> Result<(), RegionWriteTransactionError<B::Error>> {
+    if effects.region_writes.len() > MAX_FIELD_WRITES
+        || permissions.len() > MAX_FIELD_WRITE_PERMISSIONS
+    {
+        return Err(RegionWriteTransactionError::Limit);
+    }
+    for (index, permission) in permissions.iter().enumerate() {
+        if !valid_region_field(permission.field) {
+            return Err(RegionWriteTransactionError::InvalidField);
+        }
+        if permissions[..index]
+            .iter()
+            .any(|previous| previous.field == permission.field)
+        {
+            return Err(RegionWriteTransactionError::DuplicateField);
+        }
+    }
+    for (index, write) in effects.region_writes.iter().enumerate() {
+        if !valid_region_field(write.field) {
+            return Err(RegionWriteTransactionError::InvalidField);
+        }
+        if effects.region_writes[..index]
+            .iter()
+            .any(|previous| previous.field == write.field)
+        {
+            return Err(RegionWriteTransactionError::DuplicateField);
+        }
+        if !permissions
+            .iter()
+            .any(|permission| permission.field == write.field && permission.allows(write.value))
+        {
+            return Err(RegionWriteTransactionError::PermissionDenied);
+        }
+    }
+
+    let mut previous = Vec::with_capacity(effects.region_writes.len());
+    for write in &effects.region_writes {
+        let before = match backend.read_field(write.field) {
+            Ok(value) => value,
+            Err(error) => {
+                if !restore_region_writes(backend, &previous) {
+                    return Err(RegionWriteTransactionError::RollbackFailed);
+                }
+                return Err(RegionWriteTransactionError::Read(error));
+            }
+        };
+        // Record before the write: a backend may report failure after the device accepted it, so
+        // the uncertain operation must be part of the rollback too.
+        previous.push(RegionFieldWrite {
+            field: write.field,
+            value: before,
+        });
+        if let Err(error) = backend.write_field(write.field, write.value) {
+            if !restore_region_writes(backend, &previous) {
+                return Err(RegionWriteTransactionError::RollbackFailed);
+            }
+            return Err(RegionWriteTransactionError::Write(error));
+        }
+        match backend.read_field(write.field) {
+            Ok(value) if value == write.value => {}
+            Ok(_) => {
+                if !restore_region_writes(backend, &previous) {
+                    return Err(RegionWriteTransactionError::RollbackFailed);
+                }
+                return Err(RegionWriteTransactionError::ReadbackMismatch);
+            }
+            Err(_) => {
+                if !restore_region_writes(backend, &previous) {
+                    return Err(RegionWriteTransactionError::RollbackFailed);
+                }
+                return Err(RegionWriteTransactionError::ReadbackMismatch);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A namespace whose method bytecode borrows validated DSDT/SSDT payloads.
@@ -1164,6 +1358,18 @@ impl<'a> Namespace<'a> {
         args: &[Value],
         permissions: &[PciFieldWritePermission],
     ) -> Result<MethodEffects, Error> {
+        self.plan_device_method_with_regions(path, member, args, permissions, &[])
+    }
+
+    /// As [`Namespace::plan_device_method`], and additionally authorize exact region writes.
+    pub(crate) fn plan_device_method_with_regions(
+        &self,
+        path: &Path,
+        member: [u8; 4],
+        args: &[Value],
+        permissions: &[PciFieldWritePermission],
+        region_permissions: &[RegionFieldWritePermission],
+    ) -> Result<MethodEffects, Error> {
         if !self
             .objects
             .iter()
@@ -1172,7 +1378,9 @@ impl<'a> Namespace<'a> {
             return Err(Error::Type);
         }
         check_segment(&member)?;
-        if permissions.len() > MAX_FIELD_WRITE_PERMISSIONS {
+        if permissions.len() > MAX_FIELD_WRITE_PERMISSIONS
+            || region_permissions.len() > MAX_FIELD_WRITE_PERMISSIONS
+        {
             return Err(Error::Limit);
         }
         for (index, permission) in permissions.iter().enumerate() {
@@ -1201,13 +1409,15 @@ impl<'a> Namespace<'a> {
         validate_arguments(args)?;
         let mut steps = MAX_STEPS;
         step(&mut steps)?;
-        let mut effects = EvaluationEffects::with_permissions(permissions);
+        let mut effects =
+            EvaluationEffects::with_region_permissions(permissions, region_permissions);
         let result = self.run_method(index, args, 0, &mut steps, &mut effects)?;
         Ok(MethodEffects {
             result,
             reads: effects.reads,
             writes: effects.writes,
             region_reads: effects.region_reads,
+            region_writes: effects.region_writes,
         })
     }
     /// Evaluate a device member, distinguishing an absent member from failure inside one.
@@ -1512,7 +1722,7 @@ impl<'a> Namespace<'a> {
         }
         let reader = self.reader.ok_or(Error::Unsupported(0x5b81))?;
         let value = (reader.read(field)? & 255) as u8;
-        if effects.permissions.is_some() {
+        if effects.planning() {
             if let Some(previous) = effects.reads.iter().find(|read| read.field == field) {
                 if previous.value != value {
                     return Err(Error::WriteDenied);
@@ -1780,18 +1990,36 @@ impl<'a> Namespace<'a> {
                             bits,
                             flags,
                         } => {
-                            let field = match self.field_location(
-                                region,
-                                *bit,
-                                *bits,
-                                *flags,
-                                depth + 1,
-                            )? {
+                            let location =
+                                self.field_location(region, *bit, *bits, *flags, depth + 1)?;
+                            let field = match location {
                                 FieldLocation::Pci(field) => field,
-                                // A region write is a hardware effect this crate does not
-                                // model: reads are provided, writes are still refused.
-                                FieldLocation::Region { .. } => {
-                                    return Err(Error::Unsupported(0x5b80));
+                                FieldLocation::Region { field, .. } => {
+                                    // A region write needs its own exact permission; without
+                                    // one the method is refused, never silently ignored.
+                                    let mask = if field.bits == 64 {
+                                        u64::MAX
+                                    } else {
+                                        (1u64 << field.bits) - 1
+                                    };
+                                    let value = value.integer()? & mask;
+                                    let allowed =
+                                        effects.region_permissions.is_some_and(|permissions| {
+                                            permissions.iter().any(|permission| {
+                                                permission.field == field
+                                                    && permission.allows(value)
+                                            })
+                                        });
+                                    if !allowed {
+                                        return Err(Error::WriteDenied);
+                                    }
+                                    if effects.region_writes.len() >= MAX_FIELD_WRITES {
+                                        return Err(Error::Limit);
+                                    }
+                                    effects
+                                        .region_writes
+                                        .push(RegionFieldWrite { field, value });
+                                    return Ok(());
                                 }
                             };
                             let value =
@@ -1950,26 +2178,40 @@ impl<'a> Namespace<'a> {
 }
 struct EvaluationEffects<'a> {
     permissions: Option<&'a [PciFieldWritePermission]>,
+    region_permissions: Option<&'a [RegionFieldWritePermission]>,
     reads: Vec<PciFieldRead>,
     writes: Vec<PciFieldWrite>,
     region_reads: Vec<RegionFieldRead>,
+    region_writes: Vec<RegionFieldWrite>,
 }
 impl<'a> EvaluationEffects<'a> {
     fn read_only() -> Self {
         Self {
             permissions: None,
+            region_permissions: None,
             reads: Vec::new(),
             writes: Vec::new(),
             region_reads: Vec::new(),
+            region_writes: Vec::new(),
         }
     }
-    fn with_permissions(permissions: &'a [PciFieldWritePermission]) -> Self {
+    fn with_region_permissions(
+        permissions: &'a [PciFieldWritePermission],
+        regions: &'a [RegionFieldWritePermission],
+    ) -> Self {
         Self {
             permissions: Some(permissions),
+            region_permissions: Some(regions),
             reads: Vec::new(),
             writes: Vec::new(),
             region_reads: Vec::new(),
+            region_writes: Vec::new(),
         }
+    }
+
+    /// Whether any write intent is allowed to be produced at all.
+    fn planning(&self) -> bool {
+        self.permissions.is_some() || self.region_permissions.is_some()
     }
 }
 struct Frame {
