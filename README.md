@@ -113,6 +113,27 @@ Executive/input bindings, remaining AML providers, device power policy and S3 â€
 [docs/development/m9-completion.md](docs/development/m9-completion.md). Only when every item there
 has executable evidence, including all checks on the final revision, should M9 change to **done**.
 
+### M9 interrupt-vector exhaustion checkpoint (2026-10-21)
+
+The last two vector-exhaustion gaps behind PCI-031 now have executable fixtures: an xHCI
+boot-time fixture (`hal-xhci-exhaust-test`, `scripts/check-xhci-lifecycle.py --mode exhaust`)
+stops the controller, takes all 128 candidates of its pool, requires the start to be refused as
+`NoVector` with unchanged DMA/MMIO and no stolen claim, then releases and restarts; the e1000
+route manager distinguishes `RouteError::NoVector` from an unprogrammable route and its
+recovery fixture exhausts the shared INTx pool; the virtio-net fixture exhausts both RX and TX
+kinds. `scripts/check-absent-devices.py` boots the default image with no controllers and
+requires six clean refusals, zero dispatched block requests and a completed initialization. The
+xHCI and absent-device fixtures pass locally on Q35 (QEMU 11.1.50); the network fixtures need
+QEMU's user-mode network backend, which this sandbox's portable build lacks, so CI is their
+first execution and PCI-031 stays `pending-T2` until that run passes. The same work repaired the
+sandbox build path: real freestanding `memcpy`/`memset` helpers (the old bare-`ret` stubs made a
+16 MiB `memset` a no-op), a `-static -no-pie` fallback link, SSE enabled by the boot trampoline
+for the host target's `core` library, and a `bootstrap-rust.sh` that installs the toolchain
+payload instead of a 4 KB stub. See the checkpoint in
+[docs/development/m9-completion.md](docs/development/m9-completion.md). **M9 remains in
+progress**: nonzero-segment binding, USB hubs/SuperSpeed/hotplug, Executive input bindings,
+remaining AML providers, device power policy and S3 are still open.
+
 ### What has actually been verified
 
 This repository is honest about which artifacts were executed and which were not.

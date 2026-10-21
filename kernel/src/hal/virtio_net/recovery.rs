@@ -233,6 +233,57 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     let _=writeln!(console,"virtio-net-recovery: deliberately withheld PCI exclusion proof pinned DMA despite actual bus-master disable");
     driver_start::stop(dev).unwrap();
     driver_start::stop(peer).unwrap();
+
+    // Interrupt-vector exhaustion. Both adapters are stopped, so both pools are free and a
+    // synthetic owner takes every candidate of each. A start that has a usable device and
+    // mappings but no vector must be refused as exhaustion, and must not leave a vector,
+    // DMA page or MMIO window behind. Releasing the pools must let it start again and take
+    // back exactly the two vectors it owned before.
+    let rx_held = irq_vectors::occupy(RX_KIND, 0xfe);
+    let tx_held = irq_vectors::occupy(TX_KIND, 0xfe);
+    let rx_count = rx_held.len();
+    let tx_count = tx_held.len();
+    // The two kinds share one fallback range, so the first occupation removes the fallback
+    // candidates from the second and it keeps only its reserved preferred vector. What has to
+    // hold is that *both* pools now refuse a claim, which is the exhaustion the start sees.
+    assert!(rx_count > 0 && tx_count > 0);
+    assert!(irq_vectors::claim(RX_KIND, 0xfd).is_none());
+    assert!(irq_vectors::claim(TX_KIND, 0xfd).is_none());
+    assert_eq!(irq_vectors::outstanding(), rx_count + tx_count);
+    let pages = super::super::dma::live_pages();
+    let live = mmio::live_mappings();
+    assert_eq!(driver_start::start(dev), Err(Error::OpFailed));
+    assert!(
+        super::last_failure_was_no_vector(dev),
+        "an exhausted pool was not reported as NoVector"
+    );
+    assert_eq!(driver_start::state(dev), Ok(FrameworkState::Failed));
+    assert_eq!(vectors(dev), None);
+    assert_eq!(super::super::dma::live_pages(), pages);
+    assert_eq!(mmio::live_mappings(), live);
+    for vector in &rx_held {
+        assert_eq!(irq_vectors::owner(*vector), Some((RX_KIND, 0xfe)));
+    }
+    for vector in &tx_held {
+        assert_eq!(irq_vectors::owner(*vector), Some((TX_KIND, 0xfe)));
+    }
+    driver_start::recover(dev).unwrap();
+    assert_eq!(driver_start::state(dev), Ok(FrameworkState::Stopped));
+    for vector in rx_held {
+        assert!(irq_vectors::release(vector, RX_KIND, 0xfe));
+    }
+    for vector in tx_held {
+        assert!(irq_vectors::release(vector, TX_KIND, 0xfe));
+    }
+    assert_eq!(irq_vectors::outstanding(), 0);
+    driver_start::start(dev).unwrap();
+    assert_eq!(vectors(dev), Some(target_vectors));
+    driver_start::stop(dev).unwrap();
+    let _ = writeln!(
+        console,
+        "virtio-net-recovery: exhausted {rx_count}/{tx_count} RX/TX vector(s) refused start as NoVector with no DMA/MMIO/vector leak; released pools let it start again"
+    );
+
     detached(dev, target_vectors, false);
     detached(peer, peer_vectors, false);
     assert_eq!(super::super::dma::live_pages(), 0);

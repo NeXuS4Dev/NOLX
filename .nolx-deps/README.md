@@ -5,7 +5,11 @@ Prebuilt artifacts and bootstrap scripts for QEMU + Rust toolchain.
 ## What's here
 
 - `qemu/qemu-system-x86_64` — QEMU 11.1.50 built for `x86_64-softmmu` TCG mode (no KVM needed)
-- `stubs/` — dummy object files for kernel linking on `x86_64-unknown-linux-gnu` fallback target
+- `stubs/kernel_stubs.S` — the freestanding runtime helpers (`memcpy`, `memmove`, `memset`,
+  `memcmp`, `bcmp`, the Rust unwinding personality) the host-target fallback link needs
+- `stubs/*.o` — the same helpers and the boot/interrupt/syscall stubs, assembled. They are
+  regenerated from source by `scripts/nolx-env.sh` on every kernel build; the checked-in
+  objects are only a convenience and must never be newer than their sources.
 
 ## Quick start
 
@@ -51,11 +55,21 @@ The `x86_64-unknown-none` target's prebuilt standard library rmeta files embed
 metadata decoder (string-sentinel corruption). The `x86_64-unknown-linux-gnu`
 target compiles all crates successfully; linking requires:
 
-- Stub objects defining `rust_eh_personality`, `memcmp`, `memmove`, `memcpy`,
-  `memset`, `bcmp`, `_Unwind_Resume` (in `stubs/`)
+- Real implementations of `rust_eh_personality`, `memcmp`, `memmove`, `memcpy`,
+  `memset`, `bcmp` and `_Unwind_Resume` (`stubs/kernel_stubs.S`). **They must do the
+  work.** An earlier version defined them as bare `ret` instructions: the link succeeded,
+  and LLVM turned the 16 MiB frame-map fill into a `memset` call that silently wrote
+  nothing, so the machine reported zero usable frames.
 - `-C link-arg=--relax` to convert `R_X86_64_32` to `R_X86_64_32S` at high
   kernel addresses
+- `-static -no-pie`, so the image is not a dynamically linked executable whose `.interp`
+  and relocations no bootloader will resolve
 - Manually assembled boot trampoline files (`boot.S`, `interrupts.S`,
   `syscall.S`) linked in
+
+The kernel itself never uses floating point, but the host target's `core` library is
+compiled with SSE and is linked into the image. The boot trampoline therefore enables SSE
+(`CR4.OSFXSR|CR4.OSXMMEXCPT`, CR0.EM/TS clear, default MXCSR) before it enters long mode.
+Without that, the first `movups` the core library emitted raised #UD.
 
 See `scripts/nolx-env.sh` for the exact `RUSTFLAGS`.

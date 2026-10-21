@@ -271,6 +271,60 @@ pub(super) fn run(console: &mut dyn HalConsole) {
     assert_eq!(super::super::dma::live_pages(), 0);
     assert_eq!(mmio::live_mappings() + 2, mappings);
 
+    // Interrupt-vector exhaustion. Both adapters are stopped, so their shared route and every
+    // other vector in the pool are free; a synthetic owner takes all of them. A start that has
+    // a usable route but no vector must be refused as *exhaustion* -- not as a broken route --
+    // and must reclaim the MMIO window and the eleven DMA pages it allocated before the claim.
+    let kind = INTX_KIND;
+    let held = super::super::irq_vectors::occupy(kind, 0xfe);
+    let held_count = held.len();
+    assert_eq!(
+        held_count,
+        super::super::irq_vectors::pool(kind).candidates().count(),
+        "the synthetic owner did not take every candidate in the pool"
+    );
+    let pages = super::super::dma::live_pages();
+    let live = mmio::live_mappings();
+    let references = super::super::ioapic::pci_route_references(target_irq.gsi);
+    assert_eq!(driver_start::start(dev), Err(Error::OpFailed));
+    assert!(
+        super::last_failure_was_no_vector(dev),
+        "an exhausted pool was not reported as NoVector"
+    );
+    assert_eq!(driver_start::state(dev), Ok(FrameworkState::Failed));
+    assert_eq!(super::super::dma::live_pages(), pages);
+    assert_eq!(mmio::live_mappings(), live);
+    assert_eq!(
+        super::super::ioapic::pci_route_references(target_irq.gsi),
+        references,
+        "a refused start left a route reference behind"
+    );
+    assert!(PCI_ROUTE[dev].lock().is_none());
+    assert!(STATE[dev].lock().rings.is_none());
+    for vector in &held {
+        assert_eq!(
+            super::super::irq_vectors::owner(*vector),
+            Some((kind, 0xfe)),
+            "a refused start stole a vector from its holder"
+        );
+    }
+    driver_start::recover(dev).unwrap();
+    assert_eq!(driver_start::state(dev), Ok(FrameworkState::Stopped));
+    for vector in held {
+        assert!(super::super::irq_vectors::release(vector, kind, 0xfe));
+    }
+    assert_eq!(super::super::irq_vectors::outstanding(), 0);
+    driver_start::start(dev).unwrap();
+    assert_ne!(RX_VECTOR[dev].load(Ordering::Acquire), 0);
+    assert_eq!(super::super::dma::live_pages(), 11);
+    driver_start::stop(dev).unwrap();
+    assert_eq!(super::super::dma::live_pages(), 0);
+    let _ = writeln!(
+        console,
+        "e1000-recovery: exhausted {} vector(s) refused start as NoVector with no route reference or DMA/MMIO leak; released pool was reclaimed",
+        held_count
+    );
+
     // Force a programming readback failure followed by an inconclusive remask readback.
     // The route manager must retain the claimed vector and refuse a second claim for this GSI.
     let vectors_before_quarantine = super::super::irq_vectors::outstanding();

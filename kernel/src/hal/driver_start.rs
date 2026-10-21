@@ -31,6 +31,22 @@ impl Log {
         }
     }
 
+    /// The text kept for this bring-up.
+    ///
+    /// The buffer only ever ends on a character boundary, so this is always valid UTF-8; a
+    /// caller that has to explain a refused start can quote the driver's own reason instead
+    /// of looking for a marker in console output.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+    }
+
+    /// Whether the kept text contains `needle`.
+    #[must_use]
+    pub fn contains(&self, needle: &str) -> bool {
+        self.text().contains(needle)
+    }
+
     /// Write the kept output to the console, then the cut notice if output was dropped.
     pub fn replay(&self, console: &mut dyn HalConsole) {
         // The buffer only ever ends on a character boundary, so the slice is valid UTF-8.

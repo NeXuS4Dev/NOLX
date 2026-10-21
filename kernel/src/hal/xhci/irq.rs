@@ -23,6 +23,7 @@ static VECTORS: [AtomicU8; driver_start::DEVICES] =
 #[cfg(any(
     feature = "hal-xhci-lifecycle-test",
     feature = "hal-xhci-recovery-test",
+    feature = "hal-xhci-exhaust-test",
     feature = "hal-xhci-transfer-fault-test",
     feature = "hal-xhci-start-fault-test"
 ))]
@@ -189,6 +190,7 @@ pub(super) fn release_vector(dev: usize) -> bool {
     #[cfg(any(
         feature = "hal-xhci-lifecycle-test",
         feature = "hal-xhci-recovery-test",
+        feature = "hal-xhci-exhaust-test",
         feature = "hal-xhci-transfer-fault-test",
         feature = "hal-xhci-start-fault-test"
     ))]
@@ -313,6 +315,7 @@ pub(super) fn finish(dev: usize, more: bool) -> Result<(), Failure> {
 #[cfg(any(
     feature = "hal-xhci-lifecycle-test",
     feature = "hal-xhci-recovery-test",
+    feature = "hal-xhci-exhaust-test",
     feature = "hal-xhci-transfer-fault-test"
 ))]
 pub(super) fn detached_test(dev: usize, retained: bool) {

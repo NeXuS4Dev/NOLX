@@ -140,6 +140,8 @@ segment-zero board profile and the broader open M9 gates below remain incomplete
       19-job CI run).
 - [ ] Dedicated boot tests for each new hardware path, including absent-device fallbacks;
       nonzero-segment binding and some allocator-exhaustion cases still lack fixtures.
+      `scripts/check-absent-devices.py` now covers the absent-controller half of this item
+      (see the 2026-10-21 checkpoint).
 - [x] Separate virtio/AHCI/NVMe disk boots with persistent file checksums (same CI run).
 - [ ] Assertion database, README and roadmap agree on the final state and cite CI evidence.
 - [ ] All checks on the final revision pass. Only then change M9 to **done**.
@@ -1597,8 +1599,11 @@ Remaining open gates (unchanged from the checkpoints above):
   not a whitelisted PIRQ byte all refuse rather than guess.
 - Native nonzero-segment PCI binding: no multi-segment QEMU/native fixture or end-to-end
   binding evidence (PCI-032 `implemented` covers host-tested segment-qualified identity only).
-- End-to-end interrupt-vector exhaustion fixtures for xHCI and network sources (PCI-031
-  `pending-T2`: host tests passed, QEMU fixtures not yet added).
+- End-to-end interrupt-vector exhaustion fixtures for xHCI and network sources: **added on
+  2026-10-21** (checkpoint below). The xHCI boot fixture and the absent-device fixture pass
+  locally; the e1000 and virtio-net phases are wired into their recovery fixtures and compile
+  under their feature sets, but this sandbox's QEMU has no user-mode network backend, so their
+  first execution is CI. PCI-031 stays `pending-T2` until that run passes.
 - USB hubs, SuperSpeed device classes/hotplug and general endpoint recovery; SS HID selection
   remains host-tested only.
 - Executive/process-handle, security/namespace, waitable and user-facing input-device
@@ -1609,6 +1614,60 @@ Remaining open gates (unchanged from the checkpoints above):
   higher-layer/SMP orchestration is not.
 - Dedicated boot tests for each new hardware path, including absent-device fallbacks, and the
   remaining allocator-exhaustion fixtures.
+
+
+## Interrupt-vector exhaustion checkpoint (2026-10-21)
+
+Executable coverage for the last two vector-exhaustion gaps (PCI-031), plus the sandbox build
+repair that made running any QEMU fixture possible in this environment.
+
+- **xHCI.** New feature `hal-xhci-exhaust-test` and `kernel/src/hal/xhci/exhaust.rs`. At the
+  end of `probe`, the fixture stops the enumerated controller, asserts the checked stop
+  returned eight DMA pages and the register window, takes all 128 candidates of the xHCI pool
+  for a handle no device can have (`0xfe`), and requires: `start` = `OpFailed`, the bring-up
+  log containing `NoVector`, state `Failed`, unchanged DMA/MMIO baselines, and every held
+  claim still owned by the synthetic handle. It then recovers, releases, requires a start that
+  owns a vector again with the exact baselines restored, stops, removes, and reports the final
+  DMA page count as zero. `scripts/check-xhci-lifecycle.py --mode exhaust` runs it on PC and
+  Q35 without QMP input. Local Q35 evidence: 128 candidates, `NoVector` refusal, reacquisition,
+  final DMA 0. The lifecycle/start-fault/stop-fault/recovery/transfer-fault modes and their
+  interrupt-proof counts are unchanged.
+- **e1000.** `ioapic::acquire_pci_route` now returns `Result<u8, RouteError>`; only the vector
+  claim can produce `RouteError::NoVector`, and the driver maps it to `Failure::NoVector`
+  (`last_failure_was_no_vector` exposes the reason the way the storage drivers do). The
+  recovery fixture exhausts the shared INTx pool, requires the refusal to be that case with no
+  route reference, no DMA/MMIO leak and no stolen claim, then releases and restarts.
+- **virtio-net.** The recovery fixture occupies both RX and TX kinds (they share one fallback
+  range, so the second occupation keeps only its reserved preferred vector), requires
+  `NoVector`, no DMA/MMIO/vector leak, then releases both pools and requires the exact previous
+  vector pair to be reclaimed.
+- **Absent devices.** `scripts/check-absent-devices.py` boots the default image with no
+  storage, USB or network device and requires one refusal line per driver, `blockdev: 0
+  requests dispatched, 0 completed`, no framework start line and a completed initialization.
+- **Sandbox build path.** `scripts/bootstrap-rust.sh` now installs the `[all]` payload extras,
+  extracts with `zstd` or the Python module and fails when no compiler appears. The
+  `.nolx-deps/stubs` helpers are real `rep movsb`/`rep stosb` routines assembled from
+  `kernel_stubs.S` on every build (`scripts/nolx-env.sh`); the previous bare-`ret` stubs made
+  LLVM's `memset` for the frame-map fill a no-op, which left the machine with zero usable
+  frames. The fallback link is `-static -no-pie`, and `boot/boot.S` enables SSE
+  (`CR4.OSFXSR | CR4.OSXMMEXCPT`, CR0.EM/TS clear, MXCSR 0x1F80) before long mode because the
+  host target's `core` library is compiled with it; without it the first core-library `movups`
+  raised #UD. `make bootcheck` still passes.
+
+Local verification: Q35 xHCI exhaust fixture, Q35 absent-device fixture, the full default boot
+self-tests, `cargo test --lib --bins` and `--tests` (832 tests), `cargo fmt --check`, host
+Clippy, `make bootcheck`, and `tools/conformance-report.py --check` (406 assertions, 0
+problems). Not executed here: the e1000/virtio-net fixtures (no user-mode network backend in
+the portable QEMU) and PC-machine fixtures (this QEMU's SeaBIOS exposes no usable RSDP on the
+i440FX profile in this sandbox, so ACPI-dependent paths were exercised on Q35). The CI run for
+this revision is what promotes PCI-031 to `tested-T2`, and it is the first execution of the two
+network phases.
+
+Open after this checkpoint, unchanged: general `_PRT`/link `_SRS` reprogramming beyond the
+verified segment-zero PIIX/ICH9 profile, native nonzero-segment binding, USB hubs/SuperSpeed/
+hotplug and general endpoint recovery, Executive/process-handle/security/waitable input
+bindings, remaining AML operation-region providers, device power policy and S3. **M9 is not
+complete.**
 
 Only executable evidence checks an item: host-test passes, QEMU boot fixtures with captured
 serial/pcap/disk evidence, and CI runs cited by revision. **M9 is not complete.**

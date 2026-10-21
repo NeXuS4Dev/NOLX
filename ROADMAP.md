@@ -1277,3 +1277,52 @@ passed all nineteen jobs; PCI-036 is `tested-T1` and PCI-037 `tested-T2`, and th
 conformance database holds 406 assertions. Segment zero/root bus zero and the verified
 ByteAcc PIRQ profile only; general link reprogramming, nonzero-segment binding, USB hubs,
 Executive input bindings and device power/S3 remain open. M9 is not complete.
+
+
+M9 interrupt-vector exhaustion checkpoint (2026-10-21): the shared vector domain is now
+exercised end to end for every native kind, not only the three storage transports. The xHCI
+transport gained a boot-time fixture (`hal-xhci-exhaust-test`): it stops the enumerated
+controller, proves the checked stop retired eight DMA pages and the MMIO window, has a
+synthetic handle take all 128 candidates of the xHCI pool, and requires the start with no
+vector to fail as `NoVector` with the DMA and MMIO baselines unchanged, the framework in
+`Failed`, and every held claim still owned by the synthetic handle. Recovering, releasing
+the pool, and restarting must take a vector and restore the exact DMA/MMIO baselines; stopping
+and removing must return every page. `scripts/check-xhci-lifecycle.py --mode exhaust` drives
+it on PC and Q35 without QMP input, and the existing lifecycle modes are unchanged.
+
+The e1000 route manager now reports exhaustion distinctly: `acquire_pci_route` returns a
+`RouteError` whose `NoVector` case comes only from the vector claim, so an exhausted pool can
+never be mistaken for an unprogrammable route. Its recovery fixture takes the whole shared
+INTx pool, requires `NoVector` on the start, no route reference, no DMA/MMIO leak and no
+stolen claim, then releases the pool and requires a clean start with a fresh route. The
+virtio-net recovery fixture does the same for both queue kinds and requires the released
+pair to be reclaimed. Storage already had this coverage.
+
+A second boot fixture, `scripts/check-absent-devices.py`, boots the default image with no
+storage, USB or network controller: all six native drivers must refuse with their own
+reason (`NoDevice`/`NoController`/`no controller on the PCI bus`), no block request may be
+dispatched, nothing may report a framework start, and initialization must still complete.
+
+The sandbox build path was also repaired, because it had been silently wrong rather than
+merely inconvenient. `arena-rust-toolchain` installs a 4 KB stub unless the `[all]` extras
+are requested, and `scripts/bootstrap-rust.sh` did not request them or check the result; it
+now installs every payload part, extracts with `zstd` or the Python module, and fails loudly
+when no compiler appears. The checked-in freestanding helpers in `.nolx-deps/stubs` were bare
+`ret` instructions, so LLVM's `memset` for the 16 MiB frame-map fill wrote nothing and the
+machine reported zero usable frames; they are now real `rep movsb`/`rep stosb` implementations,
+assembled from `kernel_stubs.S` on every build by `scripts/nolx-env.sh`. The fallback link also
+became `-static -no-pie` (no `.interp` a Multiboot loader never resolves), and the boot
+trampoline now enables SSE before long mode, because the host target's `core` library is
+compiled with it and the first core-library `movups` raised #UD. With those three fixes the
+tree builds and boots under the pinned 1.97.0 toolchain on the host-target fallback.
+
+Local evidence for this checkpoint: the xHCI exhaust fixture passed on Q35 with QEMU 11.1.50
+(128 candidates, `NoVector` refusal, reacquisition, final DMA 0), the absent-device fixture
+passed on Q35, and the untouched boot self-tests, 832 host tests, `cargo fmt`, host Clippy and
+the conformance check passed. The e1000/virtio-net fixtures could not run here because this
+QEMU build has no user-mode network backend, so their first execution is CI. The e1000
+`NoVector` distinction and the two network phases compile under their feature sets. This
+closes the missing xHCI and network exhaustion fixtures behind PCI-031; it does not close
+general interrupt-resource reclamation, nonzero-segment binding, USB hubs/SuperSpeed/hotplug,
+Executive input bindings, the remaining AML providers or device power/S3. PCI-031 stays
+`pending-T2` until the CI run for this revision passes. **M9 is not complete.**

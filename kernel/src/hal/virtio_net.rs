@@ -225,6 +225,17 @@ pub fn probe(console: &mut dyn HalConsole) {
         let _ = writeln!(console, "virtio-net: not brought up: NoDevice");
     }
 }
+/// Whether the last start refused because the vector pool was exhausted.
+///
+/// The refusal reason is kept with the bring-up log so a test can distinguish exhaustion
+/// from a configuration or transport failure without parsing console text.
+pub fn last_failure_was_no_vector(dev: usize) -> bool {
+    matches!(
+        START[dev].lock().as_ref(),
+        Some((_, Err(Failure::NoVector)))
+    )
+}
+
 fn start(dev: usize) -> bool {
     #[cfg(feature = "hal-virtio-net-recovery-test")]
     recovery::claim(dev);

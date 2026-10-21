@@ -739,6 +739,8 @@ jobs:
           sudo apt-get install -y qemu-system-x86 2>&1 | tail -3
       - name: Build default kernel
         run: make kernel 2>&1 | tee /tmp/job.log
+      - name: Verify a machine without storage, USB or network controllers falls back cleanly
+        run: python3 scripts/check-absent-devices.py 2>&1 | tee -a /tmp/job.log
       - name: Verify PC and Q35 boot-HID input, ring wrap and disconnect reclamation
         run: python3 scripts/check-usb-input.py 2>&1 | tee -a /tmp/job.log
       - name: Reject misleading interrupt proof logs
@@ -765,6 +767,10 @@ jobs:
             make kernel KERNEL_FEATURES=hal-xhci-${mode}-test,hal-xhci-irq-test 2>&1 | tee -a /tmp/job.log
             python3 scripts/check-xhci-lifecycle.py --mode "$mode" --interrupts 2>&1 | tee -a /tmp/job.log
           done
+      - name: Build interrupt-vector exhaustion fixture
+        run: make kernel KERNEL_FEATURES=hal-xhci-exhaust-test 2>&1 | tee -a /tmp/job.log
+      - name: Verify an exhausted xHCI vector pool is refused without a leak
+        run: python3 scripts/check-xhci-lifecycle.py --mode exhaust 2>&1 | tee -a /tmp/job.log
       - name: Annotate USB serial logs on failure
         if: failure()
         run: |
