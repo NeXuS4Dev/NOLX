@@ -626,7 +626,7 @@ pub const MAX_POLL_FDS: usize = 8;
 /// A zero would busy-spin the caller's timeout into an immediate return, which would make a
 /// short timeout indistinguishable from `timeout = 0`.
 fn ticks_for_ms(milliseconds: i32) -> u64 {
-    let frequency = u64::from(crate::hal::timer::frequency_hz());
+    let frequency = crate::hal::timer::frequency_hz();
     let ticks = (milliseconds.max(0) as u64)
         .saturating_mul(frequency)
         .div_ceil(1000);
@@ -649,12 +649,12 @@ unsafe fn poll_evaluate(slot: usize, request: PollWait) -> Result<usize, i32> {
     for index in 0..request.count {
         let address = request.fds + (index * nolx_types::abi::PollFd::SIZE) as u64;
         let mut raw = [0u8; nolx_types::abi::PollFd::SIZE];
-        loader::read_user(space, address, &mut raw).map_err(|error| load_error_code(error))?;
+        loader::read_user(space, address, &mut raw).map_err(load_error_code)?;
         let entry = nolx_types::abi::PollFd::decode(raw);
         // SAFETY: `fds` covers `count` writable entries; this is one of them.
         let revents = poll_revents(slot, entry);
         let encoded = nolx_types::abi::PollFd { revents, ..entry }.encode();
-        loader::write_user(space, address, &encoded).map_err(|error| load_error_code(error))?;
+        loader::write_user(space, address, &encoded).map_err(load_error_code)?;
         if revents & nolx_types::abi::poll::NVAL == 0 && revents != 0 {
             ready += 1;
         }
@@ -757,7 +757,7 @@ pub fn poll(fds: u64, count: u64, timeout: i32) -> Poll {
 pub fn service_polls() -> [(u64, usize, bool); MAX_USER_PROCESSES] {
     let mut events = [(0u64, 0usize, false); MAX_USER_PROCESSES];
     let mut table = TABLE.lock();
-    for slot in 0..MAX_USER_PROCESSES {
+    for (slot, completed) in events.iter_mut().enumerate() {
         let Some(request) = table.processes[slot].poll_wait else {
             continue;
         };
@@ -795,7 +795,7 @@ pub fn service_polls() -> [(u64, usize, bool); MAX_USER_PROCESSES] {
         table.processes[slot].blocked = false;
         let thread = table.processes[slot].thread_id;
         let _ = table.scheduler.wake(thread);
-        events[slot] = (table.processes[slot].pid, ready, timed_out);
+        *completed = (table.processes[slot].pid, ready, timed_out);
     }
     events
 }
