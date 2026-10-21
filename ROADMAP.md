@@ -1479,5 +1479,6 @@ mapped region or the port primitives. What that does **not** buy yet is firmware
 PC/Q35 method in this profile writes a region field, so the write path is host-tested rather than
 boot-exercised (`PWR-028`), and an embedded controller still needs a handshake this kernel does
 not have, so it is refused rather than faked.
-PWR-026 is `tested-T1` and PWR-027 `tested-T2` in the sandbox; CI has not run on this revision.
-**M9 is not complete.**
+PWR-026 is `tested-T1` and PWR-027 `tested-T2`; run
+[39620576799](https://github.com/NeXuS4Dev/NOLX/actions/runs/39620576799) on `528f4f4` passed all 19
+jobs. **M9 is not complete.**

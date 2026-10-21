@@ -138,7 +138,9 @@ segment-zero board profile and the broader open M9 gates below remain incomplete
       authorizes only windows another validated table named — the HPET block, the FADT PM1a
       control block — so the HPET device's own `_STA` now reads its registers: a PC boot reports
       `\_SB_.HPET _STA=0xf, defaulted=false` and `17 resource results, 0 refusals`, Q35 reports
-      `28 resource results, 0 refusals` (`PWR-027`, sandbox only). Region *writes* are planned
+      `28 resource results, 0 refusals` (`PWR-027`; run
+      [39620576799](https://github.com/NeXuS4Dev/NOLX/actions/runs/39620576799) on `528f4f4`
+      passed all 19 jobs). Region *writes* are planned
       too, but only against a caller's exact field-and-value permission: the intent is journaled,
       applied by a transaction that re-checks permissions, reads before writing, verifies the
       readback and restores attempted writes in reverse order, and the kernel backend writes only

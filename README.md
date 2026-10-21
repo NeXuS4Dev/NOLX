@@ -114,7 +114,8 @@ was found and fixed (run [39609375684](https://github.com/NeXuS4Dev/NOLX/actions
 (INP-004/INP-005, `tested-T2`). Firmware resource decoding now matches the layout real firmware
 emits — Word/DWord/QWord address windows, extended interrupts and DMA channels — so the PC boot
 publishes 16 device templates instead of 9, and the root bridge's own apertures are no longer
-reserved as device resources (PWR-022..PWR-025, verified in this sandbox; CI pending). M9 remains
+reserved as device resources (PWR-022..PWR-025; run [39620576799](https://github.com/NeXuS4Dev/NOLX/actions/runs/39620576799)
+on `528f4f4` passed all 19 jobs). M9 remains
 **in progress**; the remaining gates — link reprogramming beyond the verified segment-zero PIIX/ICH9
 profile, nonzero-segment binding, USB hubs/SuperSpeed/hotplug, the syscall/POSIX read path over the
 input bindings, remaining AML providers, device power policy and S3 — live in
