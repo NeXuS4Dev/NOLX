@@ -495,7 +495,7 @@ EBADF = -8
 # Polling bounds: an EAGAIN attempt costs one syscall plus DELAY decrements, so a missing key
 # fails the program in seconds instead of hanging the boot image.
 INPUT_ATTEMPTS = 2_000_000
-INPUT_DELAY = 2_000
+INPUT_DELAY = 1_000
 
 
 def build_inputread() -> bytes:

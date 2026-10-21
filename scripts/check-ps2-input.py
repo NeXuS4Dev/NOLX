@@ -51,10 +51,19 @@ def main():
                     time.sleep(0.05)
                 raise TimeoutError(f"missing: {description}")
 
-            # Do not inject while the strict scheduler trace is still running.
-            wait_for(lambda text: "input: PS/2 keyboard IRQ1, mouse IRQ12 ready" in text
-                     and "NOLX: timer reached 100 ticks; nominal 100 Hz" in text,
-                     "PS/2 readiness and completed scheduler/user boot")
+            if args.read_t2:
+                # The ring-3 reader is polled by a user thread, and a running user thread
+                # keeps the kernel's idle loop off the CPU, so the 100-tick marker does not
+                # appear until the phase is over. Waiting for it here would guarantee that the
+                # key is injected after the program has already given up.
+                wait_for(lambda text: "input: PS/2 keyboard IRQ1" in text
+                         and "send one key now" in text,
+                         "PS/2 readiness and the ring-3 reader waiting on the device")
+            else:
+                # Do not inject while the strict scheduler trace is still running.
+                wait_for(lambda text: "input: PS/2 keyboard IRQ1, mouse IRQ12 ready" in text
+                         and "NOLX: timer reached 100 ticks; nominal 100 Hz" in text,
+                         "PS/2 readiness and completed scheduler/user boot")
             connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             connection.settimeout(5)
             connection.connect(str(QMP))
