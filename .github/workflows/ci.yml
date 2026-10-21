@@ -747,17 +747,7 @@ jobs:
       - name: Verify PC and Q35 boot-HID input, ring wrap and disconnect reclamation
         run: python3 scripts/check-usb-input.py 2>&1 | tee -a /tmp/job.log
       - name: Verify a USB 2.0 hub descriptor, route strings, hub-port hotplug and subtree teardown
-        # A fixture failure carries a whole serial log; annotate the tail so the assertion is
-        # readable on the run page instead of only inside the job log.
-        run: |
-          set +e
-          python3 scripts/check-usb-input.py --hubs > /tmp/hubs.log 2>&1
-          status=$?
-          cat /tmp/hubs.log | tee -a /tmp/job.log
-          if [ "$status" -ne 0 ]; then
-            python3 scripts/annotate-failure.py "hub fixture" /tmp/hubs.log
-          fi
-          exit "$status"
+        run: python3 scripts/check-usb-input.py --hubs 2>&1 | tee -a /tmp/job.log
       - name: Reject misleading interrupt proof logs
         run: python3 -m unittest discover -s scripts -p 'test_xhci_irq_checks.py' 2>&1 | tee -a /tmp/job.log
       - name: Build interrupt observer image
@@ -794,12 +784,16 @@ jobs:
         run: make kernel KERNEL_FEATURES=hal-mm-exhaust-test 2>&1 | tee -a /tmp/job.log
       - name: Verify an empty frame allocator and a full kernel heap refuse instead of corrupting
         run: python3 scripts/check-mm-exhaust.py 2>&1 | tee -a /tmp/job.log
-      - name: Annotate USB serial logs on failure
+      - name: Annotate the failing step and its newest serial log
+        # Annotations are capped at ten per step, and a whole serial dump is thousands of lines,
+        # so annotate the tail of the step output (where the assertion is) plus the newest log.
         if: failure()
         run: |
-          for log in build/input-usb-*.log build/input-xhci-lifecycle-*.log build/input-ps2-*.log; do
-            tr -cd '\11\12\40-\176' < "$log" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
-          done
+          python3 scripts/annotate-failure.py "job log" /tmp/job.log 6000
+          newest=$(ls -t build/input-usb-*.log build/input-xhci-lifecycle-*.log build/input-ps2-*.log 2>/dev/null | head -1)
+          if [ -n "$newest" ]; then
+            python3 scripts/annotate-failure.py "$(basename "$newest")" "$newest" 2500
+          fi
       - uses: ./.github/actions/report-failure
         if: failure()
 
