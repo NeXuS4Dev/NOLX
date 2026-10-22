@@ -3,9 +3,12 @@
 
 Build with: make kernel KERNEL_FEATURES=hal-power-test-s3
 This fixture proves that the kernel stores the firmware's S3 sleep type with SLP_EN and that
-the platform parks the VM (QMP SUSPEND); a QMP system_wakeup produces WAKEUP. It does not
-claim a resume: no firmware waking vector is installed, so memory/device state is not
-restored by this path.
+the platform parks the VM (QMP SUSPEND). Before suspending, the kernel installs a real-mode
+hand-off in low memory, writes it into the FACS waking vector and sets CMOS shutdown status
+0xfe. A QMP system_wakeup then produces WAKEUP, SeaBIOS calls the waking vector, and the
+hand-off re-enters long mode and prints a tag stored in kernel RAM before the sleep. Device
+state is not restored, so the resumed kernel has no driver or ACPI PM path to shut down
+cleanly; the fixture quits QEMU after observing the marker.
 """
 import argparse
 import json
@@ -77,10 +80,7 @@ def boot(qemu, kernel, machine):
                     # RUN_STATE_SUSPENDED or the request is refused.
                     connection.sendall(b'{"execute":"system_wakeup"}\r\n')
                     woke_at = time.monotonic()
-                if woke_at and any(e['event'] == 'WAKEUP' for e in events) \
-                        and time.monotonic() - woke_at >= 1.0:
-                    # The platform reports the wake; this profile installs no waking vector,
-                    # so there is deliberately no post-wake kernel marker to wait for.
+                if woke_at and 'power: resumed from S3 with tag' in text:
                     connection.sendall(b'{"execute":"quit"}\r\n')
                     break
                 if process.poll() is not None:
@@ -103,6 +103,7 @@ def boot(qemu, kernel, machine):
     assert 'in use 0 -> 0 bytes, integrity ok' in text, text
     assert text.count('power: requesting ACPI S3') == 1, text
     assert 'power: S3 refused' not in text, text
+    assert 'power: resumed from S3 with tag 0x534c33524553554d' in text, text
     word = int(re.search(r'power: requesting ACPI S3 via PM1a 0x[0-9a-f]+, control (0x[0-9a-f]+)', text).group(1), 16)
     # SLP_TYP comes from the firmware's `_S3_` (1 here); SLP_EN must be set and the unrelated
     # SCI_EN bit preserved from the current control word.
@@ -110,7 +111,7 @@ def boot(qemu, kernel, machine):
     assert word & 0x2000, hex(word)
     assert any(e['event'] == 'SUSPEND' for e in events), events
     assert any(e['event'] == 'WAKEUP' for e in events), events
-    print(f'PASS: {name}; QMP SUSPEND + WAKEUP, control {hex(word)}')
+    print(f'PASS: {name}; QMP SUSPEND + WAKEUP, control {hex(word)}, S3 resume tag verified')
 
 
 def main():

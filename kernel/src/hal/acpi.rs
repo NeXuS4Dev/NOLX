@@ -441,7 +441,11 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
                 if let Some(seg0) = root_bridges.get(0) {
                     *ROOT_RESOURCES.lock() = RootResourceState::Ready(seg0.resources);
                 }
-                let _ = writeln!(console, "aml: evaluated {} PCI root bridge(s) authorized", root_bridges.len());
+                let _ = writeln!(
+                    console,
+                    "aml: evaluated {} PCI root bridge(s) authorized",
+                    root_bridges.len()
+                );
             }
             Err(error) => {
                 let _ = writeln!(

@@ -100,7 +100,12 @@ impl Match {
 
     /// A rule for one class, subclass, optionally a programming interface, and segment.
     #[must_use]
-    pub const fn by_class_segment(class: u8, subclass: u8, prog_if: Option<u8>, segment: u16) -> Self {
+    pub const fn by_class_segment(
+        class: u8,
+        subclass: u8,
+        prog_if: Option<u8>,
+        segment: u16,
+    ) -> Self {
         Self {
             vendor: None,
             device: None,

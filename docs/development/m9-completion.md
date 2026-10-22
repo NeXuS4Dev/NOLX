@@ -1946,3 +1946,82 @@ Other local checks on this revision: `cargo test --tests` (no integration tests)
 pre-existing formatting drift in `nolx-df-core`, `nolx-pci-core/ecam.rs` and three kernel HAL
 files is unchanged; `cargo fmt --check` still reports those files, so no formatting claim is
 made. CI has not yet run on this revision.
+
+## S3 resume: long-mode re-entry through the firmware waking vector (2026-10-22)
+
+The previous checkpoint recorded suspend entry alone: the FACS waking vector was zero, CMOS
+`0x0f` was untouched, and a `system_wakeup` produced the platform WAKEUP event without any
+kernel execution afterwards. This revision installs a real hand-off, so the wake path now
+returns to NOLX in long mode and proves it by printing a tag written into kernel RAM before
+the sleep. S3 **save/resume as an M9 gate is still open**: no device is restored, the ACPI PM
+block is not re-decoded, and nothing has run on real hardware.
+
+**FACS plumbing (`crates/nolx-power-core`).** `Fadt::parse` now exposes `firmware_ctrl`,
+preferring a nonzero `X_FIRMWARE_CTRL` (offset 132) over the 32-bit `FIRMWARE_CTRL` (offset 36)
+on revision 2 and later. `facs_waking_vector` / `set_facs_waking_vector` validate the `FACS`
+signature and the declared length (at least 16 bytes, the offset of the vector) and read or
+replace the 32-bit vector at offset 12. Two tests cover the preferred 64-bit address and the
+refusal cases (`FacsError::{TooShort,WrongSignature}`). Assertions PWR-030 and PWR-031 record
+these rules and the boot behaviour; the conformance database is now 434 assertions.
+
+**Hand-off layout (`kernel/src/hal/power.rs`).** One `global_asm!` block, copied to `0x8000`
+before the sleep:
+
+```
++0x000  real-mode entry: zero DS/ES/SS, mov esp,0x7000, lgdt 0x8228, PE, ljmp $0x08,$0x8040
++0x040  .code32: data 0x10, CR3 = temporary PML4 0x9000, CR4/CR0/EFER from the saved data
++0x100  .code64: jmp through the absolute kernel pointer at 0x8308
++0x200  GDT: null, 32-bit code/data, 64-bit code, data
++0x228  GDTR for that GDT (base 0x8200, limit 0x27)
++0x300  saved CR3 (masked), resume entry VA, kernel stack top, saved GDTR and IDTR,
+        saved CR0, CR4 and EFER
++0x360  end of the copied blob
+```
+
+`s3_resume_entry` sits immediately after the blob in the image; it restores the saved CR3,
+RSP, GDTR and IDTR through the direct map, loads CS = `0x08` with `lretq`, sets the data
+segments to `0x10`, and calls `s3_resume_rust`. That function prints
+`power: resumed from S3 with tag {tag:#x}; kernel RAM state preserved`, asserts the tag equals
+`0x534c_3352_4553_554d` (the bytes of `SL3RESUM` stored before the sleep), and halts.
+
+Before the sleep `prepare_s3_resume` copies the live PML4 to `0x9000`, replaces only
+`PML4[0]` with a PDPT that maps the first 4 MiB of physical memory with 2 MiB pages, saves
+CR0/CR4/EFER/CR3/RSP/GDTR/IDTR and the tag, writes the hand-off address into the FACS and sets
+CMOS `0x0f = 0xfe`. The whole first megabyte is already reserved by
+`mm::reserve_kernel_memory`, so the blob and the temporary tables can never be handed to a
+driver.
+
+**Two failure modes found by running it.** The first build refused to install the hand-off
+because `prepare_s3_resume` still bounded the blob length by the old `S3_DATA_OFFSET` (0x300)
+while the blob had grown to 0x340 — the `Unsupported` panic happened before the S3 request and
+therefore produced no SUSPEND/WAKEUP at all. After fixing the bound, the resume marker printed
+and the CPU immediately took a general-protection fault (vector 6) at the first kernel
+instruction: `.org 0x80` placed the `.code64` stub inside the following region, and the
+trampoline programmed CR4/EFER/CR0 from immediates instead of the saved values. The stub now
+lives at `0x100`, and all three control registers are loaded from the saved data block.
+
+**Evidence.** `scripts/check-power-s3.py` now requires the resume marker and quits QEMU once
+it appears (the resumed kernel has no driver or ACPI PM path to shut down cleanly). On the
+`hal-power-test-s3` image both machines pass:
+
+```
+power: S3 hand-off at 0x8000 via FACS 0x1ffe0000, CMOS 0x0f=0xfe
+power: requesting ACPI S3 via PM1a 0x604, control 0x2401
+power: resumed from S3 with tag 0x534c33524553554d; kernel RAM state preserved
+PASS: power-s3-pc
+PASS: power-s3-q35
+```
+
+QMP reported exactly `SUSPEND` then `WAKEUP`, the control word kept SCI_EN with `_S3_` = 1 and
+SLP_EN, and neither run contains `PANIC`, `BUGCHECK` or `CPU exception`. This is T2 evidence
+with QEMU's own ACPI/FACS/SeaBIOS resume path — it is not a hardware run and does not restore
+devices.
+
+**What is still open.** Device power-state policy and restore, re-decoding the ACPI PM block
+after resume, re-initialising xHCI/PCI/HPET and interrupt routing, and any multi-CPU resume.
+The tag proves only that the CPU, the page tables and the kernel stack survived; every device
+is in its post-firmware state. Host checks on this revision: 904 unit tests across
+`cargo test --lib --bins`, 434 conformance assertions, `cargo clippy --all-targets -- -D
+warnings` clean, and `cargo fmt --all -- --check` now clean (the earlier reported drift in
+`nolx-df-core`, `nolx-pci-core` and three kernel HAL files was formatted). CI has not run on
+this revision.

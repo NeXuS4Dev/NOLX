@@ -450,6 +450,8 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
                 if hal::power::test_vm_has_active_busmaster() {
                     let _ = writeln!(console, "power: S3 refused: active PCI bus master");
                 } else {
+                    hal::power::prepare_s3_resume(&mut console)
+                        .expect("power: S3 hand-off installation failed");
                     // SAFETY: single-CPU QEMU fixture with no DMA devices and no runnable
                     // work; the request is the last thing this boot executes.
                     if let Err(error) = unsafe { hal::power::request_s3_quiesced(&mut console) } {

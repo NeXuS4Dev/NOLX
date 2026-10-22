@@ -418,12 +418,16 @@ pub fn pm1_sleep_value(slp_typ: u8, enable: bool) -> Option<u16> {
 pub const FADT_SIGNATURE: [u8; 4] = *b"FACP";
 /// The offset of the FADT revision byte.
 const FADT_REVISION_AT: usize = 8;
+/// The offset of the 32-bit `FIRMWARE_CTRL` (FACS) address.
+const FADT_FIRMWARE_CTRL_AT: usize = 36;
 /// The offset of the 32-bit DSDT address.
 const FADT_DSDT_AT: usize = 40;
 /// The offset of the PM1a control block's I/O port.
 const FADT_PM1A_CNT_AT: usize = 64;
 /// The offset of the PM1b control block's I/O port.
 const FADT_PM1B_CNT_AT: usize = 68;
+/// The offset of the 64-bit `X_FIRMWARE_CTRL` address, present from revision 2.
+const FADT_X_FIRMWARE_CTRL_AT: usize = 132;
 /// The offset of the 64-bit DSDT address, present from revision 2.
 const FADT_X_DSDT_AT: usize = 140;
 /// The shortest FADT that holds the PM1b field.
@@ -438,6 +442,8 @@ pub struct Fadt {
     pub revision: u8,
     /// The physical address of the DSDT, the 64-bit field when the table has one.
     pub dsdt: u64,
+    /// The physical address of the FACS, which holds the 32-bit firmware waking vector.
+    pub firmware_ctrl: Option<u64>,
     /// The I/O port of the PM1a control block, where the sleep type and go bit are written.
     pub pm1a_control: u16,
     /// The I/O port of the PM1b control block, when the platform has one.
@@ -495,6 +501,17 @@ impl Fadt {
         if dsdt == 0 {
             return Err(FadtError::NoDsdt);
         }
+        let firmware32 = u64::from(le32(table, FADT_FIRMWARE_CTRL_AT));
+        let firmware64 = if revision >= 2 && declared >= FADT_X_DSDT_MIN_LENGTH {
+            le64(table, FADT_X_FIRMWARE_CTRL_AT)
+        } else {
+            0
+        };
+        let firmware_ctrl = if firmware64 != 0 {
+            firmware64
+        } else {
+            firmware32
+        };
         let pm1a_control = u16::try_from(le32(table, FADT_PM1A_CNT_AT))
             .ok()
             .filter(|&port| port != 0)
@@ -505,6 +522,7 @@ impl Fadt {
         Ok(Self {
             revision,
             dsdt,
+            firmware_ctrl: (firmware_ctrl != 0).then_some(firmware_ctrl),
             pm1a_control,
             pm1b_control,
             smi_command: u16::try_from(le32(table, 48))
@@ -514,6 +532,58 @@ impl Fadt {
             pm1_control_bytes: table.get(89).copied().unwrap_or(0),
         })
     }
+}
+
+/// The FACS signature: the table that carries the firmware waking vector.
+pub const FACS_SIGNATURE: [u8; 4] = *b"FACS";
+/// The shortest FACS that can carry the 32-bit waking vector.
+const FACS_MIN_LENGTH: usize = 16;
+/// Offset of the 32-bit firmware waking vector in the FACS.
+const FACS_WAKING_VECTOR_AT: usize = 12;
+
+/// Why a FACS was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FacsError {
+    /// The table is shorter than its own header or declares fewer bytes than the vector needs.
+    TooShort,
+    /// The signature is not `FACS`.
+    WrongSignature,
+}
+
+/// Validate a FACS and return its 32-bit firmware waking vector.
+///
+/// The FACS has no checksum: the signature and the declared length are the only checks the
+/// structure offers, so a malformed table is refused rather than patched blindly.
+///
+/// # Errors
+/// [`FacsError`] when the signature or the declared length is unusable.
+pub fn facs_waking_vector(bytes: &[u8]) -> Result<u32, FacsError> {
+    let header = bytes.get(..8).ok_or(FacsError::TooShort)?;
+    if header[..4] != FACS_SIGNATURE {
+        return Err(FacsError::WrongSignature);
+    }
+    let declared = le32(header, 4) as usize;
+    if declared < FACS_MIN_LENGTH || declared > bytes.len() {
+        return Err(FacsError::TooShort);
+    }
+    Ok(le32(bytes, FACS_WAKING_VECTOR_AT))
+}
+
+/// Validate a FACS and overwrite its 32-bit firmware waking vector.
+///
+/// # Errors
+/// [`FacsError`] under the same conditions as [`facs_waking_vector`].
+pub fn set_facs_waking_vector(bytes: &mut [u8], vector: u32) -> Result<(), FacsError> {
+    let header = bytes.get(..8).ok_or(FacsError::TooShort)?;
+    if header[..4] != FACS_SIGNATURE {
+        return Err(FacsError::WrongSignature);
+    }
+    let declared = le32(header, 4) as usize;
+    if declared < FACS_MIN_LENGTH || declared > bytes.len() {
+        return Err(FacsError::TooShort);
+    }
+    bytes[FACS_WAKING_VECTOR_AT..FACS_WAKING_VECTOR_AT + 4].copy_from_slice(&vector.to_le_bytes());
+    Ok(())
 }
 
 fn le32(bytes: &[u8], at: usize) -> u32 {

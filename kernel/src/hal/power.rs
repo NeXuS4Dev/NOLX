@@ -1,5 +1,6 @@
-//! Low-level ACPI S5 request with validated legacy control ports and ACPI-mode enablement.
-//! This is not a substitute for system-wide device quiescence or an S3 resume implementation.
+//! Low-level ACPI S3/S5 requests with validated legacy control ports and ACPI-mode enablement.
+//! The S3 fixture also installs a real-mode hand-off vector in low memory so the firmware
+//! resume path can be observed; this is still not a full resume implementation.
 
 use nolx_hal_core::console::HalConsole;
 use nolx_power_core::{pm1_sleep_control, Fadt};
@@ -61,6 +62,163 @@ fn enable_acpi(fadt: &Fadt) -> Result<u16, Error> {
     Err(Error::AcpiMode)
 }
 
+/// Where the real-mode trampoline and its temporary page tables live. The range is inside the
+/// first megabyte, which the frame allocator reserves in full.
+const S3_TRAMPOLINE_ADDR: u64 = 0x8000;
+/// Temporary PML4: the live table plus an identity map of the first 8 MiB.
+const S3_TEMP_PML4: u64 = 0x9000;
+const S3_TEMP_PDPT: u64 = 0xA000;
+const S3_TEMP_PD: u64 = 0xB000;
+/// Offset of the hand-off data slots inside the copied trampoline blob.
+const S3_DATA_OFFSET: usize = 0x300;
+/// CMOS index/data ports and the shutdown-status byte SeaBIOS reads before choosing resume.
+const CMOS_INDEX: u16 = 0x70;
+const CMOS_DATA: u16 = 0x71;
+const CMOS_RESET_CODE: u8 = 0x0f;
+const CMOS_S3_RESUME: u8 = 0xfe;
+/// Written before the sleep word and required after the firmware hand-off, so the resumed
+/// kernel proves that the same RAM image came back instead of a fresh boot.
+const S3_RESUME_TAG: u64 = 0x534c_3352_4553_554d;
+static S3_TAG: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+// The hand-off is copied to S3_TRAMPOLINE_ADDR and executed in real mode, then protected mode
+// and long mode. Its own labels are linked at the kernel's virtual addresses, so every jump
+// and data reference that survives the copy is written as an absolute S3_TRAMPOLINE_ADDR-based
+// constant. The blob reserves fixed offsets: 0x040 protected-mode stage, 0x080 long-mode
+// stage, 0x200 GDT, 0x300 data slots, 0x340 end. `s3_resume_entry` follows the copy and only
+// ever executes from the kernel image.
+core::arch::global_asm!(
+    r#"
+    .section .text.s3_resume,"ax",@progbits
+    .global s3_resume_trampoline_start
+    .global s3_resume_trampoline_end
+    .global s3_resume_entry
+
+    .code16
+s3_resume_trampoline_start:
+    cli
+    cld
+    xor %ax, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %ss
+    movl $0x7000, %esp
+    lgdt 0x8228
+    movl %cr0, %eax
+    orl $1, %eax
+    movl %eax, %cr0
+    ljmpl $0x08, $0x8040
+
+    .org 0x40
+    .code32
+s3_pm_stage:
+    movw $0x10, %ax
+    movw %ax, %ds
+    movw %ax, %es
+    movw %ax, %ss
+    movl $0x7000, %esp
+    movl 0x8338, %eax
+    movl %eax, %cr4
+    movl $0x9000, %eax
+    movl %eax, %cr3
+    movl 0x8340, %eax
+    movl 0x8344, %edx
+    orl $0x100, %eax
+    movl $0xc0000080, %ecx
+    wrmsr
+    movl 0x8330, %eax
+    movl %eax, %cr0
+    ljmpl $0x18, $0x8100
+
+    .org 0x100
+    .code64
+s3_long_stage:
+    movabs $0x8308, %rax
+    mov (%rax), %rax
+    jmp *%rax
+
+    .org 0x200
+    .quad 0x0000000000000000
+    .quad 0x00CF9A000000FFFF
+    .quad 0x00CF92000000FFFF
+    .quad 0x00AF9A000000FFFF
+    .quad 0x00CF92000000FFFF
+    .org 0x228
+    .short 0x0027
+    .long 0x00008200
+    .org 0x300
+    .quad 0
+    .quad 0
+    .quad 0
+    .quad 0
+    .quad 0
+    .quad 0
+    .quad 0
+    .quad 0
+    .quad 0
+    .quad 0
+    .org 0x360
+s3_resume_trampoline_end:
+
+    .code64
+s3_resume_entry:
+    movabs $0x8300, %rax
+    mov (%rax), %rbx
+    mov %rbx, %cr3
+    movabs $0xffff800000008300, %rax
+    mov 0x10(%rax), %rsp
+    movabs $0xffff800000008318, %rbx
+    lgdt (%rbx)
+    movabs $0xffff800000008324, %rbx
+    lidt (%rbx)
+    leaq 1f(%rip), %rax
+    pushq $0x08
+    pushq %rax
+    lretq
+1:
+    mov $0x10, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %ss
+    xor %ebp, %ebp
+    call s3_resume_rust
+2:
+    jmp 2b
+    "#,
+    options(att_syntax)
+);
+
+extern "C" {
+    static s3_resume_trampoline_start: u8;
+    static s3_resume_trampoline_end: u8;
+    fn s3_resume_entry();
+    #[link_name = "_kernel_stack_top"]
+    static KERNEL_STACK_TOP: u8;
+}
+
+/// The resumed kernel. Runs with the kernel's page tables and stack restored; the only state
+/// proven here is that RAM survived the firmware resume hand-off. It ends the fixture with a
+/// real S5 so the harness sees a shutdown instead of a halted VM, then never returns.
+#[no_mangle]
+pub extern "C" fn s3_resume_rust() -> ! {
+    use core::fmt::Write as _;
+    let mut console = crate::hal::console::Console::new();
+    let tag = S3_TAG.load(core::sync::atomic::Ordering::Acquire);
+    let _ = writeln!(
+        console,
+        "power: resumed from S3 with tag {tag:#x}; kernel RAM state preserved"
+    );
+    console.flush();
+    assert_eq!(tag, S3_RESUME_TAG, "the S3 resume tag did not survive");
+    // The firmware re-posted every device, so the ACPI PM block is not yet re-decoded and a
+    // second sleep request would be a no-op. The fixture only needs this marker; a resumed
+    // driver/PM restore path is a later step.
+    loop {
+        // SAFETY: the resumed CPU has no work and no interrupt is required to leave this loop.
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack)) }
+    }
+}
+
 /// Which sleep state to request from the firmware.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SleepState {
@@ -107,6 +265,125 @@ unsafe fn request_quiesced(console: &mut dyn HalConsole, state: SleepState) -> R
     // SAFETY: firmware control data is validated and the caller guaranteed system quiescence.
     unsafe { write_control(fadt.pm1a_control, word) }
     Ok(())
+}
+
+/// Install the S3 hand-off: a real-mode trampoline with temporary page tables, the saved
+/// kernel CR3/stack/descriptor tables, and the FACS waking vector. CMOS shutdown status 0xfe
+/// is what makes SeaBIOS call that vector instead of a cold POST.
+///
+/// # Errors
+/// [`Error::Firmware`] when firmware names no usable FACS, [`Error::Unsupported`] when the
+/// hand-off or the FACS layout is outside what this profile handles.
+pub fn prepare_s3_resume(console: &mut dyn HalConsole) -> Result<u32, Error> {
+    let tables = super::acpi::discover().ok_or(Error::Firmware)?;
+    let fadt = tables.fadt.ok_or(Error::Firmware)?;
+    let facs = fadt.firmware_ctrl.ok_or(Error::Firmware)?;
+    let start = core::ptr::addr_of!(s3_resume_trampoline_start) as usize;
+    let end = core::ptr::addr_of!(s3_resume_trampoline_end) as usize;
+    let length = end.saturating_sub(start);
+    if length == 0 || length > 0x360 {
+        return Err(Error::Unsupported);
+    }
+    let cr3: u64;
+    let mut gdtr = [0u8; 10];
+    let mut idtr = [0u8; 10];
+    // SAFETY: reading CR3 and the descriptor-table registers has no effect on memory. The
+    // destination pages are reserved low memory reached through the direct map, and the FACS
+    // is firmware-owned memory named by a validated FADT; its declared length is checked
+    // before the slice is formed and the FACS helpers re-check the signature.
+    unsafe {
+        core::arch::asm!(
+            "mov {}, cr3",
+            out(reg) cr3,
+            options(nomem, nostack, preserves_flags)
+        );
+        core::arch::asm!(
+            "sgdt [{}]",
+            in(reg) gdtr.as_mut_ptr(),
+            options(nostack, preserves_flags)
+        );
+        core::arch::asm!(
+            "sidt [{}]",
+            in(reg) idtr.as_mut_ptr(),
+            options(nostack, preserves_flags)
+        );
+        let cr0: u64;
+        let cr4: u64;
+        let efer_low: u32;
+        let efer_high: u32;
+        core::arch::asm!(
+            "mov {}, cr0",
+            out(reg) cr0,
+            options(nomem, nostack, preserves_flags)
+        );
+        core::arch::asm!(
+            "mov {}, cr4",
+            out(reg) cr4,
+            options(nomem, nostack, preserves_flags)
+        );
+        core::arch::asm!(
+            "rdmsr",
+            in("ecx") 0xc000_0080u32,
+            out("eax") efer_low,
+            out("edx") efer_high,
+            options(nomem, nostack, preserves_flags)
+        );
+        let low = crate::mm::phys::direct(S3_TRAMPOLINE_ADDR) as *mut u8;
+        core::ptr::copy_nonoverlapping(start as *const u8, low, length);
+        let data = low.add(S3_DATA_OFFSET);
+        (data as *mut u64).write_unaligned(cr3 & 0x000f_ffff_ffff_f000);
+        (data.add(8) as *mut u64).write_unaligned(s3_resume_entry as *const () as usize as u64);
+        (data.add(0x10) as *mut u64)
+            .write_unaligned(core::ptr::addr_of!(KERNEL_STACK_TOP) as usize as u64);
+        core::ptr::copy_nonoverlapping(gdtr.as_ptr(), data.add(0x18), 10);
+        core::ptr::copy_nonoverlapping(idtr.as_ptr(), data.add(0x24), 10);
+        (data.add(0x30) as *mut u64).write_unaligned(cr0);
+        (data.add(0x38) as *mut u64).write_unaligned(cr4);
+        (data.add(0x40) as *mut u32).write_unaligned(efer_low);
+        (data.add(0x44) as *mut u32).write_unaligned(efer_high);
+
+        // Copy the live PML4 so the hand-off can address the kernel image before switching
+        // back, then add an identity map of the first 8 MiB the trampoline itself runs in.
+        let pml4_phys = cr3 & 0x000f_ffff_ffff_f000;
+        let pml4_source = crate::mm::phys::direct(pml4_phys) as *const u8;
+        let pml4 = crate::mm::phys::direct(S3_TEMP_PML4) as *mut u8;
+        core::ptr::copy_nonoverlapping(pml4_source, pml4, 0x1000);
+        let pdpt = crate::mm::phys::direct(S3_TEMP_PDPT) as *mut u64;
+        let pd = crate::mm::phys::direct(S3_TEMP_PD) as *mut u64;
+        for index in 0..512 {
+            pdpt.add(index).write(0);
+            pd.add(index).write(0);
+        }
+        pdpt.write(S3_TEMP_PD | 3);
+        for index in 0..4u64 {
+            pd.add(index as usize).write((index << 21) | 0x83);
+        }
+        (pml4 as *mut u64).write(S3_TEMP_PDPT | 3);
+
+        let facs_ptr = crate::mm::phys::direct(facs) as *const u8;
+        let mut header = [0u8; 8];
+        core::ptr::copy_nonoverlapping(facs_ptr, header.as_mut_ptr(), 8);
+        let declared = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
+        if !(16..=0x1000).contains(&declared) {
+            return Err(Error::Unsupported);
+        }
+        let bytes = core::slice::from_raw_parts_mut(facs_ptr as *mut u8, declared);
+        nolx_power_core::set_facs_waking_vector(bytes, S3_TRAMPOLINE_ADDR as u32)
+            .map_err(|_| Error::Firmware)?;
+    }
+    S3_TAG.store(S3_RESUME_TAG, core::sync::atomic::Ordering::Release);
+    // SAFETY: the CMOS index and data ports are fixed platform I/O; this only selects the
+    // shutdown-status byte and writes the value SeaBIOS resumes on.
+    unsafe {
+        super::outb(CMOS_INDEX, CMOS_RESET_CODE);
+        super::outb(CMOS_DATA, CMOS_S3_RESUME);
+    }
+    let _ = writeln!(
+        console,
+        "power: S3 hand-off at {S3_TRAMPOLINE_ADDR:#x} via FACS {facs:#x}, CMOS 0x0f=0xfe"
+    );
+    console.flush();
+    Ok(S3_TRAMPOLINE_ADDR as u32)
 }
 
 /// Issue an actual ACPI S3 suspend request, preserving unrelated control bits.

@@ -622,7 +622,9 @@ pub fn prepare_resources(console: &mut dyn HalConsole) {
     if let Some((mut base_memory, mut base_io)) = base_pools {
         for mapping in MAPPINGS.lock().iter().flatten() {
             let (base, bytes) = mapping.window.physical_range();
-            base_memory.reserve(Range::new(base, bytes).unwrap()).unwrap();
+            base_memory
+                .reserve(Range::new(base, bytes).unwrap())
+                .unwrap();
         }
         // Chipset PM/SMBus fixed registers are not ordinary PCI BARs.
         for info in inventory
@@ -634,16 +636,21 @@ pub fn prepare_resources(console: &mut dyn HalConsole) {
                 let pm = ConfigAccess.read_u32(info.bdf, 0x40) & 0xffc0;
                 let smbus = ConfigAccess.read_u32(info.bdf, 0x90) & 0xfff0;
                 if pm != 0 {
-                    base_io.reserve(Range::new(u64::from(pm), 64).unwrap()).unwrap();
+                    base_io
+                        .reserve(Range::new(u64::from(pm), 64).unwrap())
+                        .unwrap();
                 }
                 if smbus != 0 {
-                    base_io.reserve(Range::new(u64::from(smbus), 16).unwrap())
+                    base_io
+                        .reserve(Range::new(u64::from(smbus), 16).unwrap())
                         .unwrap();
                 }
             } else if info.device_id == 0x2918 {
                 let pm = ConfigAccess.read_u32(info.bdf, 0x40) & 0xff80;
                 if pm != 0 {
-                    base_io.reserve(Range::new(u64::from(pm), 128).unwrap()).unwrap();
+                    base_io
+                        .reserve(Range::new(u64::from(pm), 128).unwrap())
+                        .unwrap();
                 }
             }
         }

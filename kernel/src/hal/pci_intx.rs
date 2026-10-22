@@ -346,14 +346,21 @@ pub fn revoke() {
 }
 /// Map evaluated bridge scopes against the existing numbered topology for a segment.
 /// No route is usable until every table and flag-sharing relationship has validated.
-pub fn publish(segment: u16, tables: &[Table], console: &mut dyn HalConsole) -> Result<(), routing::Error> {
+pub fn publish(
+    segment: u16,
+    tables: &[Table],
+    console: &mut dyn HalConsole,
+) -> Result<(), routing::Error> {
     revoke();
     let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
     let mut cache = CACHE.lock();
     let segment_cache = cache.get_mut(segment).ok_or(routing::Error::Topology)?;
     for table in tables {
         let bus = routing::scope_bus(&mut ConfigAccess, &inventory, &table.bridges)?;
-        if segment_cache.rows[..segment_cache.count].iter().any(|r| r.bus == bus) {
+        if segment_cache.rows[..segment_cache.count]
+            .iter()
+            .any(|r| r.bus == bus)
+        {
             return Err(routing::Error::Ambiguous);
         }
         for entry in &table.entries {

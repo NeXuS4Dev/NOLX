@@ -238,6 +238,63 @@ fn a_fadt_that_is_damaged_or_incomplete_is_refused_with_its_reason() {
     );
 }
 
+fn facs(length: u32, vector: u32) -> [u8; 64] {
+    let mut bytes = [0u8; 64];
+    bytes[..4].copy_from_slice(b"FACS");
+    bytes[4..8].copy_from_slice(&length.to_le_bytes());
+    bytes[12..16].copy_from_slice(&vector.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn a_fadt_names_the_facs_and_the_waking_vector_can_be_replaced() {
+    let mut bytes = fadt(116, 1, 0x1000, 0, 0x604, 0);
+    bytes[36..40].copy_from_slice(&0x000f_0000u32.to_le_bytes());
+    bytes[9] = 0;
+    let sum = bytes[..116]
+        .iter()
+        .fold(0u8, |sum, &byte| sum.wrapping_add(byte));
+    bytes[9] = 0u8.wrapping_sub(sum);
+    assert_eq!(
+        Fadt::parse(&bytes[..116]).unwrap().firmware_ctrl,
+        Some(0x000f_0000)
+    );
+    let without = fadt(116, 1, 0x1000, 0, 0x604, 0);
+    assert_eq!(Fadt::parse(&without[..116]).unwrap().firmware_ctrl, None);
+
+    let mut table = facs(64, 0x1234_5678);
+    assert_eq!(facs_waking_vector(&table), Ok(0x1234_5678));
+    set_facs_waking_vector(&mut table, 0x8000).unwrap();
+    assert_eq!(facs_waking_vector(&table), Ok(0x8000));
+    table[..4].copy_from_slice(b"RSDT");
+    assert_eq!(facs_waking_vector(&table), Err(FacsError::WrongSignature));
+    assert_eq!(
+        set_facs_waking_vector(&mut table[..8], 0),
+        Err(FacsError::WrongSignature)
+    );
+    let mut short = facs(8, 0);
+    assert_eq!(facs_waking_vector(&short), Err(FacsError::TooShort));
+    assert_eq!(facs_waking_vector(&short[..12]), Err(FacsError::TooShort));
+    short[4..8].copy_from_slice(&65u32.to_le_bytes());
+    assert_eq!(facs_waking_vector(&short), Err(FacsError::TooShort));
+}
+
+#[test]
+fn a_revision_two_fadt_prefers_the_64_bit_facs_address() {
+    let mut bytes = fadt(148, 2, 0x1000, 0, 0x604, 0);
+    bytes[36..40].copy_from_slice(&0x000e_0000u32.to_le_bytes());
+    bytes[132..140].copy_from_slice(&0x1_0000_0000u64.to_le_bytes());
+    bytes[9] = 0;
+    let sum = bytes[..148]
+        .iter()
+        .fold(0u8, |sum, &byte| sum.wrapping_add(byte));
+    bytes[9] = 0u8.wrapping_sub(sum);
+    assert_eq!(
+        Fadt::parse(&bytes[..148]).unwrap().firmware_ctrl,
+        Some(0x1_0000_0000)
+    );
+}
+
 #[test]
 fn sleep_control_preserves_every_unrelated_bit() {
     let mask = (7 << 10) | (1 << 13);
