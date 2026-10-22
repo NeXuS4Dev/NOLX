@@ -89,7 +89,7 @@ static S3_TAG: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::ne
 // and long mode. Its own labels are linked at the kernel's virtual addresses, so every jump
 // and data reference that survives the copy is written as an absolute S3_TRAMPOLINE_ADDR-based
 // constant. The blob reserves fixed offsets: 0x040 protected-mode stage, 0x080 long-mode
-// stage, 0x200 GDT, 0x300 data slots, 0x340 end. `s3_resume_entry` follows the copy and only
+// stage, 0x200 GDT, 0x300 data slots, 0x380 end. `s3_resume_entry` follows the copy and only
 // ever executes from the kernel image.
 core::arch::global_asm!(
     r#"
@@ -161,7 +161,7 @@ s3_long_stage:
     .quad 0
     .quad 0
     .quad 0
-    .org 0x360
+    .org 0x380
 s3_resume_trampoline_end:
 
     .code64
@@ -185,6 +185,28 @@ s3_resume_entry:
     mov %ax, %es
     mov %ax, %ss
     xor %ebp, %ebp
+    // The wake reset leaves the segment bases zero, but the kernel addresses its per-CPU
+    // block through GS: the first Rust instruction that touches it (the interrupt level in
+    // the framework's admission path) faults on a null base. Restore GS, KernelGS and FS
+    // before any compiled code runs, from the slots the sleep path saved.
+    movabs $0xffff800000008348, %rbx
+    mov (%rbx), %rax
+    mov %rax, %rdx
+    shr $32, %rdx
+    movl $0xc0000101, %ecx
+    wrmsr
+    movabs $0xffff800000008350, %rbx
+    mov (%rbx), %rax
+    mov %rax, %rdx
+    shr $32, %rdx
+    movl $0xc0000102, %ecx
+    wrmsr
+    movabs $0xffff800000008358, %rbx
+    mov (%rbx), %rax
+    mov %rax, %rdx
+    shr $32, %rdx
+    movl $0xc0000100, %ecx
+    wrmsr
     call s3_resume_rust
 2:
     jmp 2b
@@ -216,10 +238,39 @@ pub extern "C" fn s3_resume_rust() -> ! {
     assert_eq!(tag, S3_RESUME_TAG, "the S3 resume tag did not survive");
     match resume_platform(&mut console) {
         Ok(()) => {
-            // SAFETY: the fixture machine carries no storage, network or other DMA device, no
-            // other CPU runs, and this is the last thing the resumed kernel does.
-            if let Err(error) = unsafe { request_s5_quiesced(&mut console) } {
-                let _ = writeln!(console, "power: post-resume S5 failed: {error:?}");
+            // Re-take device, driver and interrupt state the wake reset cleared: re-enable
+            // bus mastering/INTx per device and re-run each driver's bring-up (IOAPIC route,
+            // MSI/MSI-X, MMIO windows, xHCI root-port enumeration).
+            match restore_devices_after_wake(&mut console) {
+                Ok((count, refused)) => {
+                    let _ = writeln!(
+                        console,
+                        "power: post-resume device restore complete: {count} controller(s) re-started, {refused} refused"
+                    );
+                    console.flush();
+                }
+                Err(error) => {
+                    let _ = writeln!(
+                        console,
+                        "power: post-resume device restore failed: {error:?}"
+                    );
+                    console.flush();
+                }
+            }
+            // The restored devices are running again, so the fixture verifies them while
+            // they are live and only then shuts down through the ordinary fail-closed path.
+            if verify_restored_devices(&mut console) {
+                // SAFETY: no other CPU runs, the fail-closed quiesce above stopped and proved
+                // every driver quiet, and this is the last thing the resumed kernel does.
+                if let Err(error) = unsafe { request_s5_quiesced(&mut console) } {
+                    let _ = writeln!(console, "power: post-resume S5 failed: {error:?}");
+                    console.flush();
+                }
+            } else {
+                let _ = writeln!(
+                    console,
+                    "power: post-resume S5 refused: devices not quiesced"
+                );
                 console.flush();
             }
         }
@@ -248,6 +299,11 @@ fn resume_platform(console: &mut dyn HalConsole) -> Result<(), Error> {
     let tables = super::acpi::discover().ok_or(Error::Firmware)?;
     let fadt = tables.fadt.ok_or(Error::Firmware)?;
     super::pci::refresh_transport(console);
+    // The wake reset also returns every function's BARs to their power-on value, which on this
+    // board profile means the addresses the kernel planned at boot are gone -- a driver that
+    // maps its BAR afterwards reads a zero base and refuses (observed as `BarNotMemory(4)`).
+    // Re-run the same bounded, board-profile-checked assignment before any driver restarts.
+    super::pci::prepare_resources(console);
     restore_pm_base(console, &fadt)?;
     let current = enable_acpi(&fadt)?;
     // SAFETY: the FADT parser validated the port and the control block width.
@@ -319,6 +375,138 @@ fn restore_pm_base(console: &mut dyn HalConsole, fadt: &Fadt) -> Result<(), Erro
     Ok(())
 }
 
+/// Prove the restored device tree actually works, then quiesce it for the shutdown that ends
+/// the fixture.
+///
+/// A restore that only printed "started" would be a marker, not evidence: the wake reset could
+/// have left a controller whose registers look right and whose transport is dead. Each restored
+/// storage handle is therefore made to read sector zero through its own public block path, and
+/// the bytes are checked against what firmware left in the boot image (the MBR signature).
+/// A device that answers is quiesced; a device that refuses keeps its ownership, so the
+/// fail-closed shutdown below never runs with an unproven controller still able to write.
+fn verify_restored_devices(console: &mut dyn HalConsole) -> bool {
+    let mut viable = 0usize;
+    for dev in 0..super::driver_start::DEVICES {
+        if super::driver_start::state(dev) != Ok(nolx_df_core::State::Started) {
+            continue;
+        }
+        let name = super::driver_start::name(dev).unwrap_or("device");
+        if !matches!(name, "virtio-blk" | "ahci" | "nvme") {
+            viable += 1;
+            continue;
+        }
+        let mut sector = [0u8; 512];
+        match super::blockdev::read_sectors(dev, 0, &mut sector) {
+            Ok(()) => {
+                let signature = [sector[510], sector[511]];
+                let ok = signature == [0x55, 0xaa];
+                let _ = writeln!(
+                    console,
+                    "power: post-resume {name} handle={dev} read sector 0: signature={:#04x}{:#04x} ok={ok}",
+                    signature[0], signature[1]
+                );
+                if ok {
+                    viable += 1;
+                }
+            }
+            Err(error) => {
+                let _ = writeln!(
+                    console,
+                    "power: post-resume {name} handle={dev} read refused after wake: {error:?}"
+                );
+            }
+        }
+    }
+    console.flush();
+    // Shutdown must not inherit a device the resume could not prove. The quiesce is fail-closed
+    // and irreversible, which is what the S5 write below requires.
+    match super::driver_start::quiesce(console) {
+        Ok(stopped) => {
+            let _ = writeln!(
+                console,
+                "power: post-resume shutdown quiesce: {stopped} controller(s) stopped, {viable} verified after wake"
+            );
+        }
+        Err(error) => {
+            let _ = writeln!(
+                console,
+                "power: post-resume shutdown quiesce refused: {error:?}; S5 refused"
+            );
+            console.flush();
+            return false;
+        }
+    }
+    let _ = writeln!(
+        console,
+        "power: post-resume device verification: {viable} usable controller(s)"
+    );
+    console.flush();
+    true
+}
+
+/// Suspend every started device before the S3 sleep, keeping the records restartable.
+///
+/// A wake reset clears each controller's registers and bus mastering while the kernel's page
+/// tables and records survive, so the order matters: flush durable state through each driver's
+/// own barrier, stop every started driver with its checked stop, release only the MMIO that stop
+/// proved unused, and only then ask the chipset to sleep. Unlike the shutdown quiesce this
+/// leaves admission open -- the same records are started again after the wake -- but a failed
+/// barrier or stop aborts the suspend with nothing having been handed to firmware.
+#[cfg(any(feature = "hal-power-test-s3", feature = "hal-power-s3-device-test"))]
+pub fn suspend_devices(console: &mut dyn HalConsole) -> Result<usize, Error> {
+    let stopped = super::driver_start::suspend(console).map_err(|_| Error::Devices)?;
+    let _ = writeln!(
+        console,
+        "power: pre-suspend device quiesce: {stopped} controller(s) stopped, admission retained"
+    );
+    console.flush();
+    Ok(stopped)
+}
+
+/// Restore device, driver and interrupt state after a firmware S3 wake.
+///
+/// A wake reset returns every device to its power-on state: the PCI command register loses
+/// bus mastering and re-masks INTx, IOAPIC redirection entries are masked, and each
+/// controller's internal registers are cleared. The kernel's own view survived in RAM
+/// (page tables, heap, framework records), so the restore re-takes each device instead of
+/// re-probing the bus: every record is started again through its original dispatch table,
+/// which re-enables bus mastering on its BAR device, re-programs its IOAPIC route and
+/// MSI/MSI-X, re-maps its MMIO window and -- for xHCI -- re-enumerates its root ports.
+///
+/// A device that fails to clean or start is left where it is with its DMA/MMIO pinned: a
+/// resume is not permission to reclaim hardware the kernel cannot prove is quiet. Device power
+/// states (D-states) are not restored; each driver returns to its working state, not to the
+/// exact D-state it was in.
+fn restore_devices_after_wake(console: &mut dyn HalConsole) -> Result<(usize, usize), Error> {
+    let (restored, not_restored) = super::driver_start::resume().map_err(|_| Error::Devices)?;
+    for dev in 0..super::driver_start::DEVICES {
+        let name = super::driver_start::name(dev).unwrap_or("device");
+        match super::driver_start::state(dev) {
+            Ok(nolx_df_core::State::Started) => {
+                let _ = writeln!(console, "power: {name} handle={dev} restored after S3 wake");
+            }
+            Ok(state) => {
+                let _ = writeln!(
+                    console,
+                    "power: {name} handle={dev} not restored after S3 wake: {state:?}"
+                );
+                // Say why, when the driver retains a reason. A resume that only reports the
+                // state leaves the failing step of a multi-stage bring-up invisible.
+                if name == "virtio-blk" {
+                    super::virtio_blk::diagnose(console, dev);
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    let _ = writeln!(
+        console,
+        "power: post-resume device restore: {restored} restored, {not_restored} not restored"
+    );
+    console.flush();
+    Ok((restored, not_restored))
+}
+
 /// Which sleep state to request from the firmware.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SleepState {
@@ -381,7 +569,7 @@ pub fn prepare_s3_resume(console: &mut dyn HalConsole) -> Result<u32, Error> {
     let start = core::ptr::addr_of!(s3_resume_trampoline_start) as usize;
     let end = core::ptr::addr_of!(s3_resume_trampoline_end) as usize;
     let length = end.saturating_sub(start);
-    if length == 0 || length > 0x360 {
+    if length == 0 || length > 0x380 {
         return Err(Error::Unsupported);
     }
     let cr3: u64;
@@ -441,6 +629,25 @@ pub fn prepare_s3_resume(console: &mut dyn HalConsole) -> Result<u32, Error> {
         (data.add(0x38) as *mut u64).write_unaligned(cr4);
         (data.add(0x40) as *mut u32).write_unaligned(efer_low);
         (data.add(0x44) as *mut u32).write_unaligned(efer_high);
+        // Per-CPU addressing goes through GS and the thread pointer through FS; the wake reset
+        // zeroes both bases, so the resume stub reloads them from these slots.
+        for (offset, msr) in [
+            (0x48usize, 0xc000_0101u32),
+            (0x50, 0xc000_0102),
+            (0x58, 0xc000_0100),
+        ] {
+            let low: u32;
+            let high: u32;
+            core::arch::asm!(
+                "rdmsr",
+                in("ecx") msr,
+                out("eax") low,
+                out("edx") high,
+                options(nomem, nostack, preserves_flags)
+            );
+            (data.add(offset) as *mut u32).write_unaligned(low);
+            (data.add(offset + 4) as *mut u32).write_unaligned(high);
+        }
 
         // Copy the live PML4 so the hand-off can address the kernel image before switching
         // back, then add an identity map of the first 8 MiB the trampoline itself runs in.
@@ -515,7 +722,11 @@ pub unsafe fn request_s5_quiesced(console: &mut dyn HalConsole) -> Result<(), Er
 
 /// A conservative guard for the dedicated single-segment, single-CPU QEMU power test only.
 /// This is deliberately not presented as production device-power policy.
-#[cfg(any(feature = "hal-power-test-s5", feature = "hal-power-test-s3"))]
+#[cfg(any(
+    feature = "hal-power-test-s5",
+    feature = "hal-power-test-s3",
+    feature = "hal-power-s3-device-test"
+))]
 pub fn test_vm_has_active_busmaster() -> bool {
     use nolx_pci_core::ConfigSpace;
     let inventory = nolx_pci_core::enumerate(&mut super::pci::ConfigAccess);

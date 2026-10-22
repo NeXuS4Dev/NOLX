@@ -1670,7 +1670,8 @@ Remaining open gates (unchanged from the checkpoints above):
   under their feature sets, but this sandbox's QEMU has no user-mode network backend, so their
   first execution is CI. PCI-031 stays `pending-T2` until that run passes.
 - USB hubs, SuperSpeed device classes/hotplug and general endpoint recovery; SS HID selection
-  remains host-tested only.
+  remains host-tested only. Refused SuperSpeed slots now have a recovery fixture that proves
+  port/slot release against a live USB2 peer (`scripts/check-usb-ss-recovery.py`, awaiting CI).
 - Executive/process-handle, security/namespace, waitable and user-facing input-device
   bindings; PS/2 and input-object paths have no framework recovery contract.
 - Remaining AML operation-region providers and operations; general hardware-field AML/PCI
@@ -2151,3 +2152,99 @@ restored: the fixture machine deliberately has no storage or network controller,
 nothing to re-initialise. The tag plus the PM re-take prove that the CPU, the page tables, the
 kernel heap and the ACPI tables survived and that the resumed kernel can still drive the
 chipset; they do not prove a usable post-resume device tree. S3 save/resume stays open.
+
+## Device restore after S3, applied region writes and SuperSpeed slot recovery (2026-10-22)
+
+This checkpoint closes the "nothing runs after the wake" limitation of the S3 resume path and
+turns the operation-region write backend from a journaled intent into an exercised hardware
+path. It does **not** close the S3 gate itself: per-device D-state policy, multi-CPU resume and
+higher-layer cache/user-task orchestration are still missing, and no part of this ran on
+physical hardware.
+
+**A wake reset loses more than RAM state.** Instrumenting a device-backed resume found three
+independent losses on top of the three the previous checkpoint already repaired:
+
+* *The per-CPU segment bases.* The resumed kernel faulted with `CPU exception vector=14 …
+  cr2=0x20` at `movzbl %gs:0x20` — the first GS-relative read, which is the framework's
+  interrupt-level check inside its admission path. The wake reset leaves `IA32_GS_BASE`,
+  `IA32_KERNEL_GS_BASE` and `IA32_FS_BASE` at zero, and the hand-off saved CR0/CR4/EFER/CR3,
+  RSP, GDTR and IDTR but not those three MSRs. `prepare_s3_resume` now saves them and
+  `s3_resume_entry` writes them back before any compiled code runs.
+* *The BAR assignment.* With the segment bases restored the resume reached the drivers and
+  refused with `virtio-blk: handle=0 last bring-up refused: BarNotMemory(4)`: the wake reset
+  returns every function's BARs to their power-on value, so the addresses the bounded planner
+  assigned at boot were gone. `resume_platform` now re-runs `pci::prepare_resources` after
+  `pci::refresh_transport`, with the same board-profile check and readback as at boot.
+* *Nothing verified the result.* A resumed driver that merely reported "started" would be a
+  marker, not evidence, so `verify_restored_devices` makes each restored storage handle read
+  sector zero through its own public block path and checks the MBR signature before the
+  fail-closed shutdown quiesce; if that quiesce refuses, the S5 write is refused too.
+
+**Suspend has to be reversible.** The existing shutdown `quiesce` freezes admission
+irreversibly, which would make a post-wake restart impossible. `nolx-df-core` now has
+`Registry::suspend` (same barrier-before-stop ordering, same reverse discovery order, same
+release-only-after-proof rule, but **no** freeze) and `Registry::resume` (forward order, a
+failed record retried through its checked stop first, refusals counted rather than hidden).
+Four new framework tests cover the ordering, a failed barrier, a failed stop and a resume
+after a shutdown freeze.
+
+**Region writes now have an applied path.** `Namespace::set_region_writer` plus the
+`FirmwareRegions` provider (authorized memory/port windows *and* an embedded-controller
+handshake) are installed by `evaluate_devices`, and `hal-aml-test` exercises the applying half
+on hardware: it authorizes the PCI configuration address port, writes the value the port
+already holds (a real store with a verifiable readback that cannot disturb the latched
+address), and proves three refusals — an unpermitted value is denied before any hardware
+access, a field outside every window never reaches the port, and an unauthorized EC write is
+refused rather than defaulted. The EC provider itself implements the ACPI handshake (RD_EC
+0x80 / WR_EC 0x81, bounded IBF/OBF polls, byte-wide only, one authorized command/data pair,
+never a defaulted controller); **no x86 QEMU machine model provides an embedded controller**,
+so that handshake is not hardware-verified and is recorded as `tested-T1` at best.
+
+**Evidence (local, QEMU 11.1.50, Rust 1.97.0 in this sandbox):**
+
+```
+power: suspend barrier handle=0 driver=virtio-blk durable=true
+power: pre-suspend device quiesce: 1 controller(s) stopped, admission retained
+power: S3 pre-suspend: 1 controller(s) stopped, records retained
+power: S3 hand-off at 0x8000 via FACS 0x1ffe0000, CMOS 0x0f=0xfe
+power: requesting ACPI S3 via PM1a 0x604, control 0x2401
+power: resumed from S3 with tag 0x534c33524553554d; kernel RAM state preserved
+pci: ECAM identity mismatch; legacy fallback retained
+pci: segment 0000: native resource assignment: 6 BARs, 0 bridge windows, readback verified
+power: post-resume PM block restored on 00:1f.0, base 0x600, ACPI enable set
+power: post-resume PM1a 0x604 control 0x1 (readback 0x1), ACPI mode re-entered
+power: virtio-blk handle=0 restored after S3 wake
+power: post-resume device restore: 1 restored, 0 not restored
+power: post-resume virtio-blk handle=0 read sector 0: signature=0x550xaa ok=true
+power: post-resume shutdown quiesce: 1 controller(s) stopped, 1 verified after wake
+power: requesting ACPI S5 via PM1a 0x604, control 0x2001
+PASS: power-s3-pc;  QMP SUSPEND + WAKEUP, control 0x2401, resume tag verified,
+      PM re-entered at 0x1, 1 device suspended/restored/verified, powered off
+PASS: power-s3-q35; (same chain; Q35's stale ECAM is rejected and re-assigned)
+```
+
+`scripts/check-power-s3.py --with-devices` boots a real virtio-blk disk built by
+`tools/make-test-disk.py`, requires the whole chain above, forbids `power: post-resume S5
+refused`, and still requires the guest to power itself off (no host `quit`). The no-device
+`hal-power-test-s3` profile keeps passing unchanged, so the new path does not depend on there
+being a device to restore.
+
+**Other checks on this revision.** 13/13 AML fixtures (`check-aml.py`, including the new
+`aml: region-write selftest`), 4/4 S3 fixtures, `check-absent-devices.py` in both modes,
+`check-usb-ss-recovery.py` on PC and Q35, `make bootcheck`, 910 host tests
+(`cargo test --lib --bins`), `cargo clippy --all-targets -D warnings`, `cargo fmt --all --
+--check`, the unsafe audit (300 blocks, 0 missing SAFETY comments) and the conformance
+database at 444 assertions / 0 problems.
+
+**Sandbox limitation, stated rather than hidden.** This QEMU build has no input subsystem:
+`input-send-event` is accepted but never reaches a USB HID device, so the keyboard steps of
+`check-usb-input.py` fail here exactly as they do in the new SuperSpeed fixture. The
+SuperSpeed fixture's enumeration, refusal, DMA-baseline and port-release assertions all pass
+locally; its peer-liveness presses are CI-only, which is why USB-039 is `pending-T2`.
+
+**Still open after this checkpoint.** Per-device power states (`_PSx`/D-states) are not
+applied: a restored driver returns to its working state, not to the D-state it was in.
+Multi-CPU resume does not exist (the APs are never parked). Higher-layer cache and user-task
+orchestration around the sleep is unchanged. The general AML operation-region providers
+beyond the HPET page, the FADT PM1a block and the EC handshake are still missing, and the EC
+handshake has no machine to run against. M9 remains **in progress**.

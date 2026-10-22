@@ -405,3 +405,71 @@ fn recovery_requires_failed_exact_handle_and_cannot_thaw_failed_shutdown() {
     assert_eq!(failed.recover(1), Err(Error::Busy));
     assert_eq!(failed.state(1), Ok(State::Failed));
 }
+
+#[test]
+fn suspend_stops_in_reverse_order_without_closing_admission() {
+    use std::cell::RefCell;
+    let calls = RefCell::new(std::vec::Vec::new());
+    let mut reg = shutdown_registry(ok);
+    assert_eq!(
+        reg.suspend(
+            |d, n| {
+                assert_eq!(n, "shutdown");
+                calls.borrow_mut().push((0, d));
+                true
+            },
+            |d| calls.borrow_mut().push((1, d))
+        ),
+        Ok(3)
+    );
+    assert_eq!(
+        *calls.borrow(),
+        [(0, 0), (0, 1), (0, 2), (1, 2), (1, 1), (1, 0)]
+    );
+    // Suspension is reversible: admission is still open and the records can start again.
+    assert!(!reg.frozen());
+    for d in 0..3 {
+        assert_eq!(reg.state(d), Ok(State::Stopped));
+    }
+    assert_eq!(reg.resume(), Ok((3, 0)));
+    for d in 0..3 {
+        assert_eq!(reg.state(d), Ok(State::Started));
+    }
+}
+#[test]
+fn suspend_barrier_failure_stops_nothing_and_leaves_records_started() {
+    let mut reg = shutdown_registry(ok);
+    assert_eq!(
+        reg.suspend(|d, _| d != 1, |_| panic!()),
+        Err(Error::OpFailed)
+    );
+    assert!(!reg.frozen());
+    for d in 0..3 {
+        assert_eq!(reg.state(d), Ok(State::Started));
+    }
+}
+#[test]
+fn suspend_stop_failure_keeps_that_record_failed_and_resume_reports_it() {
+    let mut reg = shutdown_registry(|d| d != 1);
+    let mut released = std::vec::Vec::new();
+    assert_eq!(
+        reg.suspend(|_, _| true, |d| released.push(d)),
+        Err(Error::OpFailed)
+    );
+    // Only the devices stopped before the failure were released.
+    assert_eq!(released, [2]);
+    assert_eq!(reg.state(2), Ok(State::Stopped));
+    assert_eq!(reg.state(1), Ok(State::Failed));
+    assert_eq!(reg.state(0), Ok(State::Started));
+    // The failed record is retried through its stop callback before it can start again.
+    assert_eq!(reg.resume(), Ok((1, 1)));
+    assert_eq!(reg.state(2), Ok(State::Started));
+    assert_eq!(reg.state(1), Ok(State::Failed));
+    assert_eq!(reg.state(0), Ok(State::Started));
+}
+#[test]
+fn resume_refuses_after_shutdown_freeze() {
+    let mut reg = shutdown_registry(ok);
+    reg.quiesce(|_, _| true, |_| {}).unwrap();
+    assert_eq!(reg.resume(), Err(Error::Busy));
+}

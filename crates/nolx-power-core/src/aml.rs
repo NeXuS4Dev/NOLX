@@ -832,6 +832,9 @@ pub struct Namespace<'a> {
     integer_mask: u64,
     reader: Option<&'a dyn FieldReader>,
     regions: Option<&'a dyn RegionFieldReader>,
+    /// The provider that applies journaled region-field writes to hardware. Absent means the
+    /// writes stay intents and nothing is written.
+    region_writes: Option<&'a dyn RegionFieldWriteBackend<Error = Error>>,
 }
 impl Default for Namespace<'_> {
     fn default() -> Self {
@@ -854,6 +857,7 @@ impl<'a> Namespace<'a> {
             integer_mask: u64::MAX,
             reader: None,
             regions: None,
+            region_writes: None,
         }
     }
     /// Install a read-only provider; ordinary evaluation without one still refuses fields.
@@ -868,6 +872,17 @@ impl<'a> Namespace<'a> {
     pub fn set_region_reader(&mut self, regions: &'a dyn RegionFieldReader) {
         self.regions = Some(regions);
     }
+
+    /// Install the provider that applies operation-region field writes.
+    ///
+    /// A method's region writes are journaled intents until a writer is installed: then they
+    /// are applied through [`apply_region_field_writes`], exact-permission checked with a
+    /// verified readback. Without a writer the intents are dropped and no hardware write
+    /// occurs.
+    pub fn set_region_writer(&mut self, writer: &'a dyn RegionFieldWriteBackend<Error = Error>) {
+        self.region_writes = Some(writer);
+    }
+
     /// Notify a supported firmware interrupt-model method. Only the complete side-effect-free
     /// shape Store(Arg0, named integer) is accepted; validation precedes the single mutation.
     /// Absence is distinct from failure. No operation-region/global hardware writes occur.

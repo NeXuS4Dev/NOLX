@@ -469,6 +469,80 @@ impl<const D: usize, const N: usize> Registry<D, N> {
         Ok(stopped)
     }
 
+    /// Flush every started device, then stop in reverse discovery order, for a **suspend**.
+    ///
+    /// Unlike [`Registry::quiesce`] this does not freeze admission: the same records are
+    /// expected to be restarted after the wake, so suspension is reversible. It still refuses
+    /// to run with a failed record, still requires every durable barrier before any stop, and
+    /// still reports a failed stop by leaving that record `Failed` with its resources owned.
+    pub fn suspend(
+        &mut self,
+        mut flush: impl FnMut(usize, &'static str) -> bool,
+        mut after_stop: impl FnMut(usize),
+    ) -> Result<usize, Error> {
+        if self.frozen {
+            return Err(Error::Busy);
+        }
+        if self
+            .devices
+            .iter()
+            .flatten()
+            .any(|d| d.state == State::Failed)
+        {
+            return Err(Error::BadState);
+        }
+        // No device is stopped until all durable barriers succeed.
+        for dev in 0..N {
+            if self.state(dev) == Ok(State::Started) && !flush(dev, self.driver_name(dev)?) {
+                return Err(Error::OpFailed);
+            }
+        }
+        let mut stopped = 0;
+        for dev in (0..N).rev() {
+            if self.state(dev) == Ok(State::Started) {
+                self.stop_inner(dev)?;
+                after_stop(dev);
+                stopped += 1;
+            }
+        }
+        Ok(stopped)
+    }
+
+    /// Restart every stopped record in forward discovery order after a suspended platform wakes.
+    ///
+    /// A `Failed` record is retried through its original stop callback first and only started
+    /// when that proves the controller quiet; a record that cannot be cleaned or started keeps
+    /// its state, so the caller never mistakes a partial restore for a working device tree.
+    /// Returns the number started and the number that refused, and refuses outright once
+    /// shutdown admission is closed.
+    pub fn resume(&mut self) -> Result<(usize, usize), Error> {
+        if self.frozen {
+            return Err(Error::Busy);
+        }
+        let mut started = 0;
+        let mut refused = 0;
+        for dev in 0..N {
+            match self.state(dev) {
+                Ok(State::Stopped) => {
+                    if self.start(dev).is_ok() {
+                        started += 1;
+                    } else {
+                        refused += 1;
+                    }
+                }
+                Ok(State::Failed) => {
+                    if self.recover(dev).is_ok() && self.start(dev).is_ok() {
+                        started += 1;
+                    } else {
+                        refused += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok((started, refused))
+    }
+
     fn device(&self, dev: usize) -> Result<&Device, Error> {
         self.devices
             .get(dev)

@@ -28,7 +28,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def boot(qemu, kernel, machine):
+def boot(qemu, kernel, machine, devices=False):
     name = f'power-s3-{machine}'
     log = ROOT / 'build' / f'{name}.log'
     qmp = ROOT / 'build' / f'{name}.sock'
@@ -40,6 +40,15 @@ def boot(qemu, kernel, machine):
     command = [qemu, '-machine', platform, '-kernel', str(kernel), '-m', '512M',
                '-nographic', '-no-reboot', '-qmp', f'unix:{qmp},server=on,wait=off',
                '-net', 'none']
+    disk = None
+    if devices:
+        # One real virtio-blk controller: its driver suspends before the sleep and must be
+        # re-taken, verified and quiesced again after the wake.
+        disk = ROOT / 'build' / f'{name}.img'
+        subprocess.run(['python3', 'tools/make-test-disk.py', str(disk)],
+                       cwd=ROOT, check=True, stdout=subprocess.DEVNULL)
+        command += ['-drive', f'file={disk},if=none,id=s3disk,format=raw',
+                    '-device', 'virtio-blk-pci,drive=s3disk']
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     events = []
     pending = b''
@@ -110,6 +119,8 @@ def boot(qemu, kernel, machine):
                     process.kill()
                     process.wait()
             qmp.unlink(missing_ok=True)
+            if disk is not None:
+                disk.unlink(missing_ok=True)
     text = log.read_text(errors='replace')
     assert code == 0, (code, text)
     assert 'NOLX: address space selftest:' in text, text
@@ -133,17 +144,37 @@ def boot(qemu, kernel, machine):
     assert order == ['SUSPEND', 'WAKEUP', 'SHUTDOWN'], events
     post = re.search(r'power: post-resume PM1a 0x[0-9a-f]+ control (0x[0-9a-f]+)', resumed)
     assert post and int(post.group(1), 16) & 1, text
-    print(f'PASS: {name}; QMP SUSPEND + WAKEUP, control {hex(word)}, resume tag verified, '
-          f'PM re-entered at {post.group(1)} and powered off')
+    if devices:
+        # The device tree is suspended before the sleep, re-taken after the wake, proven
+        # usable by a real sector read, and quiesced again before the S5 write.
+        before = text.split('power: requesting ACPI S3', 1)[0]
+        assert re.search(r'power: suspend barrier handle=\d+ driver=virtio-blk durable=true', before), text
+        assert re.search(r'power: pre-suspend device quiesce: 1 controller\(s\) stopped, admission retained', before), text
+        assert re.search(r'power: virtio-blk handle=\d+ restored after S3 wake', resumed), text
+        assert re.search(r'power: post-resume device restore: 1 restored, 0 not restored', resumed), text
+        assert re.search(r'power: post-resume virtio-blk handle=\d+ read sector 0: '
+                         r'signature=0x[0-9a-f]{2}0x[0-9a-f]{2} ok=true', resumed), text
+        assert 'power: post-resume S5 refused' not in text, text
+        assert re.search(r'power: post-resume shutdown quiesce: 1 controller\(s\) stopped, '
+                         r'1 verified after wake', resumed), text
+        print(f'PASS: {name}; QMP SUSPEND + WAKEUP, control {hex(word)}, resume tag verified, '
+              f'PM re-entered at {post.group(1)}, 1 device suspended/restored/verified, powered off')
+    else:
+        print(f'PASS: {name}; QMP SUSPEND + WAKEUP, control {hex(word)}, resume tag verified, '
+              f'PM re-entered at {post.group(1)} and powered off')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kernel', type=Path, default=ROOT / 'build/nolx.elf')
+    parser.add_argument('--with-devices', action='store_true',
+                        help='boot hal-power-s3-device-test: one virtio-blk suspended, restored '
+                             'and verified across the wake')
+    parser.add_argument('--machine', choices=['pc', 'q35'], action='append')
     args = parser.parse_args()
     qemu = os.environ.get('QEMU', 'qemu-system-x86_64')
-    for machine in ['pc', 'q35']:
-        boot(qemu, args.kernel.resolve(), machine)
+    for machine in args.machine or ['pc', 'q35']:
+        boot(qemu, args.kernel.resolve(), machine, devices=args.with_devices)
 
 
 if __name__ == '__main__':

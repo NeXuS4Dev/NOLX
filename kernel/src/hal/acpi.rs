@@ -291,8 +291,10 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
     super::pci_intx::disable_links_for_test(console);
     let snapshot = super::pci_intx::Snapshot::capture();
     // Operation-region reads are authorized only for blocks another validated table named.
+    // Writes are journaled intents until a writer is installed; then they are applied to
+    // authorized hardware with exact permission and a verified readback.
     let regions = {
-        let mut regions = super::aml_region::RegionWindows::empty();
+        let mut regions = super::aml_region::FirmwareRegions::empty();
         if let Some(hpet) = &platform.hpet {
             if hpet.base.address_space_id != 0 {
                 let _ = writeln!(
@@ -334,6 +336,7 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
     let mut namespace = Namespace::with_dsdt_revision(dsdt.bytes()[8]);
     namespace.set_field_reader(&snapshot);
     namespace.set_region_reader(&regions);
+    namespace.set_region_writer(&regions);
     match namespace.load(&dsdt.bytes()[36..]) {
         Ok(()) => {
             loaded += 1;
@@ -601,5 +604,116 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
             .resources
             .is_none());
         let _ = writeln!(console, "aml: firmware method selftest: computed status, decoded resources, disabled-device gating, unsupported/loop/recursion refusal verified");
+        region_write_selftest(console);
     }
+}
+
+/// Exercise the operation-region **write** backend against real hardware and real refusals.
+///
+/// The journal that produces region-write intents is host-tested, and no method in this board
+/// profile writes a region field, so without this the kernel's applying half would never run.
+/// The target is the PCI configuration **address** port (0xcf8): it latches a 32-bit value and
+/// reads it back, so writing the value it already holds is a real port store whose postcondition
+/// is verifiable, and it changes nothing about the configuration transaction in flight. The
+/// fixture drives the same transaction the evaluator feeds: exact permission, read-before-write,
+/// hardware write, verified readback. It also proves the refusals that keep the backend honest:
+/// a value the caller did not permit is never written, a field outside every authorized window
+/// never reaches hardware, and an embedded-controller field is refused rather than guessed
+/// because no ECDT or EC device authorized a port pair.
+#[cfg(feature = "hal-aml-test")]
+fn region_write_selftest(console: &mut dyn nolx_hal_core::console::HalConsole) {
+    use nolx_power_core::aml::{
+        apply_region_field_writes, Error as AmlError, MethodEffects, RegionField,
+        RegionFieldReader, RegionFieldWrite, RegionFieldWriteBackend, RegionFieldWritePermission,
+        RegionSpace, RegionWriteTransactionError,
+    };
+    const CONFIG_ADDRESS: u64 = 0x0cf8;
+    let mut regions = super::aml_region::FirmwareRegions::empty();
+    assert!(
+        regions.authorize_io(CONFIG_ADDRESS, 4),
+        "the fixture port window was refused"
+    );
+    let field = RegionField {
+        space: RegionSpace::SystemIo,
+        address: CONFIG_ADDRESS,
+        bits: 32,
+        shift: 0,
+        access: 4,
+    };
+    // The value written is the value the port already holds, so the transaction is a real store
+    // with a real readback and cannot disturb the address the transport latched.
+    let current = RegionFieldReader::read(&regions, RegionSpace::SystemIo, CONFIG_ADDRESS, 4)
+        .expect("the configuration address port did not answer");
+    let effects = MethodEffects {
+        result: None,
+        reads: alloc::vec::Vec::new(),
+        writes: alloc::vec::Vec::new(),
+        region_reads: alloc::vec::Vec::new(),
+        region_writes: alloc::vec![RegionFieldWrite {
+            field,
+            value: current
+        }],
+    };
+    let permission =
+        RegionFieldWritePermission::from_values(field, &[current]).expect("permission");
+    assert_eq!(
+        apply_region_field_writes(&effects, &[permission], &mut regions),
+        Ok(())
+    );
+    let readback = RegionFieldReader::read(&regions, RegionSpace::SystemIo, CONFIG_ADDRESS, 4)
+        .expect("readback refused");
+    assert_eq!(
+        readback, current,
+        "the region write did not survive readback"
+    );
+
+    // A value the caller did not permit is refused before any hardware access.
+    let denied = RegionFieldWritePermission::from_values(field, &[!current & 0xffff_ffff])
+        .expect("permission");
+    assert_eq!(
+        apply_region_field_writes(&effects, &[denied], &mut regions),
+        Err(RegionWriteTransactionError::PermissionDenied)
+    );
+
+    // A field outside every authorized window never reaches the port.
+    let outside = RegionField {
+        address: CONFIG_ADDRESS + 0x10,
+        ..field
+    };
+    let outside_effects = MethodEffects {
+        region_writes: alloc::vec![RegionFieldWrite {
+            field: outside,
+            value: current
+        }],
+        ..effects.clone()
+    };
+    let outside_permission =
+        RegionFieldWritePermission::from_values(outside, &[current]).expect("permission");
+    // The transaction reads before it writes, so the refusal surfaces at the read.
+    assert_eq!(
+        apply_region_field_writes(&outside_effects, &[outside_permission], &mut regions),
+        Err(RegionWriteTransactionError::Read(AmlError::Unsupported(
+            0x5b80
+        )))
+    );
+
+    // No embedded controller is authorized, so an EC field is refused rather than defaulted.
+    let ec_field = RegionField {
+        space: RegionSpace::EmbeddedControl,
+        address: 0x00,
+        ..field
+    };
+    let mut ec = super::aml_region::FirmwareRegions::empty();
+    assert_eq!(
+        RegionFieldReader::read(&ec, RegionSpace::EmbeddedControl, 0, 1),
+        Err(AmlError::Unsupported(0x5b82))
+    );
+    assert_eq!(
+        RegionFieldWriteBackend::write_field(&mut ec, ec_field, 1),
+        Err(AmlError::Unsupported(0x5b82))
+    );
+    let _ = writeln!(
+        console,
+        "aml: region-write selftest: authorized port write applied and read back ({current:#010x}), unpermitted value denied without a write, outside-window write refused, unauthorized embedded controller refused"
+    );
 }

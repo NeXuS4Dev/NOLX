@@ -122,6 +122,15 @@ def boot(qemu, kernel, machine, mode):
         assert re.search(r'aml: \\_SB_\.PCI0\..*COM1 _CRS evaluated and decoded: 2 resources', text), text
         if mode == 'methods':
             assert 'aml: firmware method selftest: computed status, decoded resources, disabled-device gating, unsupported/loop/recursion refusal verified' in text, text
+            # The applying half of the operation-region write path, on real hardware: an
+            # authorized window is written with a permitted value and read back, an
+            # unpermitted value is refused before any byte is written, a field outside every
+            # window is refused, and an embedded controller with no authorized ports is
+            # refused rather than guessed.
+            assert re.search(
+                r'aml: region-write selftest: authorized port write applied and read back '
+                r'\(0x[0-9a-f]{8}\), unpermitted value denied without a write, '
+                r'outside-window write refused, unauthorized embedded controller refused', text), text
             assert 'NLX2 _STA refused: Unsupported' in text, text
             assert 'NLX3 _CRS resource refusal: Truncated' in text, text
             assert 'NLX4 _STA refused: Steps' in text, text

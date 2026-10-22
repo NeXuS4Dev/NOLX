@@ -229,6 +229,7 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         #[cfg(any(
             feature = "hal-power-test-s5",
             feature = "hal-power-test-s3",
+            feature = "hal-power-s3-device-test",
             feature = "hal-power-quiesce-test"
         ))]
         let mut power_test_started = false;
@@ -442,12 +443,32 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
                 hal::power::quiesce_selftest(&mut console);
             }
 
-            #[cfg(feature = "hal-power-test-s3")]
+            #[cfg(any(feature = "hal-power-test-s3", feature = "hal-power-s3-device-test"))]
             if memory_selftest_done && !power_test_started {
                 power_test_started = true;
-                // The dedicated S3 fixture has no DMA-capable devices; refuse rather than
-                // storing a sleep word while a bus master could still write memory.
-                if hal::power::test_vm_has_active_busmaster() {
+                // Flush and stop every started driver before the sleep, keeping the records
+                // restartable so the wake path can re-take the same devices. Without this the
+                // sleep would be stored while a bus master could still write memory.
+                let suspended = match hal::power::suspend_devices(&mut console) {
+                    Ok(stopped) => {
+                        let _ = writeln!(
+                            console,
+                            "power: S3 pre-suspend: {stopped} controller(s) stopped, records retained"
+                        );
+                        true
+                    }
+                    Err(error) => {
+                        let _ = writeln!(
+                            console,
+                            "power: S3 refused: device suspend failed: {error:?}"
+                        );
+                        false
+                    }
+                };
+                if !suspended {
+                    // A refused barrier or stop means a controller may still write memory; the
+                    // sleep word is not stored on the strength of the bus-master scan alone.
+                } else if hal::power::test_vm_has_active_busmaster() {
                     let _ = writeln!(console, "power: S3 refused: active PCI bus master");
                 } else {
                     hal::power::prepare_s3_resume(&mut console)
