@@ -29,12 +29,15 @@ def main():
             assert 'aml: evaluated ' in text and 'PCI root bridge' in text and ' authorized' in text, text
             injected = re.search(r'pci: resource fault injection: (\d+) BAR addresses and bridge forwarding cleared before native assignment', text)
             assert injected, text
-            summary = re.search(r'pci: native resource assignment: (\d+) BARs, (\d+) bridge windows, readback verified', text)
-            assert summary, text
-            assert int(summary[1]) == int(injected[1]) > 0, text
-            assert int(summary[2]) == 2 * levels, text
-            assignments = re.findall(r'pci: assigned (\S+) bar(\d+) (mem|io) (0x[0-9a-f]+)\.\.(0x[0-9a-f]+)', text)
-            assert len(assignments) == int(summary[1]), text
+            # Every planning marker is segment-qualified; the fixture reaches segment zero only.
+            summaries = re.findall(r'pci: (?:segment \d{4}: )?native resource assignment: (\d+) BARs, (\d+) bridge windows, readback verified', text)
+            assert summaries, text
+            bars = sum(int(a) for a, _ in summaries)
+            windows = sum(int(b) for _, b in summaries)
+            assert bars == int(injected[1]) > 0, text
+            assert windows == 2 * levels, text
+            assignments = re.findall(r'pci: (?:segment \d{4}: )?assigned (\S+) bar(\d+) (mem|io) (0x[0-9a-f]+)\.\.(0x[0-9a-f]+)', text)
+            assert len(assignments) == bars, text
             assert len({(bdf, slot) for bdf, slot, _, _, _ in assignments}) == len(assignments), assignments
             ranges = {'mem': [], 'io': []}
             for bdf, slot, kind, start, end in assignments:
@@ -42,8 +45,8 @@ def main():
                 size = end - start
                 assert size > 0 and size & (size - 1) == 0 and start % size == 0, assignments
                 if kind == 'mem':
-                    windows = [(int(a,16),int(b,16)) for a,b in re.findall(r'aml: PCI root Memory aperture (0x[0-9a-f]+)\.\.(0x[0-9a-f]+) flags=0x1',text)]
-                    assert any(a <= start < end <= b for a,b in windows), assignments
+                    apertures = [(int(a,16),int(b,16)) for a,b in re.findall(r'aml: PCI root Memory aperture (0x[0-9a-f]+)\.\.(0x[0-9a-f]+) flags=0x1',text)]
+                    assert any(a <= start < end <= b for a,b in apertures), assignments
                     assert 0x80000000 <= start < end <= 0xf0000000, assignments
                     excluded = [(int(a,16),int(b,16)) for a,b in re.findall(r'pci: resource memory exclusion (0x[0-9a-f]+)\.\.(0x[0-9a-f]+)',text)]
                     assert excluded and all(end <= a or b <= start for a,b in excluded), assignments
@@ -55,7 +58,7 @@ def main():
                     # All endpoints and inner bridges are behind the top-level bridge;
                     # its own BAR is correctly assigned on its parent/root bus.
                     assert bdf[:2] in {'00', '01', '02'}, assignments
-            print(f'PASS: native resources {machine}, RAM {memory} MiB, bridge depth {levels}: {summary[1]} BARs / {summary[2]} windows, no aliases, 6 media and 4 wire endpoints verified', flush=True)
+            print(f'PASS: native resources {machine}, RAM {memory} MiB, bridge depth {levels}: {bars} BARs / {windows} windows, no aliases, 6 media and 4 wire endpoints verified', flush=True)
 
 
 if __name__ == '__main__':

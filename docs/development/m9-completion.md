@@ -2057,6 +2057,14 @@ let mut segments: BTreeSet<u16> = MAPPINGS.lock().iter().flatten().map(|m| m.seg
 segments.insert(0);
 ```
 
+**The fixture also asserted markers that lost their segment prefix.** Once planning ran,
+CI showed the whole assignment working — 21 BARs, six storage devices up, four NICs, multi
+adapter isolation — and then failed in `check-pci-resources.py` because the kernel prints
+`pci: segment 0000: assigned ...` and `pci: segment 0000: native resource assignment: ...`
+while the script still searched for the unqualified forms. Both patterns now accept the
+optional `segment NNNN: ` prefix and sum the per-segment summaries, so a multi-segment machine
+would be checked as a whole rather than by its first segment alone.
+
 A local PC build with `hal-pci-resource-test,hal-driver-multi-test` now prints
 `pci: resource fault injection: 6 BAR addresses and bridge forwarding cleared`,
 six `pci: segment 0000: assigned ...` lines and
