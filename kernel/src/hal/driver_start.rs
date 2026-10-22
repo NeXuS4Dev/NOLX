@@ -375,6 +375,7 @@ pub fn lifecycle_selftest(console: &mut dyn HalConsole) {
             class: 0xff,
             subclass: 0,
             prog_if: 0,
+            segment: 0,
         },
     )
     .expect("framework reentry exclusion failed");

@@ -229,6 +229,10 @@ pub fn entries(namespace: &Namespace<'_>, value: Value) -> Result<Vec<Entry>, Er
 fn prt_packages(namespace: &Namespace<'_>, root: &Path) -> Result<Vec<(Vec<u32>, Value)>, Error> {
     let mut packages = Vec::new();
     for path in namespace.devices() {
+        // Only consider devices under this root
+        if !path.starts_with(root) {
+            continue;
+        }
         let Some(value) = namespace.device_value(path, *b"_PRT")? else {
             continue;
         };
@@ -266,10 +270,50 @@ pub fn discover(namespace: &Namespace<'_>, root: &Path) -> Result<Vec<Table>, Er
         }
         tables.push(Table { bridges, entries });
     }
+    // Must have exactly one root table (empty bridges = root bus)
     if tables.iter().filter(|t| t.bridges.is_empty()).count() != 1 {
         return Err(Error::Invalid);
     }
     Ok(tables)
+}
+
+/// Discover all `_PRT` tables across all segments.
+/// Returns a vector of (segment, tables) pairs.
+pub fn discover_all(
+    namespace: &Namespace<'_>,
+    root_bridges: &crate::root::RootBridges,
+) -> Result<alloc::vec::Vec<(u16, Vec<Table>)>, Error> {
+    let mut result = alloc::vec::Vec::new();
+    for bridge in root_bridges.iter() {
+        // Build the root path for this segment's root bridge
+        // We need to find the device path for this segment's root bridge
+        let root_path = find_root_path(namespace, bridge.segment)?;
+        let tables = discover(namespace, &root_path)?;
+        result.push((bridge.segment, tables));
+    }
+    Ok(result)
+}
+
+/// Find the device path for a root bridge with the given segment.
+fn find_root_path(namespace: &Namespace<'_>, segment: u16) -> Result<aml::Path, Error> {
+    for path in namespace.devices() {
+        let identity = namespace.device_value(path, *b"_HID")?;
+        if identity.as_ref().is_some_and(|v| {
+            matches!(v, aml::Value::Integer(id) if [0x030a_d041, 0x080a_d041].contains(id))
+                || matches!(v, aml::Value::String(id) if id == b"PNP0A03" || id == b"PNP0A08")
+        }) {
+            let seg = namespace
+                .device_value(path, *b"_SEG")
+                .ok()
+                .flatten()
+                .and_then(|v| v.integer().ok())
+                .unwrap_or(0) as u16;
+            if seg == segment {
+                return Ok(path.clone());
+            }
+        }
+    }
+    Err(Error::Invalid)
 }
 /// One `_PRT`-referenced link whose current route cannot be retained and must be
 /// reprogrammed before any route from its table may be published.
@@ -390,6 +434,36 @@ pub fn plan_link_reprogramming(
         retained,
         reprogramming,
     })
+}
+
+/// Segment-aware link reprogramming plan.
+/// Includes the segment number for each reprogramming item.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SegmentLinkPlan {
+    /// PCI segment number.
+    pub segment: u16,
+    /// The link plan for this segment.
+    pub plan: LinkPlan,
+}
+
+/// Plan link reprogramming for all segments.
+/// Returns a vector of segment-aware link plans.
+pub fn plan_link_reprogramming_all(
+    namespace: &Namespace<'_>,
+    root_bridges: &crate::root::RootBridges,
+    isa_to_gsi: impl Fn(u8) -> Option<u32> + Copy,
+    available: impl FnMut(Interrupt) -> bool + Copy,
+) -> Result<alloc::vec::Vec<SegmentLinkPlan>, Error> {
+    let mut result = alloc::vec::Vec::new();
+    for bridge in root_bridges.iter() {
+        let root_path = find_root_path(namespace, bridge.segment)?;
+        let plan = plan_link_reprogramming(namespace, &root_path, isa_to_gsi, available)?;
+        result.push(SegmentLinkPlan {
+            segment: bridge.segment,
+            plan,
+        });
+    }
+    Ok(result)
 }
 
 #[cfg(test)]

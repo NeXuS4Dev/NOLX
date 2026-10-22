@@ -143,6 +143,7 @@ pub fn probe(console: &mut dyn HalConsole) {
                 class: info.class,
                 subclass: info.subclass,
                 prog_if: info.prog_if,
+                segment: info.bdf.segment,
             },
             |dev| {
                 if BINDINGS

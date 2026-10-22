@@ -12,6 +12,7 @@ use nolx_power_core::{
     routing::{Interrupt, LinkIrqNumber, LinkReprogramming, Table},
 };
 const LIMIT: usize = 1024;
+const MAX_SEGMENTS: usize = 8;
 const EMPTY_ROW: Row = Row {
     bus: 0,
     device: 0,
@@ -25,18 +26,49 @@ const EMPTY_IRQ: Interrupt = Interrupt {
     level: false,
     shared: false,
 };
-struct Cache {
+#[derive(Clone, Copy)]
+struct SegmentCache {
     rows: [Row; LIMIT],
     irqs: [Interrupt; LIMIT],
     count: usize,
     ready: bool,
 }
-static CACHE: IrqMutex<Cache> = IrqMutex::new(Cache {
-    rows: [EMPTY_ROW; LIMIT],
-    irqs: [EMPTY_IRQ; LIMIT],
-    count: 0,
-    ready: false,
-});
+impl Default for SegmentCache {
+    fn default() -> Self {
+        Self {
+            rows: [EMPTY_ROW; LIMIT],
+            irqs: [EMPTY_IRQ; LIMIT],
+            count: 0,
+            ready: false,
+        }
+    }
+}
+struct Cache {
+    segments: [Option<SegmentCache>; MAX_SEGMENTS],
+}
+impl Cache {
+    const fn new() -> Self {
+        Self {
+            segments: [None; MAX_SEGMENTS],
+        }
+    }
+    fn get_mut(&mut self, segment: u16) -> Option<&mut SegmentCache> {
+        if segment >= MAX_SEGMENTS as u16 {
+            return None;
+        }
+        if self.segments[segment as usize].is_none() {
+            self.segments[segment as usize] = Some(SegmentCache::default());
+        }
+        self.segments[segment as usize].as_mut()
+    }
+    fn get(&self, segment: u16) -> Option<&SegmentCache> {
+        if segment >= MAX_SEGMENTS as u16 {
+            return None;
+        }
+        self.segments[segment as usize].as_ref()
+    }
+}
+static CACHE: IrqMutex<Cache> = IrqMutex::new(Cache::new());
 struct SnapshotData {
     address: u32,
     offsets: [u16; 8],
@@ -307,47 +339,51 @@ pub fn disable_links_for_test(console: &mut dyn HalConsole) {
 /// Revoke all routes before discovery or after truncated/incomplete firmware metadata.
 pub fn revoke() {
     let mut cache = CACHE.lock();
-    cache.ready = false;
-    cache.count = 0;
+    for segment_cache in cache.segments.iter_mut().flatten() {
+        segment_cache.ready = false;
+        segment_cache.count = 0;
+    }
 }
-/// Map evaluated bridge scopes against the existing numbered segment-zero topology.
+/// Map evaluated bridge scopes against the existing numbered topology for a segment.
 /// No route is usable until every table and flag-sharing relationship has validated.
-pub fn publish(tables: &[Table], console: &mut dyn HalConsole) -> Result<(), routing::Error> {
+pub fn publish(segment: u16, tables: &[Table], console: &mut dyn HalConsole) -> Result<(), routing::Error> {
     revoke();
     let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
     let mut cache = CACHE.lock();
+    let segment_cache = cache.get_mut(segment).ok_or(routing::Error::Topology)?;
     for table in tables {
         let bus = routing::scope_bus(&mut ConfigAccess, &inventory, &table.bridges)?;
-        if cache.rows[..cache.count].iter().any(|r| r.bus == bus) {
+        if segment_cache.rows[..segment_cache.count].iter().any(|r| r.bus == bus) {
             return Err(routing::Error::Ambiguous);
         }
         for entry in &table.entries {
-            if cache.count == LIMIT {
+            if segment_cache.count == LIMIT {
                 return Err(routing::Error::Topology);
             }
-            if cache.irqs[..cache.count]
+            if segment_cache.irqs[..segment_cache.count]
                 .iter()
                 .any(|irq| irq.gsi == entry.interrupt.gsi && *irq != entry.interrupt)
             {
                 return Err(routing::Error::Ambiguous);
             }
-            let n = cache.count;
-            cache.rows[n] = Row {
+            let n = segment_cache.count;
+            segment_cache.rows[n] = Row {
                 bus,
                 device: entry.device,
                 function: entry.function,
                 pin: entry.pin,
                 route: n,
             };
-            cache.irqs[n] = entry.interrupt;
-            cache.count += 1;
+            segment_cache.irqs[n] = entry.interrupt;
+            segment_cache.count += 1;
         }
     }
-    cache.ready = true;
+    segment_cache.ready = true;
     let _ = writeln!(
         console,
-        "pci: evaluated ACPI INTx routing authorized: {} rows, {} scopes",
-        cache.count,
+        "pci: segment {:04x}: evaluated ACPI INTx routing authorized: {} rows, {} scopes",
+        segment,
+        segment_cache.count,
         tables.len()
     );
     Ok(())
@@ -355,40 +391,39 @@ pub fn publish(tables: &[Table], console: &mut dyn HalConsole) -> Result<(), rou
 /// Resolve a PCI pin through actual `_PRT` data, using swizzling only on undescribed buses.
 /// An available-but-refused ACPI namespace never downgrades to the Interrupt Line byte.
 pub fn lookup(bdf: Bdf) -> Option<Interrupt> {
-    // The published `_PRT`/PIRQ snapshot is segment-zero only; never route an identical BDF
-    // from another segment through that cache or through legacy Interrupt Line fallback.
-    if bdf.segment != 0 {
+    let cache = CACHE.lock();
+    let segment_cache = cache.get(bdf.segment)?;
+    if !segment_cache.ready {
+        // Fallback to legacy Interrupt Line byte only for segment 0 without ACPI
+        if bdf.segment == 0
+            && matches!(
+                super::acpi::root_resources(),
+                super::acpi::RootResourceState::Absent
+            )
+        {
+            let irq = (ConfigAccess.read_u32(bdf, 0x3c) & 255) as u8;
+            if (3..16).contains(&irq) && irq != 12 {
+                return Some(Interrupt {
+                    gsi: u32::from(irq),
+                    active_low: true,
+                    level: true,
+                    shared: true,
+                });
+            }
+        }
         return None;
     }
     let pin = ((ConfigAccess.read_u32(bdf, 0x3c) >> 8) & 255) as u8;
-    let cache = CACHE.lock();
-    if cache.ready {
-        let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
-        let index = routing::lookup(
-            &mut ConfigAccess,
-            &inventory,
-            &cache.rows[..cache.count],
-            bdf,
-            pin,
-        )
-        .ok()?;
-        return cache.irqs.get(index).copied();
-    }
-    if matches!(
-        super::acpi::root_resources(),
-        super::acpi::RootResourceState::Absent
-    ) {
-        let irq = (ConfigAccess.read_u32(bdf, 0x3c) & 255) as u8;
-        if (3..16).contains(&irq) && irq != 12 {
-            return Some(Interrupt {
-                gsi: u32::from(irq),
-                active_low: true,
-                level: true,
-                shared: true,
-            });
-        }
-    }
-    None
+    let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
+    let index = routing::lookup(
+        &mut ConfigAccess,
+        &inventory,
+        &segment_cache.rows[..segment_cache.count],
+        bdf,
+        pin,
+    )
+    .ok()?;
+    segment_cache.irqs.get(index).copied()
 }
 /// Evaluate the root/bridge `_PRT` tables after notifying the supported `_PIC` method.
 ///
@@ -406,8 +441,9 @@ pub fn evaluate(
     madt: &Madt,
     console: &mut dyn HalConsole,
 ) {
-    let root = match nolx_power_core::root::root_path(namespace) {
-        Ok(root) => root,
+    // Discover all root bridges (multi-segment support)
+    let root_bridges = match nolx_power_core::root::discover(namespace) {
+        Ok(bridges) => bridges,
         Err(_) => {
             revoke();
             let _ = writeln!(
@@ -419,56 +455,75 @@ pub fn evaluate(
         }
     };
     if super::apic::is_enabled() {
-        let plan = match nolx_power_core::routing::plan_link_reprogramming(
+        // Plan link reprogramming for all segments
+        let segment_plans = match nolx_power_core::routing::plan_link_reprogramming_all(
             namespace,
-            &root,
+            &root_bridges,
             |irq| isa_to_gsi(madt, irq),
             |interrupt| super::ioapic::pci_route_supported(interrupt.gsi),
         ) {
-            Ok(plan) => plan,
+            Ok(plans) => plans,
             Err(error) => {
                 revoke();
                 let _ = writeln!(console, "pci: ACPI INTx evaluation refused: {error:?}");
                 return;
             }
         };
-        let _ = writeln!(
-            console,
-            "pci: ACPI link preflight: {} link(s), {} require _SRS",
-            plan.evaluated,
-            plan.reprogramming.len()
-        );
+        // Log preflight summary for all segments
+        for seg_plan in &segment_plans {
+            let _ = writeln!(
+                console,
+                "pci: segment {:04x}: ACPI link preflight: {} link(s), {} require _SRS",
+                seg_plan.segment,
+                seg_plan.plan.evaluated,
+                seg_plan.plan.reprogramming.len()
+            );
+        }
         #[cfg(feature = "hal-pci-link-srs-test")]
         {
-            for (link, interrupt) in &plan.retained {
-                let _ = writeln!(
-                    console,
-                    "pci: link test: retained {} at GSI {}",
-                    link, interrupt.gsi
-                );
+            for seg_plan in &segment_plans {
+                for (link, interrupt) in &seg_plan.plan.retained {
+                    let _ = writeln!(
+                        console,
+                        "pci: segment {:04x}: link test: retained {} at GSI {}",
+                        seg_plan.segment, link, interrupt.gsi
+                    );
+                }
             }
         }
-        for item in &plan.reprogramming {
-            if let Err(error) = apply_link_srs(namespace, snapshot, item, console) {
-                revoke();
-                let _ = writeln!(
-                    console,
-                    "pci: ACPI INTx evaluation refused: link _SRS: {error}"
-                );
-                return;
+        // Apply _SRS for each segment's reprogramming items
+        for seg_plan in &segment_plans {
+            for item in &seg_plan.plan.reprogramming {
+                if let Err(error) = apply_link_srs(namespace, snapshot, item, console) {
+                    revoke();
+                    let _ = writeln!(
+                        console,
+                        "pci: segment {:04x}: ACPI INTx evaluation refused: link _SRS: {error}",
+                        seg_plan.segment
+                    );
+                    return;
+                }
             }
         }
     }
-    match nolx_power_core::routing::discover(namespace, &root) {
-        Ok(tables) => {
-            if let Err(error) = publish(&tables, console) {
-                revoke();
-                let _ = writeln!(console, "pci: ACPI INTx scope mapping refused: {error:?}");
-            }
-        }
+    // Discover and publish routing tables for each segment
+    let all_tables = match nolx_power_core::routing::discover_all(namespace, &root_bridges) {
+        Ok(tables) => tables,
         Err(error) => {
             revoke();
             let _ = writeln!(console, "pci: ACPI INTx evaluation refused: {error:?}");
+            return;
+        }
+    };
+    for (segment, tables) in all_tables {
+        if let Err(error) = publish(segment, &tables, console) {
+            revoke();
+            let _ = writeln!(
+                console,
+                "pci: segment {:04x}: ACPI INTx scope mapping refused: {error:?}",
+                segment
+            );
+            return;
         }
     }
 }
