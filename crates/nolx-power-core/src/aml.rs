@@ -90,6 +90,13 @@ impl Path {
         p.0.push(segment);
         Ok(p)
     }
+    /// Check if this path starts with the given prefix.
+    pub fn starts_with(&self, prefix: &Path) -> bool {
+        if prefix.0.len() > self.0.len() {
+            return false;
+        }
+        self.0[..prefix.0.len()] == prefix.0
+    }
 }
 impl fmt::Display for Path {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

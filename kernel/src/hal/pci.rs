@@ -497,6 +497,7 @@ fn resource_test_target(info: &nolx_pci_core::FunctionInfo) -> bool {
 /// Firmware bus numbering remains required. Unknown host bridges/ambiguous memory maps retain
 /// firmware resources without guessing an aperture. Valid ACPI roots supply apertures;
 /// only absent ACPI permits the previous board fallback. Refused roots never downgrade.
+/// Extended to plan resources for all segments with valid ECAM mappings.
 pub fn prepare_resources(console: &mut dyn HalConsole) {
     use nolx_pci_core::resources::{self, Pool, Range};
     let inventory = nolx_pci_core::enumerate(&mut ConfigAccess);
@@ -518,7 +519,7 @@ pub fn prepare_resources(console: &mut dyn HalConsole) {
             .all(|r| r.base.checked_add(r.length).is_some());
     let board = [0x1237_8086, 0x29c0_8086].contains(&host);
     let root = super::acpi::root_resources();
-    let pools = if board && complete_map {
+    let base_pools = if board && complete_map {
         match root {
             super::acpi::RootResourceState::Ready(root) => {
                 use nolx_power_core::root::Space;
@@ -618,10 +619,10 @@ pub fn prepare_resources(console: &mut dyn HalConsole) {
     } else {
         None
     };
-    if let Some((mut memory, mut io)) = pools {
+    if let Some((mut base_memory, mut base_io)) = base_pools {
         for mapping in MAPPINGS.lock().iter().flatten() {
             let (base, bytes) = mapping.window.physical_range();
-            memory.reserve(Range::new(base, bytes).unwrap()).unwrap();
+            base_memory.reserve(Range::new(base, bytes).unwrap()).unwrap();
         }
         // Chipset PM/SMBus fixed registers are not ordinary PCI BARs.
         for info in inventory
@@ -633,16 +634,16 @@ pub fn prepare_resources(console: &mut dyn HalConsole) {
                 let pm = ConfigAccess.read_u32(info.bdf, 0x40) & 0xffc0;
                 let smbus = ConfigAccess.read_u32(info.bdf, 0x90) & 0xfff0;
                 if pm != 0 {
-                    io.reserve(Range::new(u64::from(pm), 64).unwrap()).unwrap();
+                    base_io.reserve(Range::new(u64::from(pm), 64).unwrap()).unwrap();
                 }
                 if smbus != 0 {
-                    io.reserve(Range::new(u64::from(smbus), 16).unwrap())
+                    base_io.reserve(Range::new(u64::from(smbus), 16).unwrap())
                         .unwrap();
                 }
             } else if info.device_id == 0x2918 {
                 let pm = ConfigAccess.read_u32(info.bdf, 0x40) & 0xff80;
                 if pm != 0 {
-                    io.reserve(Range::new(u64::from(pm), 128).unwrap()).unwrap();
+                    base_io.reserve(Range::new(u64::from(pm), 128).unwrap()).unwrap();
                 }
             }
         }
@@ -685,29 +686,50 @@ pub fn prepare_resources(console: &mut dyn HalConsole) {
             assert!(cleared > 0, "resource fixture needs supported devices");
             let _ = writeln!(console, "pci: resource fault injection: {cleared} BAR addresses and bridge forwarding cleared before native assignment");
         }
-        let plan = resources::plan(&mut ConfigAccess, &inventory, memory, io)
-            .expect("PCI resource plan refused; no assignments committed");
-        plan.apply(&mut ConfigAccess)
-            .expect("PCI resource readback/rollback refused");
-        for a in plan.assignments() {
+        // Plan resources for each segment that has a valid ECAM mapping.
+        // Collect unique segments from mappings.
+        let segments: alloc::vec::Vec<u16> = MAPPINGS
+            .lock()
+            .iter()
+            .flatten()
+            .map(|m| m.segment)
+            .collect::<alloc::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        for segment in segments {
+            // Clone pools for this segment (they share physical address space on PC/Q35)
+            let memory = base_memory.clone();
+            let io = base_io.clone();
+            let mut transport = nolx_pci_core::ecam::SegmentConfig {
+                transport: &mut ConfigAccess,
+                segment,
+            };
+            let plan = resources::plan(&mut transport, segment, &inventory, memory, io)
+                .expect("PCI resource plan refused; no assignments committed");
+            plan.apply(&mut transport)
+                .expect("PCI resource readback/rollback refused");
+            for a in plan.assignments() {
+                let _ = writeln!(
+                    console,
+                    "pci: segment {:04x}: assigned {:02x}:{:02x}.{} bar{} {} {:#x}..{:#x}",
+                    segment,
+                    a.bdf.bus,
+                    a.bdf.device,
+                    a.bdf.function,
+                    a.slot,
+                    if a.io { "io" } else { "mem" },
+                    a.range.start,
+                    a.range.end
+                );
+            }
             let _ = writeln!(
                 console,
-                "pci: assigned {:02x}:{:02x}.{} bar{} {} {:#x}..{:#x}",
-                a.bdf.bus,
-                a.bdf.device,
-                a.bdf.function,
-                a.slot,
-                if a.io { "io" } else { "mem" },
-                a.range.start,
-                a.range.end
+                "pci: segment {:04x}: native resource assignment: {} BARs, {} bridge windows, readback verified",
+                segment,
+                plan.assignments().len(),
+                plan.windows()
             );
         }
-        let _ = writeln!(
-            console,
-            "pci: native resource assignment: {} BARs, {} bridge windows, readback verified",
-            plan.assignments().len(),
-            plan.windows()
-        );
     } else {
         let _ = writeln!(
             console,

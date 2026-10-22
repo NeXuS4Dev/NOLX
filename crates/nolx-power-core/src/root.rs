@@ -62,6 +62,54 @@ impl RootResources {
         Ok(())
     }
 }
+
+/// A PCI root bridge with its segment number and resources.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RootBridge {
+    /// PCI segment number.
+    pub segment: u16,
+    /// Root bridge resources.
+    pub resources: RootResources,
+}
+/// Maximum number of root bridges supported.
+pub const MAX_ROOT_BRIDGES: usize = 8;
+
+/// All PCI root bridges in the namespace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RootBridges {
+    bridges: [Option<RootBridge>; MAX_ROOT_BRIDGES],
+    count: usize,
+}
+impl RootBridges {
+    /// All root bridges in segment order.
+    pub fn iter(&self) -> impl Iterator<Item = RootBridge> + '_ {
+        self.bridges[..self.count].iter().flatten().copied()
+    }
+    /// Find a root bridge by segment.
+    pub fn get(&self, segment: u16) -> Option<RootBridge> {
+        self.bridges[..self.count]
+            .iter()
+            .flatten()
+            .find(|b| b.segment == segment)
+            .copied()
+    }
+    /// Number of root bridges.
+    pub fn len(&self) -> usize {
+        self.count
+    }
+    /// Whether there are no root bridges.
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+    fn push(&mut self, bridge: RootBridge) -> Result<(), ResourceError> {
+        if self.count == MAX_ROOT_BRIDGES {
+            return Err(ResourceError::TooMany);
+        }
+        self.bridges[self.count] = Some(bridge);
+        self.count += 1;
+        Ok(())
+    }
+}
 fn number(bytes: &[u8], offset: usize, width: usize) -> u64 {
     bytes[offset..offset + width]
         .iter()
@@ -210,6 +258,11 @@ impl From<aml::Error> for Error {
         Self::Aml(error)
     }
 }
+impl From<ResourceError> for Error {
+    fn from(error: ResourceError) -> Self {
+        Self::Resources(error)
+    }
+}
 fn root_id(value: &aml::Value) -> bool {
     match value {
         aml::Value::Integer(id) => [0x030a_d041, 0x080a_d041].contains(id),
@@ -217,9 +270,10 @@ fn root_id(value: &aml::Value) -> bool {
         _ => false,
     }
 }
-/// Find the unique, typed PCI root identity without assuming its namespace name.
-pub fn root_path(namespace: &aml::Namespace<'_>) -> Result<aml::Path, Error> {
-    let mut root = None;
+/// Find all typed PCI root bridges without assuming their namespace names.
+/// Returns paths sorted by segment number for deterministic ordering.
+pub fn root_paths(namespace: &aml::Namespace<'_>) -> Result<alloc::vec::Vec<aml::Path>, Error> {
+    let mut roots = alloc::vec::Vec::new();
     for path in namespace.devices() {
         let identity = namespace.device_value(path, *b"_HID")?;
         if identity
@@ -229,39 +283,87 @@ pub fn root_path(namespace: &aml::Namespace<'_>) -> Result<aml::Path, Error> {
             return Err(Error::Aml(aml::Error::Type));
         }
         if identity.as_ref().is_some_and(root_id) {
-            if root.is_some() {
-                return Err(Error::Topology);
-            }
-            root = Some(path);
+            roots.push(path.clone());
         }
     }
-    let path = root.ok_or(Error::Topology)?;
-    Ok(path.clone())
+    if roots.is_empty() {
+        return Err(Error::Topology);
+    }
+    // Sort by segment for deterministic ordering.
+    roots.sort_by_key(|p| {
+        namespace
+            .device_value(p, *b"_SEG")
+            .ok()
+            .flatten()
+            .and_then(|v| v.integer().ok())
+            .unwrap_or(0) as u16
+    });
+    Ok(roots)
 }
 
-/// Evaluate one PNP0A03/PNP0A08 root's status, segment, base bus and resource method.
-/// Missing `_SEG`/`_BBN` alone default to zero; failing methods never default. The supported
-/// topology is one segment-zero root with a produced 0..255 bus window. Unknown `_HID`
-/// evaluation is refused, not silently assumed to describe a non-root device.
-pub fn discover(namespace: &aml::Namespace<'_>) -> Result<RootResources, Error> {
-    let path = root_path(namespace)?;
-    if !crate::is_usable(namespace.device_status(&path)?.0) {
-        return Err(Error::Topology);
-    }
-    for member in [*b"_SEG", *b"_BBN"] {
-        if let Some(value) = namespace.device_value(&path, member)? {
-            if value.integer()? != 0 {
-                return Err(Error::Topology);
-            }
+/// Find the unique segment-zero PCI root bridge (for backward compatibility).
+pub fn root_path(namespace: &aml::Namespace<'_>) -> Result<aml::Path, Error> {
+    let paths = root_paths(namespace)?;
+    for path in paths {
+        let seg = namespace
+            .device_value(&path, *b"_SEG")
+            .ok()
+            .flatten()
+            .and_then(|v| v.integer().ok())
+            .unwrap_or(0) as u16;
+        if seg == 0 {
+            return Ok(path);
         }
     }
-    let bytes = namespace.device_resources(&path)?.ok_or(Error::Topology)?;
-    let resources = parse(&bytes).map_err(Error::Resources)?;
-    let buses: alloc::vec::Vec<_> = resources.iter().filter(|w| w.space == Space::Bus).collect();
-    if buses.len() != 1 || !buses[0].producer || buses[0].start != 0 || buses[0].end != 256 {
+    Err(Error::Topology)
+}
+
+/// Evaluate a PCI root bridge's status, segment, base bus and resource method.
+/// Missing `_SEG`/`_BBN` alone default to zero; failing methods never default.
+/// The supported topology requires a produced bus window. Unknown `_HID` evaluation
+/// is refused, not silently assumed to describe a non-root device.
+pub fn discover_bridge(namespace: &aml::Namespace<'_>, path: &aml::Path) -> Result<RootBridge, Error> {
+    if !crate::is_usable(namespace.device_status(path)?.0) {
         return Err(Error::Topology);
     }
-    Ok(resources)
+    let segment = namespace
+        .device_value(path, *b"_SEG")
+        .ok()
+        .flatten()
+        .and_then(|v| v.integer().ok())
+        .unwrap_or(0) as u16;
+    let base_bus = namespace
+        .device_value(path, *b"_BBN")
+        .ok()
+        .flatten()
+        .and_then(|v| v.integer().ok())
+        .unwrap_or(0) as u8;
+    let bytes = namespace.device_resources(path)?.ok_or(Error::Topology)?;
+    let resources = parse(&bytes).map_err(Error::Resources)?;
+    let buses: alloc::vec::Vec<_> = resources.iter().filter(|w| w.space == Space::Bus).collect();
+    if buses.len() != 1 || !buses[0].producer {
+        return Err(Error::Topology);
+    }
+    // Validate bus range matches _BBN
+    if buses[0].start != u64::from(base_bus) {
+        return Err(Error::Topology);
+    }
+    Ok(RootBridge { segment, resources })
+}
+
+/// Evaluate all PCI root bridges in the namespace.
+/// Returns bridges sorted by segment number.
+pub fn discover(namespace: &aml::Namespace<'_>) -> Result<RootBridges, Error> {
+    let paths = root_paths(namespace)?;
+    let mut result = RootBridges {
+        bridges: [None; MAX_ROOT_BRIDGES],
+        count: 0,
+    };
+    for path in paths {
+        let bridge = discover_bridge(namespace, &path)?;
+        result.push(bridge)?;
+    }
+    Ok(result)
 }
 
 extern crate alloc;

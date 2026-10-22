@@ -7,7 +7,7 @@
 //! touched register on refusal, with decoding/bus mastering off during the transaction.
 
 extern crate alloc;
-use crate::{read_bars, read_bridge_bars, Bar, Bdf, ConfigSpace, Inventory};
+use crate::{Bar, Bdf, ConfigSpace, ExtendedConfigSpace, Inventory};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -54,6 +54,13 @@ pub enum Error {
     Readback,
     /// Rollback could not restore the configuration; the caller must quarantine or halt.
     Rollback,
+    /// ECAM configuration access error.
+    Ecam(crate::ecam::EcamError),
+}
+impl From<crate::ecam::EcamError> for Error {
+    fn from(error: crate::ecam::EcamError) -> Self {
+        Self::Ecam(error)
+    }
 }
 
 /// A first-fit aperture with explicit reservations. Reservations outside it have no effect.
@@ -182,6 +189,7 @@ pub struct Plan {
     commands: Vec<Command>,
     assignments: Vec<Assignment>,
     bridges: usize,
+    segment: u16,
 }
 impl Plan {
     /// Newly assigned endpoint/bridge BARs.
@@ -192,20 +200,20 @@ impl Plan {
     pub fn windows(&self) -> usize {
         self.bridges
     }
-    fn write<C: ConfigSpace>(&mut self, cfg: &mut C, bdf: Bdf, offset: u8, after: u32, mask: u32) {
+    fn write<C: ExtendedConfigSpace>(&mut self, cfg: &mut C, bdf: Bdf, offset: u8, after: u32, mask: u32) {
         self.writes.push(Write {
             bdf,
             offset,
-            before: cfg.read_u32(bdf, offset) & mask,
+            before: cfg.read_dword(self.segment, bdf, u16::from(offset & !3)).unwrap_or(0) & mask,
             after,
             mask,
         });
     }
-    fn command<C: ConfigSpace>(&mut self, cfg: &mut C, bdf: Bdf, enable: u32) {
+    fn command<C: ExtendedConfigSpace>(&mut self, cfg: &mut C, bdf: Bdf, enable: u32) {
         if let Some(command) = self.commands.iter_mut().find(|c| c.bdf == bdf) {
             command.after |= enable;
         } else {
-            let before = cfg.read_u32(bdf, 4) & 0xffff;
+            let before = cfg.read_dword(self.segment, bdf, 4).unwrap_or(0) & 0xffff;
             self.commands.push(Command {
                 bdf,
                 before,
@@ -216,54 +224,70 @@ impl Plan {
     /// Apply under exclusive boot-time access, before any driver owns DMA/register pointers.
     /// A failed rollback attempts to disable decode/bus mastering; the caller must halt or
     /// quarantine these functions, since a failed configuration transport cannot guarantee it.
-    pub fn apply<C: ConfigSpace>(&self, cfg: &mut C) -> Result<(), Error> {
+    pub fn apply<C: ExtendedConfigSpace + ConfigSpace>(&self, cfg: &mut C) -> Result<(), Error> {
         for c in &self.commands {
-            cfg.write_u32(c.bdf, 4, c.before & !7);
+            cfg.write_dword(self.segment, c.bdf, 4, c.before & !7)?;
         }
         let disabled = self
             .commands
             .iter()
-            .all(|c| cfg.read_u32(c.bdf, 4) & 7 == 0);
+            .all(|c| cfg.read_dword(self.segment, c.bdf, 4).map(|v| v & 7 == 0).unwrap_or(false));
         let mut good = disabled;
         if disabled {
             for w in &self.writes {
-                cfg.write_u32(w.bdf, w.offset, w.after);
+                cfg.write_dword(self.segment, w.bdf, u16::from(w.offset & !3), w.after)?;
             }
             good = self
                 .writes
                 .iter()
-                .all(|w| cfg.read_u32(w.bdf, w.offset) & w.mask == w.after & w.mask);
+                .all(|w| {
+                    cfg.read_dword(self.segment, w.bdf, u16::from(w.offset & !3))
+                        .map(|v| v & w.mask == w.after & w.mask)
+                        .unwrap_or(false)
+                });
         }
         if good {
             for c in &self.commands {
-                cfg.write_u32(c.bdf, 4, c.after);
+                cfg.write_dword(self.segment, c.bdf, 4, c.after)?;
             }
             good = self
                 .commands
                 .iter()
-                .all(|c| cfg.read_u32(c.bdf, 4) & 0xffff == c.after);
+                .all(|c| {
+                    cfg.read_dword(self.segment, c.bdf, 4)
+                        .map(|v| v & 0xffff == c.after)
+                        .unwrap_or(false)
+                });
             if good {
                 return Ok(());
             }
         }
         for c in &self.commands {
-            cfg.write_u32(c.bdf, 4, c.before & !7);
+            cfg.write_dword(self.segment, c.bdf, 4, c.before & !7)?;
         }
         // If decode cannot be disabled, do not rewrite addresses under an active device.
         if self
             .commands
             .iter()
-            .any(|c| cfg.read_u32(c.bdf, 4) & 7 != 0)
+            .any(|c| {
+                cfg.read_dword(self.segment, c.bdf, 4)
+                    .map(|v| v & 7 != 0)
+                    .unwrap_or(false)
+            })
         {
             return Err(Error::Rollback);
         }
         for w in self.writes.iter().rev() {
-            cfg.write_u32(w.bdf, w.offset, w.before);
+            cfg.write_dword(self.segment, w.bdf, u16::from(w.offset & !3), w.before)?;
         }
         if self
             .writes
             .iter()
-            .any(|w| cfg.read_u32(w.bdf, w.offset) & w.mask != w.before & w.mask)
+            .any(|w| {
+                cfg.read_dword(self.segment, w.bdf, u16::from(w.offset & !3))
+                    .map(|v| v & w.mask != w.before & w.mask)
+                    .unwrap_or(false)
+            })
         {
             return Err(Error::Rollback);
         }
@@ -327,25 +351,76 @@ fn rounded(size: u64, granularity: u64) -> Result<u64, Error> {
         .ok_or(Error::InvalidRange)
 }
 
-/// Plan missing BARs and closed type-1 memory/I/O windows, preserving assigned resources.
-/// Only a complete segment-zero inventory is accepted until topology is segment-aware.
-/// Bus numbers must already be valid. ROM BARs, CardBus and reassignment of existing BARs
-/// are outside this API. Prefetchable new BARs use non-prefetchable forwarding below 4 GiB.
-pub fn plan<C: ConfigSpace>(
+/// Extended prefetch window reader using ExtendedConfigSpace with explicit segment.
+fn prefetch_window_ext<C: ExtendedConfigSpace>(
     cfg: &mut C,
+    segment: u16,
+    bdf: Bdf,
+) -> Result<Option<Range>, Error> {
+    let value = cfg.read_dword(segment, bdf, 0x24)?;
+    let mut start = u64::from(value & 0xfff0) << 16;
+    let mut last = (u64::from((value >> 16) & 0xfff0) << 16) | 0xf_ffff;
+    if value & 15 == 1 {
+        start |= u64::from(cfg.read_dword(segment, bdf, 0x28)?) << 32;
+        last |= u64::from(cfg.read_dword(segment, bdf, 0x2c)?) << 32;
+    }
+    let range = Range {
+        start,
+        end: last.checked_add(1).ok_or(Error::InvalidRange)?,
+    };
+    Ok((range.start < range.end).then_some(range))
+}
+
+/// Extended I/O window reader using ExtendedConfigSpace with explicit segment.
+fn io_window_ext<C: ExtendedConfigSpace>(
+    cfg: &mut C,
+    segment: u16,
+    bdf: Bdf,
+) -> Result<Option<Range>, Error> {
+    let value = cfg.read_dword(segment, bdf, 0x1c)?;
+    let upper = cfg.read_dword(segment, bdf, 0x30)?;
+    let start = (u64::from(value & 0xf0) << 8)
+        | if value & 15 == 1 {
+            u64::from(upper & 0xffff) << 16
+        } else {
+            0
+        };
+    let end = ((u64::from((value >> 8) & 0xf0) << 8)
+        | if (value >> 8) & 15 == 1 {
+            u64::from(upper >> 16) << 16
+        } else {
+            0
+        })
+        + 0x1000;
+    Ok((start < end).then_some(Range { start, end }))
+}
+
+/// Plan missing BARs and closed type-1 memory/I/O windows, preserving assigned resources.
+/// Works for any PCI segment. Bus numbers must already be valid. ROM BARs, CardBus and
+/// reassignment of existing BARs are outside this API. Prefetchable new BARs use
+/// non-prefetchable forwarding below 4 GiB.
+pub fn plan<C: ExtendedConfigSpace>(
+    cfg: &mut C,
+    segment: u16,
     inventory: &Inventory,
     memory: Pool,
     io: Pool,
 ) -> Result<Plan, Error> {
-    if cfg.segment() != 0
-        || inventory.overflowed
-        || inventory.refused_bridges != 0
-        || inventory.as_slice().iter().any(|i| {
-            i.bdf.segment != 0
-                || i.header_type > 1
-                || (i.header_type == 1 && (i.class != 6 || i.subclass != 4))
+    if inventory.overflowed || inventory.refused_bridges != 0 {
+        return Err(Error::Topology);
+    }
+    // Filter inventory to the requested segment.
+    let segment_inventory: Vec<_> = inventory
+        .as_slice()
+        .iter()
+        .filter(|i| {
+            i.bdf.segment == segment
+                && i.header_type <= 1
+                && !(i.header_type == 1 && (i.class != 6 || i.subclass != 4))
         })
-    {
+        .copied()
+        .collect();
+    if segment_inventory.is_empty() {
         return Err(Error::Topology);
     }
     let mut nodes = vec![Node {
@@ -357,9 +432,9 @@ pub fn plan<C: ConfigSpace>(
         io: None,
         demand: [0; 2],
     }];
-    for info in inventory.as_slice().iter().filter(|i| i.header_type == 1) {
-        let io_types = cfg.read_u32(info.bdf, 0x1c);
-        let pref_types = cfg.read_u32(info.bdf, 0x24);
+    for info in segment_inventory.iter().filter(|i| i.header_type == 1) {
+        let io_types = cfg.read_dword(segment, info.bdf, 0x1c)?;
+        let pref_types = cfg.read_dword(segment, info.bdf, 0x24)?;
         if io_types & 15 > 1
             || (io_types & 15) != ((io_types >> 8) & 15)
             || pref_types & 15 > 1
@@ -367,7 +442,7 @@ pub fn plan<C: ConfigSpace>(
         {
             return Err(Error::InvalidRange);
         }
-        let buses = cfg.read_u32(info.bdf, 0x18);
+        let buses = cfg.read_dword(segment, info.bdf, 0x18)?;
         let secondary = (buses >> 8) as u8;
         if secondary == 0 || nodes.iter().any(|n| n.bus == secondary) {
             return Err(Error::Topology);
@@ -376,9 +451,9 @@ pub fn plan<C: ConfigSpace>(
             bus: secondary,
             bridge: Some(info.bdf),
             parent: 0,
-            memory: memory_window(cfg.read_u32(info.bdf, 0x20)),
-            prefetch: prefetch_window(cfg, info.bdf),
-            io: io_window(cfg, info.bdf),
+            memory: memory_window(io_types),
+            prefetch: prefetch_window_ext(cfg, segment, info.bdf)?,
+            io: io_window_ext(cfg, segment, info.bdf)?,
             demand: [0; 2],
         });
     }
@@ -425,11 +500,11 @@ pub fn plan<C: ConfigSpace>(
         }
     }
     let mut leaves: Vec<Leaf> = Vec::new();
-    for info in inventory.as_slice().iter().filter(|i| i.header_type <= 1) {
+    for info in segment_inventory.iter().filter(|i| i.header_type <= 1) {
         let bars = if info.header_type == 0 {
-            read_bars(cfg, info.bdf)
+            crate::read_bars_ext(cfg, segment, info.bdf)
         } else {
-            read_bridge_bars(cfg, info.bdf)
+            crate::read_bridge_bars_ext(cfg, segment, info.bdf)
         };
         let node = nodes
             .iter()
@@ -564,6 +639,7 @@ pub fn plan<C: ConfigSpace>(
         commands: Vec::new(),
         assignments: Vec::new(),
         bridges: 0,
+        segment,
     };
     let mut parents: Vec<usize> = (0..nodes.len()).collect();
     parents.sort_by_key(|&i| depth(&nodes, i));
@@ -606,7 +682,7 @@ pub fn plan<C: ConfigSpace>(
             if window {
                 let bdf = nodes[index].bridge.unwrap();
                 if is_io {
-                    let types = cfg.read_u32(bdf, 0x1c) & 0x0f0f;
+                    let types = cfg.read_dword(segment, bdf, 0x1c)? & 0x0f0f;
                     let value = types
                         | ((range.start as u32 >> 8) & 0xf0)
                         | (((range.end as u32 - 1) >> 8) & 0xf0) << 8;
@@ -627,7 +703,7 @@ pub fn plan<C: ConfigSpace>(
             } else {
                 let leaf = &mut leaves[index];
                 let offset = 0x10 + leaf.slot as u8 * 4;
-                let flags = cfg.read_u32(leaf.bdf, offset) & if is_io { 3 } else { 15 };
+                let flags = cfg.read_dword(segment, leaf.bdf, u16::from(offset))? & if is_io { 3 } else { 15 };
                 plan.write(cfg, leaf.bdf, offset, range.start as u32 | flags, u32::MAX);
                 if leaf.wide {
                     plan.write(cfg, leaf.bdf, offset + 4, 0, u32::MAX);

@@ -418,24 +418,30 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
     };
     if table_refusals == 0 {
         match power::root::discover(&namespace) {
-            Ok(resources) => {
-                for window in resources.iter() {
-                    let _ = writeln!(
-                        console,
-                        "aml: PCI root {:?} {} {:#x}..{:#x} flags={:#x}",
-                        window.space,
-                        if window.producer {
-                            "aperture"
-                        } else {
-                            "reservation"
-                        },
-                        window.start,
-                        window.end,
-                        window.memory_flags
-                    );
+            Ok(root_bridges) => {
+                for bridge in root_bridges.iter() {
+                    for window in bridge.resources.iter() {
+                        let _ = writeln!(
+                            console,
+                            "aml: PCI root segment {:04x} {:?} {} {:#x}..{:#x} flags={:#x}",
+                            bridge.segment,
+                            window.space,
+                            if window.producer {
+                                "aperture"
+                            } else {
+                                "reservation"
+                            },
+                            window.start,
+                            window.end,
+                            window.memory_flags
+                        );
+                    }
                 }
-                *ROOT_RESOURCES.lock() = RootResourceState::Ready(resources);
-                let _ = writeln!(console, "aml: evaluated PCI root resources authorized");
+                // Store the segment-zero root resources for backward compatibility
+                if let Some(seg0) = root_bridges.get(0) {
+                    *ROOT_RESOURCES.lock() = RootResourceState::Ready(seg0.resources);
+                }
+                let _ = writeln!(console, "aml: evaluated {} PCI root bridge(s) authorized", root_bridges.len());
             }
             Err(error) => {
                 let _ = writeln!(

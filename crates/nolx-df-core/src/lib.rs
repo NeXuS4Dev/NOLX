@@ -37,6 +37,8 @@ pub struct DeviceId {
     pub subclass: u8,
     /// Programming interface.
     pub prog_if: u8,
+    /// PCI segment group number. `0` for legacy single-segment systems.
+    pub segment: u16,
 }
 
 /// A match rule. A field set to `None` matches any value.
@@ -52,10 +54,12 @@ pub struct Match {
     pub subclass: Option<u8>,
     /// The programming interface, or any.
     pub prog_if: Option<u8>,
+    /// The PCI segment, or any.
+    pub segment: Option<u16>,
 }
 
 impl Match {
-    /// A rule for one vendor and device.
+    /// A rule for one vendor and device on any segment.
     #[must_use]
     pub const fn by_ids(vendor: u16, device: u16) -> Self {
         Self {
@@ -64,10 +68,24 @@ impl Match {
             class: None,
             subclass: None,
             prog_if: None,
+            segment: None,
         }
     }
 
-    /// A rule for one class, subclass, and optionally a programming interface.
+    /// A rule for one vendor, device, and segment.
+    #[must_use]
+    pub const fn by_ids_segment(vendor: u16, device: u16, segment: u16) -> Self {
+        Self {
+            vendor: Some(vendor),
+            device: Some(device),
+            class: None,
+            subclass: None,
+            prog_if: None,
+            segment: Some(segment),
+        }
+    }
+
+    /// A rule for one class, subclass, and optionally a programming interface on any segment.
     #[must_use]
     pub const fn by_class(class: u8, subclass: u8, prog_if: Option<u8>) -> Self {
         Self {
@@ -76,6 +94,20 @@ impl Match {
             class: Some(class),
             subclass: Some(subclass),
             prog_if,
+            segment: None,
+        }
+    }
+
+    /// A rule for one class, subclass, optionally a programming interface, and segment.
+    #[must_use]
+    pub const fn by_class_segment(class: u8, subclass: u8, prog_if: Option<u8>, segment: u16) -> Self {
+        Self {
+            vendor: None,
+            device: None,
+            class: Some(class),
+            subclass: Some(subclass),
+            prog_if,
+            segment: Some(segment),
         }
     }
 
@@ -87,6 +119,7 @@ impl Match {
             && field_matches(self.class, id.class)
             && field_matches(self.subclass, id.subclass)
             && field_matches(self.prog_if, id.prog_if)
+            && field_matches(self.segment, id.segment)
     }
 }
 

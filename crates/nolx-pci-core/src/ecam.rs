@@ -162,6 +162,33 @@ impl<C: ExtendedConfigSpace> crate::ConfigSpace for SegmentConfig<'_, C> {
     }
 }
 
+impl<C: ExtendedConfigSpace> ExtendedConfigSpace for SegmentConfig<'_, C> {
+    fn read_dword(
+        &mut self,
+        segment: u16,
+        bdf: Bdf,
+        offset: u16,
+    ) -> Result<u32, EcamError> {
+        if segment != self.segment {
+            return Err(EcamError::InvalidBdf);
+        }
+        self.transport.read_dword(segment, bdf, offset)
+    }
+
+    fn write_dword(
+        &mut self,
+        segment: u16,
+        bdf: Bdf,
+        offset: u16,
+        value: u32,
+    ) -> Result<(), EcamError> {
+        if segment != self.segment {
+            return Err(EcamError::InvalidBdf);
+        }
+        self.transport.write_dword(segment, bdf, offset, value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

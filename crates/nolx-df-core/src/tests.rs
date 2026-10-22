@@ -10,6 +10,7 @@ const NIC: DeviceId = DeviceId {
     class: 0x02,
     subclass: 0x00,
     prog_if: 0x00,
+    segment: 0,
 };
 
 const STORAGE: DeviceId = DeviceId {
@@ -18,6 +19,7 @@ const STORAGE: DeviceId = DeviceId {
     class: 0x01,
     subclass: 0x00,
     prog_if: 0x00,
+    segment: 0,
 };
 
 fn accept(_: &DeviceId) -> bool {
