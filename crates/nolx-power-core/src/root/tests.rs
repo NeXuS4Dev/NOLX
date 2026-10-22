@@ -155,7 +155,14 @@ fn actual_root_methods_and_missing_segment_base_defaults_work() {
     let bytes = root(&template(), Vec::new());
     let mut n = aml::Namespace::new();
     n.load(&bytes).unwrap();
-    assert_eq!(discover(&n).unwrap().iter().count(), 3);
+    let bridges = discover(&n).unwrap();
+    assert_eq!(bridges.iter().count(), 1);
+    assert_eq!(bridges.get(0).unwrap().segment, 0);
+    assert_eq!(
+        bridges.get(0).unwrap().resources.iter().count(),
+        3,
+        "the root template keeps all three produced windows"
+    );
 }
 #[test]
 fn failing_segment_or_base_methods_do_not_default_to_zero() {
@@ -209,10 +216,13 @@ fn missing_duplicate_or_incomplete_bus_roots_cannot_authorize() {
     let mut n = aml::Namespace::new();
     n.load(&bytes).unwrap();
     assert_eq!(discover(&n), Err(Error::Topology));
+    // A consistent bus window that does not start at the `_BBN` default of zero: the root
+    // template is complete enough to parse, but it cannot authorize bus numbering.
     let mut partial = template();
-    partial[10] = 127;
-    partial[14] = 128;
-    partial[15] = 0;
+    partial[8] = 0;
+    partial[9] = 1; // start = 0x100
+    partial[10] = 0xff;
+    partial[11] = 1; // maximum = 0x1ff
     let bytes = root(&partial, Vec::new());
     let mut n = aml::Namespace::new();
     n.load(&bytes).unwrap();

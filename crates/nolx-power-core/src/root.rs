@@ -270,6 +270,20 @@ fn root_id(value: &aml::Value) -> bool {
         _ => false,
     }
 }
+/// Evaluate an optional integer member. Absence is `Ok(None)`; a method that fails or
+/// returns a non-integer is an error, never a default. Firmware that cannot answer `_SEG`
+/// has not said "segment zero".
+fn integer_member(
+    namespace: &aml::Namespace<'_>,
+    path: &aml::Path,
+    member: [u8; 4],
+) -> Result<Option<u64>, Error> {
+    match namespace.device_value(path, member)? {
+        None => Ok(None),
+        Some(value) => value.integer().map(Some).map_err(Error::Aml),
+    }
+}
+
 /// Find all typed PCI root bridges without assuming their namespace names.
 /// Returns paths sorted by segment number for deterministic ordering.
 pub fn root_paths(namespace: &aml::Namespace<'_>) -> Result<alloc::vec::Vec<aml::Path>, Error> {
@@ -283,35 +297,24 @@ pub fn root_paths(namespace: &aml::Namespace<'_>) -> Result<alloc::vec::Vec<aml:
             return Err(Error::Aml(aml::Error::Type));
         }
         if identity.as_ref().is_some_and(root_id) {
-            roots.push(path.clone());
+            let segment = integer_member(namespace, path, *b"_SEG")?.unwrap_or(0);
+            roots.push((segment, path.clone()));
         }
     }
     if roots.is_empty() {
         return Err(Error::Topology);
     }
     // Sort by segment for deterministic ordering.
-    roots.sort_by_key(|p| {
-        namespace
-            .device_value(p, *b"_SEG")
-            .ok()
-            .flatten()
-            .and_then(|v| v.integer().ok())
-            .unwrap_or(0) as u16
-    });
-    Ok(roots)
+    roots.sort_by_key(|(segment, _)| *segment);
+    Ok(roots.into_iter().map(|(_, path)| path).collect())
 }
 
 /// Find the unique segment-zero PCI root bridge (for backward compatibility).
 pub fn root_path(namespace: &aml::Namespace<'_>) -> Result<aml::Path, Error> {
     let paths = root_paths(namespace)?;
     for path in paths {
-        let seg = namespace
-            .device_value(&path, *b"_SEG")
-            .ok()
-            .flatten()
-            .and_then(|v| v.integer().ok())
-            .unwrap_or(0) as u16;
-        if seg == 0 {
+        // A root whose `_SEG` cannot be evaluated has not said it is segment zero.
+        if integer_member(namespace, &path, *b"_SEG")?.unwrap_or(0) == 0 {
             return Ok(path);
         }
     }
@@ -322,22 +325,29 @@ pub fn root_path(namespace: &aml::Namespace<'_>) -> Result<aml::Path, Error> {
 /// Missing `_SEG`/`_BBN` alone default to zero; failing methods never default.
 /// The supported topology requires a produced bus window. Unknown `_HID` evaluation
 /// is refused, not silently assumed to describe a non-root device.
-pub fn discover_bridge(namespace: &aml::Namespace<'_>, path: &aml::Path) -> Result<RootBridge, Error> {
+pub fn discover_bridge(
+    namespace: &aml::Namespace<'_>,
+    path: &aml::Path,
+) -> Result<RootBridge, Error> {
     if !crate::is_usable(namespace.device_status(path)?.0) {
         return Err(Error::Topology);
     }
-    let segment = namespace
-        .device_value(path, *b"_SEG")
-        .ok()
-        .flatten()
-        .and_then(|v| v.integer().ok())
-        .unwrap_or(0) as u16;
-    let base_bus = namespace
-        .device_value(path, *b"_BBN")
-        .ok()
-        .flatten()
-        .and_then(|v| v.integer().ok())
-        .unwrap_or(0) as u8;
+    let segment = integer_member(namespace, path, *b"_SEG")?
+        .map(|value| u16::try_from(value).map_err(|_| Error::Topology))
+        .transpose()?
+        .unwrap_or(0);
+    // This module plans only the segment-zero, root-bus-zero profile. A root that claims
+    // anything else is refused rather than quietly treated as zero.
+    if segment != 0 {
+        return Err(Error::Topology);
+    }
+    let base_bus = integer_member(namespace, path, *b"_BBN")?
+        .map(|value| u8::try_from(value).map_err(|_| Error::Topology))
+        .transpose()?
+        .unwrap_or(0);
+    if base_bus != 0 {
+        return Err(Error::Topology);
+    }
     let bytes = namespace.device_resources(path)?.ok_or(Error::Topology)?;
     let resources = parse(&bytes).map_err(Error::Resources)?;
     let buses: alloc::vec::Vec<_> = resources.iter().filter(|w| w.space == Space::Bus).collect();
@@ -361,6 +371,10 @@ pub fn discover(namespace: &aml::Namespace<'_>) -> Result<RootBridges, Error> {
     };
     for path in paths {
         let bridge = discover_bridge(namespace, &path)?;
+        // Two roots cannot describe one segment: the second would silently alias the first.
+        if result.get(bridge.segment).is_some() {
+            return Err(Error::Topology);
+        }
         result.push(bridge)?;
     }
     Ok(result)

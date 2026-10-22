@@ -442,6 +442,10 @@ fn read_header_bars_ext<C: ExtendedConfigSpace>(
         }
         slot += width;
     }
+    // Put the command register back exactly as it was. Leaving decoding off would silently
+    // disarm every function the enumeration walked, and the next reader would see a command
+    // word that no firmware wrote. Writes are ignored on a transport that refuses them.
+    let _ = cfg.write_dword(segment, bdf, u16::from(OFF_COMMAND), command);
     set
 }
 

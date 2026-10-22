@@ -61,6 +61,66 @@ fn enable_acpi(fadt: &Fadt) -> Result<u16, Error> {
     Err(Error::AcpiMode)
 }
 
+/// Which sleep state to request from the firmware.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SleepState {
+    /// Suspend to RAM. The platform must preserve memory and return through a resume path.
+    S3,
+    /// Soft off. There is no resume.
+    S5,
+}
+
+impl SleepState {
+    fn name(self) -> &'static str {
+        match self {
+            Self::S3 => "S3",
+            Self::S5 => "S5",
+        }
+    }
+}
+
+unsafe fn request_quiesced(console: &mut dyn HalConsole, state: SleepState) -> Result<(), Error> {
+    let tables = super::acpi::discover().ok_or(Error::Firmware)?;
+    let fadt = tables.fadt.ok_or(Error::Firmware)?;
+    let sleep_type = match state {
+        SleepState::S3 => tables.s3_sleep_type,
+        SleepState::S5 => tables.s5_sleep_type,
+    }
+    .ok_or(Error::Firmware)?;
+    // We currently decode only SLP_TYPa. Never guess a distinct PM1b type.
+    if fadt.pm1b_control.is_some() || fadt.pm1_control_bytes < 2 {
+        return Err(Error::Unsupported);
+    }
+    let current = enable_acpi(&fadt)?;
+    // The store enables SLP_EN together with the firmware's `_S3_`/`_S5_` type in SLP_TYP.
+    // Print before the store so the host log carries the request even when the machine
+    // stops immediately afterwards.
+    let word = pm1_sleep_control(current, sleep_type, true).ok_or(Error::Unsupported)?;
+    let _ = writeln!(
+        console,
+        "power: requesting ACPI {} via PM1a {:#x}, control {word:#x}",
+        state.name(),
+        fadt.pm1a_control
+    );
+    console.flush();
+    let _interrupts = super::cpu::InterruptGuard::disable();
+    // SAFETY: firmware control data is validated and the caller guaranteed system quiescence.
+    unsafe { write_control(fadt.pm1a_control, word) }
+    Ok(())
+}
+
+/// Issue an actual ACPI S3 suspend request, preserving unrelated control bits.
+/// An `Ok` return means the request was issued; the platform suspends asynchronously, so the
+/// caller cannot observe anything after the store returns.
+///
+/// # Safety
+/// The caller must flush all storage, stop device DMA and other CPUs, and prevent new work.
+/// No resume vector is installed by this primitive: firmware that cannot resume will restart
+/// or stay suspended. This function makes no claim that memory state is restored.
+pub unsafe fn request_s3_quiesced(console: &mut dyn HalConsole) -> Result<(), Error> {
+    unsafe { request_quiesced(console, SleepState::S3) }
+}
+
 /// Issue an actual ACPI S5 request, preserving unrelated control bits.
 /// An `Ok` return means the request was issued; platform shutdown is externally observed.
 ///
@@ -69,30 +129,12 @@ fn enable_acpi(fadt: &Fadt) -> Result<u16, Error> {
 /// No resume is possible after this request. The dedicated QEMU harness supplies a machine
 /// with no active DMA devices; this primitive does not claim to implement that global policy.
 pub unsafe fn request_s5_quiesced(console: &mut dyn HalConsole) -> Result<(), Error> {
-    let tables = super::acpi::discover().ok_or(Error::Firmware)?;
-    let fadt = tables.fadt.ok_or(Error::Firmware)?;
-    let sleep_type = tables.s5_sleep_type.ok_or(Error::Firmware)?;
-    // We currently decode only SLP_TYPa. Never guess a distinct PM1b type.
-    if fadt.pm1b_control.is_some() || fadt.pm1_control_bytes < 2 {
-        return Err(Error::Unsupported);
-    }
-    let current = enable_acpi(&fadt)?;
-    let word = pm1_sleep_control(current, sleep_type, true).ok_or(Error::Unsupported)?;
-    let _ = writeln!(
-        console,
-        "power: requesting ACPI S5 via PM1a {:#x}, control {word:#x}",
-        fadt.pm1a_control
-    );
-    console.flush();
-    let _interrupts = super::cpu::InterruptGuard::disable();
-    // SAFETY: firmware control data is validated and the caller guaranteed system quiescence.
-    unsafe { write_control(fadt.pm1a_control, word) };
-    Ok(())
+    unsafe { request_quiesced(console, SleepState::S5) }
 }
 
 /// A conservative guard for the dedicated single-segment, single-CPU QEMU power test only.
 /// This is deliberately not presented as production device-power policy.
-#[cfg(feature = "hal-power-test-s5")]
+#[cfg(any(feature = "hal-power-test-s5", feature = "hal-power-test-s3"))]
 pub fn test_vm_has_active_busmaster() -> bool {
     use nolx_pci_core::ConfigSpace;
     let inventory = nolx_pci_core::enumerate(&mut super::pci::ConfigAccess);

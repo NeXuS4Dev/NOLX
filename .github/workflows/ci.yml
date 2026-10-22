@@ -1009,6 +1009,10 @@ jobs:
         run: make kernel KERNEL_FEATURES=hal-power-test-s5 2>&1 | tee /tmp/job.log
       - name: Observe guest shutdown through QMP
         run: python3 scripts/check-power-s5.py 2>&1 | tee -a /tmp/job.log
+      - name: Build explicit S3 suspend test
+        run: make kernel KERNEL_FEATURES=hal-power-test-s3 2>&1 | tee -a /tmp/job.log
+      - name: Observe S3 suspend and platform wake through QMP
+        run: python3 scripts/check-power-s3.py 2>&1 | tee -a /tmp/job.log
       - name: Build independent filesystem reader
         run: cargo build -p nolxfs-dump 2>&1 | tee -a /tmp/job.log
       - name: Verify six-driver quiescence and flush, stop and foreign-DMA refusals
@@ -1022,7 +1026,7 @@ jobs:
       - name: Annotate serial logs on failure
         if: failure()
         run: |
-          for log in build/power-s5-*.log build/power-quiesce-*.log; do
+          for log in build/power-s5-*.log build/power-s3-*.log build/power-quiesce-*.log; do
             tr -cd '\11\12\40-\176' < "$log" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
           done
       - uses: ./.github/actions/report-failure

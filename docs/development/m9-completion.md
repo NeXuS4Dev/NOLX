@@ -185,7 +185,9 @@ segment-zero board profile and the broader open M9 gates below remain incomplete
       general device binding beyond evaluated PCI INTx remains open.
 - [ ] Complete device power-state/quiesce policy and S3 save/resume path.
       BSP device-level shutdown freeze/flush/stop and fail-closed S5 gates now have six-driver
-      PC/Q35 evidence; higher-layer cache/user-task/SMP orchestration and S3 remain open.
+      PC/Q35 evidence, and S3 suspend entry has PC/Q35 QMP SUSPEND/WAKEUP evidence
+      (2026-10-22 checkpoint); higher-layer cache/user-task/SMP orchestration, a firmware
+      waking vector and any resume/state-restoration path remain open.
 - [x] ACPI S5 entry with QMP observing actual guest shutdown and QEMU exit zero, not a
       printed hypothetical word. The unsafe primitive requires prior system quiescence;
       its test VM has no active DMA, and a negative test refuses an active bus master.
@@ -1879,3 +1881,68 @@ nothing was published instead. `scripts/check-absent-devices.py` still passes on
 syscall and a scheduler-blocking wait do not. The wait here is a ready/not-ready check, not a
 blocked thread, and exposing reports to ring 3 belongs to the syscall layer rather than to this
 binding. INP-004 and INP-005 are `tested-T2`; the syscall half stays an open M9 item.
+
+## Enumerated-PCI correctness, strict root defaults and S3 suspend entry (2026-10-22)
+
+This revision closes no M9 gate by itself: it repairs defects that the host suite and the new S3
+fixture exposed, and records the suspend half of S3 with executable evidence. The host suite is
+green again (22 test binaries, 904 unit tests across `cargo test --lib --bins`, plus the empty
+integration-test targets). The kernel still builds with `nolx-kernel-build` (release,
+`x86_64-unknown-linux-gnu`, 23.2 s) and boots to the address-space selftest on PC and Q35.
+
+**Two real enumeration defects, not stale tests.**
+
+* *Disarmed functions.* `read_header_bars_ext` disabled the command register's decode bits to
+  size BARs and never restored it. Every function walked through the segment-aware reader ended
+  enumeration with memory/I/O decode off — a driver that trusted `enumerate()` would find its
+  device already disarmed. The reader now writes the original command word back after the probe
+  (`crates/nolx-pci-core/src/lib.rs`), and
+  `tests::segment_aware_sizing_also_restores_the_command_register` asserts both the direct
+  reader and `enumerate()` leave the word intact. The command word the plan records
+  (`before == after == 4` on the existing fixture) is correct: a function with decode already
+  on is disabled for the probe and put back.
+* *A bridge window read from the wrong register.* `plan()` decoded the bridge memory window
+  from the I/O base/limit word at `0x1c` instead of the memory base/limit word at `0x20`. A
+  bridge that had closed its memory window and kept an I/O window therefore appeared to
+  forward memory at the I/O window's low address; a missing BAR was assigned inside that
+  phantom range and the real window register was never written. The fixture now reads the two
+  words separately (`memory_types` from `0x20`, `io_types` from `0x1c`), and
+  `resources::tests::a_closed_memory_window_is_never_invented_from_the_io_base_register`
+  fails if an assignment is placed in the phantom range.
+
+**Root discovery now refuses what it cannot represent.** `nolx-power-core::root` evaluates
+`_SEG` and `_BBN` through one helper: a missing member is `None`, but a method that fails or
+returns a non-integer is `Error::Aml`, never segment zero. The module plans only the
+segment-zero, root-bus-zero profile, so a root that advertises another segment or base bus is
+refused with `Error::Topology` instead of being silently aliased to zero; two roots claiming
+one segment are refused as well. This is the explicit refusal side of the open nonzero-segment
+gate, not a native binding implementation. `root_path()` uses the same evaluation, and the
+root tests assert the three-window template, the single bridge and the refusal cases.
+
+**S3 suspend entry.** `kernel/src/hal/power.rs` now carries `SleepState::{S3,S5}` and a shared
+`request_quiesced`; `request_s3_quiesced` resolves the firmware's `_S3_` type, refuses PM1b or
+a sub-word control block, enables ACPI mode, prints the request and stores `SLP_EN | _S3_`
+with interrupts disabled. The new `hal-power-test-s3` feature runs it after the memory
+selftests, refusing first if any segment-zero function is a bus master:
+
+```
+power: requesting ACPI S3 via PM1a 0x604, control 0x2401
+```
+
+`scripts/check-power-s3.py` boots that image on PC and Q35 with no storage or network device,
+waits for the request, requires the QMP `SUSPEND` event, sends `system_wakeup`, requires
+`WAKEUP`, rejects `PANIC|BUGCHECK|CPU exception`, and exits through QMP `quit`. Local results:
+both machines pass, the control word is `0x2401` (`_S3_` = 1 in SLP_TYP, SLP_EN set, SCI_EN
+preserved), and the guest does not re-enter the kernel within the observation window.
+
+**What S3 still is not.** No firmware waking vector is installed, no trampoline below 1 MiB
+exists, and no CR3/GDT/device state is saved or restored. QEMU's FACS carries a zero
+`firmware_waking_vector`, and SeaBIOS resumes only with CMOS `0x0f = 0xfe` plus a nonzero
+vector; a `system_wakeup` in this profile therefore produces the platform wake event but no
+restored execution. The assertion records suspend entry alone, and the power gate stays open.
+
+Other local checks on this revision: `cargo test --tests` (no integration tests),
+`tools/conformance-report.py` (432 assertions, regenerated), and the kernel build. The
+pre-existing formatting drift in `nolx-df-core`, `nolx-pci-core/ecam.rs` and three kernel HAL
+files is unchanged; `cargo fmt --check` still reports those files, so no formatting claim is
+made. CI has not yet run on this revision.
