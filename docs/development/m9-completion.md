@@ -2138,7 +2138,7 @@ PASS: power-s3-q35; QMP SUSPEND + WAKEUP, control 0x2401, resume tag verified, P
 ```
 
 `SUSPEND` → `WAKEUP` → `SHUTDOWN`, QEMU exit status 0 on both machines. PWR-032 records the
-rule; the conformance database is 436 assertions. Host checks: 904 unit tests,
+rule; the conformance database is 436 assertions. Host checks: 906 unit tests,
 `cargo clippy --all-targets -- -D warnings` clean, `cargo fmt --all -- --check` clean, 294
 unsafe blocks each with a SAFETY comment, and the ordinary PC image still boots to
 `NOLX: address space selftest: ... audit ok`. CI run
