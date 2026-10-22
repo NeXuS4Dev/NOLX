@@ -45,7 +45,7 @@ def main():
                 size = end - start
                 assert size > 0 and size & (size - 1) == 0 and start % size == 0, assignments
                 if kind == 'mem':
-                    apertures = [(int(a,16),int(b,16)) for a,b in re.findall(r'aml: PCI root Memory aperture (0x[0-9a-f]+)\.\.(0x[0-9a-f]+) flags=0x1',text)]
+                    apertures = [(int(a,16),int(b,16)) for a,b in re.findall(r'aml: PCI root (?:segment \d{4} )?Memory aperture (0x[0-9a-f]+)\.\.(0x[0-9a-f]+) flags=0x1',text)]
                     assert any(a <= start < end <= b for a,b in apertures), assignments
                     assert 0x80000000 <= start < end <= 0xf0000000, assignments
                     excluded = [(int(a,16),int(b,16)) for a,b in re.findall(r'pci: resource memory exclusion (0x[0-9a-f]+)\.\.(0x[0-9a-f]+)',text)]

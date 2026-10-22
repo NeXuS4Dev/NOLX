@@ -2063,7 +2063,13 @@ adapter isolation — and then failed in `check-pci-resources.py` because the ke
 `pci: segment 0000: assigned ...` and `pci: segment 0000: native resource assignment: ...`
 while the script still searched for the unqualified forms. Both patterns now accept the
 optional `segment NNNN: ` prefix and sum the per-segment summaries, so a multi-segment machine
-would be checked as a whole rather than by its first segment alone.
+would be checked as a whole rather than by its first segment alone. The root memory aperture
+lines carry a `segment NNNN` word without a colon (`aml: PCI root segment 0000 Memory
+aperture ...`), unlike the PCI markers, so the aperture pattern needs its own prefix form.
+
+The geometry block was then replayed against real captured logs for all six fixture shapes
+(PC/Q35, bridge depth 0/1/2): 21--23 BARs and 0/2/4 windows each, every range inside an
+evaluated root aperture, clear of every loader-map exclusion and alias-free.
 
 A local PC build with `hal-pci-resource-test,hal-driver-multi-test` now prints
 `pci: resource fault injection: 6 BAR addresses and bridge forwarding cleared`,
