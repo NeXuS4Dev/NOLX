@@ -207,9 +207,12 @@ segment-zero board profile and the broader open M9 gates below remain incomplete
       (408 assertions, 0 problems, 0 `pending-T2`; README and ROADMAP both cite run
       [39609375684](https://github.com/NeXuS4Dev/NOLX/actions/runs/39609375684) on `e16ee67`).
 - [x] All checks on the final revision pass: run
-      [39609375684](https://github.com/NeXuS4Dev/NOLX/actions/runs/39609375684) on `e16ee67`
-      passed all 19 jobs on 2026-10-21. This item gates the *checks*; the boot-test item above is
-      still open, so M9 stays **in progress**.
+      [39844563970](https://github.com/NeXuS4Dev/NOLX/actions/runs/39844563970) on `f53d9d6`
+      passed all 19 jobs on 2026-10-22, including the device-backed S3 fixture, the SuperSpeed
+      slot-recovery fixture, the extended AML fixture and the xHCI-empty absent-device mode;
+      the feature commit `2ca9e5a` is covered by run
+      [39840435734](https://github.com/NeXuS4Dev/NOLX/actions/runs/39840435734). This item gates
+      the *checks*; the boot-test item above is still open, so M9 stays **in progress**.
 
 ## Verified progress in PR #15 (2026-10-16)
 
