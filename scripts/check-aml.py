@@ -142,7 +142,7 @@ def boot(qemu, kernel, machine, mode):
             if mode == 'multiple-roots':
                 assert 'PCI root resource authorization refused: Topology' in text, text
         else:
-            assert 'aml: evaluated PCI root resources authorized' in text, text
+            assert 'aml: evaluated ' in text and 'PCI root bridge' in text and ' authorized' in text, text
             assert 'pci: resource policy=AML root _CRS;' in text, text
     print(f'PASS: {name}: firmware AML evaluated, status/resource refusals preserved, no heap leak', flush=True)
 

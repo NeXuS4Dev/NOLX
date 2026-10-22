@@ -200,11 +200,21 @@ impl Plan {
     pub fn windows(&self) -> usize {
         self.bridges
     }
-    fn write<C: ExtendedConfigSpace>(&mut self, cfg: &mut C, bdf: Bdf, offset: u8, after: u32, mask: u32) {
+    fn write<C: ExtendedConfigSpace>(
+        &mut self,
+        cfg: &mut C,
+        bdf: Bdf,
+        offset: u8,
+        after: u32,
+        mask: u32,
+    ) {
         self.writes.push(Write {
             bdf,
             offset,
-            before: cfg.read_dword(self.segment, bdf, u16::from(offset & !3)).unwrap_or(0) & mask,
+            before: cfg
+                .read_dword(self.segment, bdf, u16::from(offset & !3))
+                .unwrap_or(0)
+                & mask,
             after,
             mask,
         });
@@ -228,36 +238,31 @@ impl Plan {
         for c in &self.commands {
             cfg.write_dword(self.segment, c.bdf, 4, c.before & !7)?;
         }
-        let disabled = self
-            .commands
-            .iter()
-            .all(|c| cfg.read_dword(self.segment, c.bdf, 4).map(|v| v & 7 == 0).unwrap_or(false));
+        let disabled = self.commands.iter().all(|c| {
+            cfg.read_dword(self.segment, c.bdf, 4)
+                .map(|v| v & 7 == 0)
+                .unwrap_or(false)
+        });
         let mut good = disabled;
         if disabled {
             for w in &self.writes {
                 cfg.write_dword(self.segment, w.bdf, u16::from(w.offset & !3), w.after)?;
             }
-            good = self
-                .writes
-                .iter()
-                .all(|w| {
-                    cfg.read_dword(self.segment, w.bdf, u16::from(w.offset & !3))
-                        .map(|v| v & w.mask == w.after & w.mask)
-                        .unwrap_or(false)
-                });
+            good = self.writes.iter().all(|w| {
+                cfg.read_dword(self.segment, w.bdf, u16::from(w.offset & !3))
+                    .map(|v| v & w.mask == w.after & w.mask)
+                    .unwrap_or(false)
+            });
         }
         if good {
             for c in &self.commands {
                 cfg.write_dword(self.segment, c.bdf, 4, c.after)?;
             }
-            good = self
-                .commands
-                .iter()
-                .all(|c| {
-                    cfg.read_dword(self.segment, c.bdf, 4)
-                        .map(|v| v & 0xffff == c.after)
-                        .unwrap_or(false)
-                });
+            good = self.commands.iter().all(|c| {
+                cfg.read_dword(self.segment, c.bdf, 4)
+                    .map(|v| v & 0xffff == c.after)
+                    .unwrap_or(false)
+            });
             if good {
                 return Ok(());
             }
@@ -266,29 +271,21 @@ impl Plan {
             cfg.write_dword(self.segment, c.bdf, 4, c.before & !7)?;
         }
         // If decode cannot be disabled, do not rewrite addresses under an active device.
-        if self
-            .commands
-            .iter()
-            .any(|c| {
-                cfg.read_dword(self.segment, c.bdf, 4)
-                    .map(|v| v & 7 != 0)
-                    .unwrap_or(false)
-            })
-        {
+        if self.commands.iter().any(|c| {
+            cfg.read_dword(self.segment, c.bdf, 4)
+                .map(|v| v & 7 != 0)
+                .unwrap_or(false)
+        }) {
             return Err(Error::Rollback);
         }
         for w in self.writes.iter().rev() {
             cfg.write_dword(self.segment, w.bdf, u16::from(w.offset & !3), w.before)?;
         }
-        if self
-            .writes
-            .iter()
-            .any(|w| {
-                cfg.read_dword(self.segment, w.bdf, u16::from(w.offset & !3))
-                    .map(|v| v & w.mask != w.before & w.mask)
-                    .unwrap_or(false)
-            })
-        {
+        if self.writes.iter().any(|w| {
+            cfg.read_dword(self.segment, w.bdf, u16::from(w.offset & !3))
+                .map(|v| v & w.mask != w.before & w.mask)
+                .unwrap_or(false)
+        }) {
             return Err(Error::Rollback);
         }
         for c in &self.commands {
@@ -313,6 +310,7 @@ fn memory_window(value: u32) -> Option<Range> {
     let end = (u64::from((value >> 16) & 0xfff0) << 16) + 0x10_0000;
     (start < end).then_some(Range { start, end })
 }
+#[cfg(test)]
 fn prefetch_window<C: ConfigSpace>(cfg: &mut C, bdf: Bdf) -> Option<Range> {
     let value = cfg.read_u32(bdf, 0x24);
     let mut start = u64::from(value & 0xfff0) << 16;
@@ -326,24 +324,6 @@ fn prefetch_window<C: ConfigSpace>(cfg: &mut C, bdf: Bdf) -> Option<Range> {
         end: last.checked_add(1)?,
     };
     (range.start < range.end).then_some(range)
-}
-fn io_window<C: ConfigSpace>(cfg: &mut C, bdf: Bdf) -> Option<Range> {
-    let value = cfg.read_u32(bdf, 0x1c);
-    let upper = cfg.read_u32(bdf, 0x30);
-    let start = (u64::from(value & 0xf0) << 8)
-        | if value & 15 == 1 {
-            u64::from(upper & 0xffff) << 16
-        } else {
-            0
-        };
-    let end = ((u64::from((value >> 8) & 0xf0) << 8)
-        | if (value >> 8) & 15 == 1 {
-            u64::from(upper >> 16) << 16
-        } else {
-            0
-        })
-        + 0x1000;
-    (start < end).then_some(Range { start, end })
 }
 fn rounded(size: u64, granularity: u64) -> Result<u64, Error> {
     size.max(granularity)
@@ -434,6 +414,11 @@ pub fn plan<C: ExtendedConfigSpace>(
     }];
     for info in segment_inventory.iter().filter(|i| i.header_type == 1) {
         let io_types = cfg.read_dword(segment, info.bdf, 0x1c)?;
+        // The memory base/limit register is at 0x20. Decoding the I/O register here (or vice
+        // versa) invents a window out of unrelated bits: a bridge that had closed its memory
+        // window and kept an I/O window would appear to forward memory at the I/O window's
+        // low address, and a missing BAR would be assigned inside that phantom range.
+        let memory_types = cfg.read_dword(segment, info.bdf, 0x20)?;
         let pref_types = cfg.read_dword(segment, info.bdf, 0x24)?;
         if io_types & 15 > 1
             || (io_types & 15) != ((io_types >> 8) & 15)
@@ -451,7 +436,7 @@ pub fn plan<C: ExtendedConfigSpace>(
             bus: secondary,
             bridge: Some(info.bdf),
             parent: 0,
-            memory: memory_window(io_types),
+            memory: memory_window(memory_types),
             prefetch: prefetch_window_ext(cfg, segment, info.bdf)?,
             io: io_window_ext(cfg, segment, info.bdf)?,
             demand: [0; 2],
@@ -703,7 +688,8 @@ pub fn plan<C: ExtendedConfigSpace>(
             } else {
                 let leaf = &mut leaves[index];
                 let offset = 0x10 + leaf.slot as u8 * 4;
-                let flags = cfg.read_dword(segment, leaf.bdf, u16::from(offset))? & if is_io { 3 } else { 15 };
+                let flags = cfg.read_dword(segment, leaf.bdf, u16::from(offset))?
+                    & if is_io { 3 } else { 15 };
                 plan.write(cfg, leaf.bdf, offset, range.start as u32 | flags, u32::MAX);
                 if leaf.wide {
                     plan.write(cfg, leaf.bdf, offset + 4, 0, u32::MAX);

@@ -226,7 +226,11 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         let mut input_read_test_reported = false;
         #[cfg(feature = "hal-input-wait-test")]
         let mut input_poll_test_reported = false;
-        #[cfg(any(feature = "hal-power-test-s5", feature = "hal-power-quiesce-test"))]
+        #[cfg(any(
+            feature = "hal-power-test-s5",
+            feature = "hal-power-test-s3",
+            feature = "hal-power-quiesce-test"
+        ))]
         let mut power_test_started = false;
         loop {
             // Device polling prints, and the round-robin phase checks the exact interleaving of
@@ -436,6 +440,24 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
             {
                 power_test_started = true;
                 hal::power::quiesce_selftest(&mut console);
+            }
+
+            #[cfg(feature = "hal-power-test-s3")]
+            if memory_selftest_done && !power_test_started {
+                power_test_started = true;
+                // The dedicated S3 fixture has no DMA-capable devices; refuse rather than
+                // storing a sleep word while a bus master could still write memory.
+                if hal::power::test_vm_has_active_busmaster() {
+                    let _ = writeln!(console, "power: S3 refused: active PCI bus master");
+                } else {
+                    hal::power::prepare_s3_resume(&mut console)
+                        .expect("power: S3 hand-off installation failed");
+                    // SAFETY: single-CPU QEMU fixture with no DMA devices and no runnable
+                    // work; the request is the last thing this boot executes.
+                    if let Err(error) = unsafe { hal::power::request_s3_quiesced(&mut console) } {
+                        panic!("power: S3 request failed: {error:?}");
+                    }
+                }
             }
 
             #[cfg(feature = "hal-power-test-s5")]

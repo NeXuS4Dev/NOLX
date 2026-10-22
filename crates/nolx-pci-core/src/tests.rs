@@ -48,6 +48,9 @@ pub(super) struct Machine {
     functions: Vec<(Bdf, Regs)>,
     /// Every write that reached configuration space, so restore-after-probe can be checked.
     pub(super) writes: Vec<(Bdf, u8, u32)>,
+    /// The one PCI segment this model answers for. A request for any other segment is
+    /// refused, exactly as the extended-configuration contract requires: no aliasing to zero.
+    segment: u16,
 }
 
 impl Machine {
@@ -55,10 +58,23 @@ impl Machine {
         Self {
             functions: Vec::new(),
             writes: Vec::new(),
+            segment: 0,
+        }
+    }
+
+    /// A model that answers only on `segment`.
+    pub(super) fn with_segment(segment: u16) -> Self {
+        Self {
+            segment,
+            ..Self::new()
         }
     }
 
     pub(super) fn add(&mut self, bdf: Bdf, regs: Regs) {
+        assert_eq!(
+            bdf.segment, self.segment,
+            "a test function must live in the segment its model answers for"
+        );
         self.functions.push((bdf, regs));
     }
 
@@ -85,6 +101,36 @@ impl ConfigSpace for Machine {
             let keep = regs.values[index] & !regs.writable[index];
             regs.values[index] = (value & regs.writable[index]) | keep;
         }
+    }
+}
+
+impl crate::ecam::ExtendedConfigSpace for Machine {
+    fn read_dword(
+        &mut self,
+        segment: u16,
+        bdf: Bdf,
+        offset: u16,
+    ) -> Result<u32, crate::ecam::EcamError> {
+        if segment != self.segment || bdf.segment != segment {
+            return Err(crate::ecam::EcamError::InvalidBdf);
+        }
+        let offset = u8::try_from(offset).map_err(|_| crate::ecam::EcamError::InvalidOffset)?;
+        Ok(self.read_u32(bdf, offset))
+    }
+
+    fn write_dword(
+        &mut self,
+        segment: u16,
+        bdf: Bdf,
+        offset: u16,
+        value: u32,
+    ) -> Result<(), crate::ecam::EcamError> {
+        if segment != self.segment || bdf.segment != segment {
+            return Err(crate::ecam::EcamError::InvalidBdf);
+        }
+        let offset = u8::try_from(offset).map_err(|_| crate::ecam::EcamError::InvalidOffset)?;
+        self.write_u32(bdf, offset, value);
+        Ok(())
     }
 }
 
@@ -295,6 +341,33 @@ fn sizing_switches_decoding_off_and_restores_the_command_register() {
     assert_eq!(command_writes.last(), Some(&0x0000_0006));
     let after = machine.regs(bdf(0, 4, 0)).expect("present");
     assert_eq!(after.values[1], 0x0000_0006);
+}
+
+#[test]
+fn segment_aware_sizing_also_restores_the_command_register() {
+    let mut machine = Machine::new();
+    let mut regs = Regs::endpoint(0x1AF4, 0x1001, 0x01, 0x00, false);
+    regs.values[1] = 0x0000_0006;
+    regs.writable[1] = 0x0000_0003;
+    regs.values[4] = 0xFEBC_0000;
+    regs.writable[4] = 0xFFFF_F000;
+    machine.add(bdf(0, 4, 0), regs);
+
+    let set = read_bars_ext(&mut machine, 0, bdf(0, 4, 0));
+    assert_eq!(set.sizes[0], Some(0x1000));
+    assert_eq!(
+        machine.regs(bdf(0, 4, 0)).expect("present").values[1],
+        0x0000_0006
+    );
+
+    // Enumeration walks the same reader: leaving decoding off here would disarm the function
+    // before any driver ever claimed it.
+    let inventory = enumerate(&mut machine);
+    assert_eq!(inventory.as_slice().len(), 1);
+    assert_eq!(
+        machine.regs(bdf(0, 4, 0)).expect("present").values[1],
+        0x0000_0006
+    );
 }
 
 #[test]

@@ -388,8 +388,16 @@ fn read_header_bars_ext<C: ExtendedConfigSpace>(
     slots: usize,
 ) -> BarSet {
     let mut set = BarSet::default();
-    let command = cfg.read_dword(segment, bdf, u16::from(OFF_COMMAND)).unwrap_or(0) & 0xFFFF;
-    let _ = cfg.write_dword(segment, bdf, u16::from(OFF_COMMAND), command & !COMMAND_DECODE_MASK);
+    let command = cfg
+        .read_dword(segment, bdf, u16::from(OFF_COMMAND))
+        .unwrap_or(0)
+        & 0xFFFF;
+    let _ = cfg.write_dword(
+        segment,
+        bdf,
+        u16::from(OFF_COMMAND),
+        command & !COMMAND_DECODE_MASK,
+    );
     let mut slot = 0usize;
     while slot < slots {
         let offset = OFF_BAR0 + (slot as u8) * 4;
@@ -401,22 +409,29 @@ fn read_header_bars_ext<C: ExtendedConfigSpace>(
             continue;
         }
         let original_high = if is_64 {
-            cfg.read_dword(segment, bdf, u16::from(offset + 4)).unwrap_or(0)
+            cfg.read_dword(segment, bdf, u16::from(offset + 4))
+                .unwrap_or(0)
         } else {
             0
         };
         let mut bar = decode_bar(original_low, original_high);
         let width = if is_64 { 2 } else { 1 };
 
-        cfg.write_dword(segment, bdf, u16::from(offset), 0xFFFF_FFFF).ok();
+        cfg.write_dword(segment, bdf, u16::from(offset), 0xFFFF_FFFF)
+            .ok();
         let probed_low = cfg.read_dword(segment, bdf, u16::from(offset)).unwrap_or(0);
         let mut probed_high = 0;
         if width == 2 {
-            cfg.write_dword(segment, bdf, u16::from(offset + 4), 0xFFFF_FFFF).ok();
-            probed_high = cfg.read_dword(segment, bdf, u16::from(offset + 4)).unwrap_or(0);
-            cfg.write_dword(segment, bdf, u16::from(offset + 4), original_high).ok();
+            cfg.write_dword(segment, bdf, u16::from(offset + 4), 0xFFFF_FFFF)
+                .ok();
+            probed_high = cfg
+                .read_dword(segment, bdf, u16::from(offset + 4))
+                .unwrap_or(0);
+            cfg.write_dword(segment, bdf, u16::from(offset + 4), original_high)
+                .ok();
         }
-        cfg.write_dword(segment, bdf, u16::from(offset), original_low).ok();
+        cfg.write_dword(segment, bdf, u16::from(offset), original_low)
+            .ok();
 
         if bar == Bar::Unused {
             bar = if original_low & 1 != 0 && probed_low & !3 != 0 {
@@ -442,6 +457,10 @@ fn read_header_bars_ext<C: ExtendedConfigSpace>(
         }
         slot += width;
     }
+    // Put the command register back exactly as it was. Leaving decoding off would silently
+    // disarm every function the enumeration walked, and the next reader would see a command
+    // word that no firmware wrote. Writes are ignored on a transport that refuses them.
+    let _ = cfg.write_dword(segment, bdf, u16::from(OFF_COMMAND), command);
     set
 }
 

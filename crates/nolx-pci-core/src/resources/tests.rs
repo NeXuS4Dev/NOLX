@@ -1,6 +1,6 @@
 use super::*;
 use crate::tests::{bdf, Machine, Regs};
-use crate::FunctionInfo;
+use crate::{read_bars, read_bridge_bars, FunctionInfo};
 
 fn endpoint() -> Regs {
     let mut r = Regs::endpoint(0x1234, 0x5678, 1, 8, false);
@@ -33,7 +33,7 @@ fn pools() -> (Pool, Pool) {
 fn proposal(m: &mut Machine) -> Result<Plan, Error> {
     let inventory = crate::enumerate(m);
     let (mem, io) = pools();
-    plan(m, &inventory, mem, io)
+    plan(m, 0, &inventory, mem, io)
 }
 
 #[test]
@@ -125,8 +125,12 @@ fn builds_nested_bridge_windows_and_routes_own_bridge_bars_on_parent_bus() {
         panic!()
     };
     for bridge in [bdf(0, 3, 0), bdf(1, 1, 0)] {
-        assert!(memory_window(m.read_u32(bridge, 0x20))
-            .unwrap()
+        let raw = m.read_u32(bridge, 0x20);
+        assert!(memory_window(raw)
+            .unwrap_or_else(|| panic!(
+                "bridge {bridge:?} window {raw:#010x} is not a window; base {base:#x}, windows {}",
+                p.windows()
+            ))
             .contains(Range::new(base, 16384).unwrap()));
         assert_eq!(m.read_u32(bridge, 4) & 7, 7);
     }
@@ -136,6 +140,28 @@ fn builds_nested_bridge_windows_and_routes_own_bridge_bars_on_parent_bus() {
         .filter(|(b, off, _)| b.bus < 2 && *off == 0x1c)
         .all(|(_, _, v)| v & 0xffff_0000 == 0));
     assert!(proposal(&mut m).unwrap().assignments().is_empty());
+}
+
+#[test]
+fn a_closed_memory_window_is_never_invented_from_the_io_base_register() {
+    let mut m = Machine::new();
+    // The model's bridge publishes a real I/O base/limit word and a closed memory window.
+    // Decoding the memory window from offset 0x1c would invent 0x01f00000..0xa0100000 and
+    // assign the missing BAR inside it, outside the caller's aperture.
+    m.add(bdf(0, 3, 0), bridge(1));
+    m.add(bdf(1, 1, 0), endpoint());
+    let plan = proposal(&mut m).unwrap();
+    assert!(!plan.assignments().is_empty());
+    for assignment in plan.assignments() {
+        let floor = if assignment.io { 0xc000 } else { 0xc000_0000 };
+        assert!(
+            assignment.range.start >= floor,
+            "assignment {assignment:?} came from a phantom bridge window"
+        );
+    }
+    plan.apply(&mut m).unwrap();
+    let window = memory_window(m.read_u32(bdf(0, 3, 0), 0x20)).expect("a real window");
+    assert_eq!(window.start, 0xc000_0000);
 }
 
 #[test]
@@ -168,6 +194,7 @@ fn no_space_overflow_alias_and_unrouted_resources_are_refused() {
     assert!(matches!(
         plan(
             &mut m,
+            0,
             &inventory,
             Pool::new(Range::new(0xc000_0000, 4096).unwrap()).unwrap(),
             io
@@ -203,6 +230,31 @@ impl ConfigSpace for Refuse {
             return;
         }
         self.machine.write_u32(b, o, v);
+    }
+}
+impl crate::ecam::ExtendedConfigSpace for Refuse {
+    fn read_dword(
+        &mut self,
+        segment: u16,
+        bdf: Bdf,
+        offset: u16,
+    ) -> Result<u32, crate::ecam::EcamError> {
+        self.machine.read_dword(segment, bdf, offset)
+    }
+    fn write_dword(
+        &mut self,
+        segment: u16,
+        bdf: Bdf,
+        offset: u16,
+        value: u32,
+    ) -> Result<(), crate::ecam::EcamError> {
+        if self.fail == Some((bdf, offset as u8)) {
+            if !self.permanent {
+                self.fail = None;
+            }
+            return Ok(());
+        }
+        self.machine.write_dword(segment, bdf, offset, value)
     }
 }
 #[test]
@@ -262,13 +314,13 @@ fn overlapping_sibling_windows_and_incomplete_topology_are_refused() {
     inventory.overflowed = true;
     let (mem, io) = pools();
     assert!(matches!(
-        plan(&mut m, &inventory, mem, io),
+        plan(&mut m, 0, &inventory, mem, io),
         Err(Error::Topology)
     ));
 }
 
 #[test]
-fn resource_repair_refuses_nonzero_segments_until_segmented_topology_is_supported() {
+fn resource_repair_is_scoped_to_the_requested_segment() {
     let mut inventory = Inventory::default();
     inventory
         .push(FunctionInfo {
@@ -278,10 +330,54 @@ fn resource_repair_refuses_nonzero_segments_until_segmented_topology_is_supporte
         })
         .unwrap();
     let (mem, io) = pools();
+    // A segment the inventory does not name is refused rather than planned as segment zero.
     let mut machine = Machine::new();
     assert_eq!(
-        plan(&mut machine, &inventory, mem, io).err(),
+        plan(&mut machine, 0, &inventory, mem.clone(), io.clone()).err(),
         Some(Error::Topology)
+    );
+    // A bridge on a segment the transport refuses must surface that refusal. A type-0-only
+    // inventory cannot: the segment-aware BAR reader treats an unreadable register as
+    // absent, so the branch that must not silently vanish is the one with a bridge.
+    inventory
+        .push(FunctionInfo {
+            bdf: Bdf::in_segment(7, 0, 4, 0).unwrap(),
+            vendor_id: 0x1234,
+            class: 0x06,
+            subclass: 0x04,
+            header_type: 1,
+            ..FunctionInfo::default()
+        })
+        .unwrap();
+    assert!(matches!(
+        plan(&mut machine, 7, &inventory, mem, io),
+        Err(Error::Ecam(_))
+    ));
+}
+
+#[test]
+fn resource_repair_plans_a_nonzero_segment_when_the_transport_serves_it() {
+    let mut inventory = Inventory::default();
+    inventory
+        .push(FunctionInfo {
+            bdf: Bdf::in_segment(7, 0, 3, 0).unwrap(),
+            vendor_id: 0x1234,
+            class: 0x02,
+            subclass: 0x00,
+            ..FunctionInfo::default()
+        })
+        .unwrap();
+    let (mem, io) = pools();
+    let mut machine = Machine::with_segment(7);
+    machine.add(Bdf::in_segment(7, 0, 3, 0).unwrap(), endpoint());
+    let plan = plan(&mut machine, 7, &inventory, mem, io).unwrap();
+    assert!(!plan.assignments().is_empty());
+    plan.apply(&mut machine).unwrap();
+    assert_ne!(
+        crate::assigned_memory_base(
+            read_bars(&mut machine, Bdf::in_segment(7, 0, 3, 0).unwrap()).slots[1]
+        ),
+        None
     );
 }
 
@@ -309,6 +405,30 @@ fn rollback_failure_does_not_reenable_decoding() {
             } else {
                 self.0.write_u32(b, o, v);
             }
+        }
+    }
+    impl crate::ecam::ExtendedConfigSpace for Corrupt {
+        fn read_dword(
+            &mut self,
+            segment: u16,
+            bdf: Bdf,
+            offset: u16,
+        ) -> Result<u32, crate::ecam::EcamError> {
+            self.0.read_dword(segment, bdf, offset)
+        }
+        fn write_dword(
+            &mut self,
+            segment: u16,
+            bdf: Bdf,
+            offset: u16,
+            value: u32,
+        ) -> Result<(), crate::ecam::EcamError> {
+            if offset == 0x10 {
+                let _ = self.0.write_dword(segment, bdf, offset, 0xdead_0000);
+            } else {
+                self.0.write_dword(segment, bdf, offset, value)?;
+            }
+            Ok(())
         }
     }
     let mut m = Machine::new();

@@ -622,7 +622,9 @@ pub fn prepare_resources(console: &mut dyn HalConsole) {
     if let Some((mut base_memory, mut base_io)) = base_pools {
         for mapping in MAPPINGS.lock().iter().flatten() {
             let (base, bytes) = mapping.window.physical_range();
-            base_memory.reserve(Range::new(base, bytes).unwrap()).unwrap();
+            base_memory
+                .reserve(Range::new(base, bytes).unwrap())
+                .unwrap();
         }
         // Chipset PM/SMBus fixed registers are not ordinary PCI BARs.
         for info in inventory
@@ -634,16 +636,21 @@ pub fn prepare_resources(console: &mut dyn HalConsole) {
                 let pm = ConfigAccess.read_u32(info.bdf, 0x40) & 0xffc0;
                 let smbus = ConfigAccess.read_u32(info.bdf, 0x90) & 0xfff0;
                 if pm != 0 {
-                    base_io.reserve(Range::new(u64::from(pm), 64).unwrap()).unwrap();
+                    base_io
+                        .reserve(Range::new(u64::from(pm), 64).unwrap())
+                        .unwrap();
                 }
                 if smbus != 0 {
-                    base_io.reserve(Range::new(u64::from(smbus), 16).unwrap())
+                    base_io
+                        .reserve(Range::new(u64::from(smbus), 16).unwrap())
                         .unwrap();
                 }
             } else if info.device_id == 0x2918 {
                 let pm = ConfigAccess.read_u32(info.bdf, 0x40) & 0xff80;
                 if pm != 0 {
-                    base_io.reserve(Range::new(u64::from(pm), 128).unwrap()).unwrap();
+                    base_io
+                        .reserve(Range::new(u64::from(pm), 128).unwrap())
+                        .unwrap();
                 }
             }
         }
@@ -686,16 +693,18 @@ pub fn prepare_resources(console: &mut dyn HalConsole) {
             assert!(cleared > 0, "resource fixture needs supported devices");
             let _ = writeln!(console, "pci: resource fault injection: {cleared} BAR addresses and bridge forwarding cleared before native assignment");
         }
-        // Plan resources for each segment that has a valid ECAM mapping.
-        // Collect unique segments from mappings.
-        let segments: alloc::vec::Vec<u16> = MAPPINGS
+        // Plan every segment the transport can actually write. Segment zero is always
+        // reachable: an ECAM mapping when one covers it, legacy ports otherwise. Planning only
+        // the mapped segments left a legacy-only machine with no assignment at all, so a
+        // fixture that cleared the firmware BARs never got them back.
+        let mut segments: alloc::collections::BTreeSet<u16> = MAPPINGS
             .lock()
             .iter()
             .flatten()
             .map(|m| m.segment)
-            .collect::<alloc::collections::BTreeSet<_>>()
-            .into_iter()
             .collect();
+        segments.insert(0);
+        let segments: alloc::vec::Vec<u16> = segments.into_iter().collect();
         for segment in segments {
             // Clone pools for this segment (they share physical address space on PC/Q35)
             let memory = base_memory.clone();
@@ -752,4 +761,22 @@ pub fn prepare_resources(console: &mut dyn HalConsole) {
             nolx_pci_core::read_bars(&mut ConfigAccess, info.bdf),
         ));
     }
+}
+
+/// Re-establish the configuration transport after a firmware resume.
+///
+/// The wake reset clears the chipset's memory-mapped configuration window and resets every
+/// function's command register, so the mappings this module holds describe memory that no
+/// longer answers: a read through them returns zeroes, which discovery would read as "absent"
+/// rather than "reset". Drop the mappings and select the transport again. The identity check
+/// against the legacy ports refuses a window that no longer answers, leaving segment zero on
+/// the legacy ports until a real ECAM is found.
+pub fn refresh_transport(console: &mut dyn HalConsole) {
+    {
+        let mut mappings = MAPPINGS.lock();
+        for slot in mappings.iter_mut() {
+            *slot = None;
+        }
+    }
+    select_transport(console);
 }

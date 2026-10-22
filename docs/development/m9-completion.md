@@ -185,7 +185,9 @@ segment-zero board profile and the broader open M9 gates below remain incomplete
       general device binding beyond evaluated PCI INTx remains open.
 - [ ] Complete device power-state/quiesce policy and S3 save/resume path.
       BSP device-level shutdown freeze/flush/stop and fail-closed S5 gates now have six-driver
-      PC/Q35 evidence; higher-layer cache/user-task/SMP orchestration and S3 remain open.
+      PC/Q35 evidence, and S3 suspend entry has PC/Q35 QMP SUSPEND/WAKEUP evidence
+      (2026-10-22 checkpoint); higher-layer cache/user-task/SMP orchestration, a firmware
+      waking vector and any resume/state-restoration path remain open.
 - [x] ACPI S5 entry with QMP observing actual guest shutdown and QEMU exit zero, not a
       printed hypothetical word. The unsafe primitive requires prior system quiescence;
       its test VM has no active DMA, and a negative test refuses an active bus master.
@@ -1879,3 +1881,273 @@ nothing was published instead. `scripts/check-absent-devices.py` still passes on
 syscall and a scheduler-blocking wait do not. The wait here is a ready/not-ready check, not a
 blocked thread, and exposing reports to ring 3 belongs to the syscall layer rather than to this
 binding. INP-004 and INP-005 are `tested-T2`; the syscall half stays an open M9 item.
+
+## Enumerated-PCI correctness, strict root defaults and S3 suspend entry (2026-10-22)
+
+This revision closes no M9 gate by itself: it repairs defects that the host suite and the new S3
+fixture exposed, and records the suspend half of S3 with executable evidence. The host suite is
+green again (22 test binaries, 904 unit tests across `cargo test --lib --bins`, plus the empty
+integration-test targets). The kernel still builds with `nolx-kernel-build` (release,
+`x86_64-unknown-linux-gnu`, 23.2 s) and boots to the address-space selftest on PC and Q35.
+
+**Two real enumeration defects, not stale tests.**
+
+* *Disarmed functions.* `read_header_bars_ext` disabled the command register's decode bits to
+  size BARs and never restored it. Every function walked through the segment-aware reader ended
+  enumeration with memory/I/O decode off — a driver that trusted `enumerate()` would find its
+  device already disarmed. The reader now writes the original command word back after the probe
+  (`crates/nolx-pci-core/src/lib.rs`), and
+  `tests::segment_aware_sizing_also_restores_the_command_register` asserts both the direct
+  reader and `enumerate()` leave the word intact. The command word the plan records
+  (`before == after == 4` on the existing fixture) is correct: a function with decode already
+  on is disabled for the probe and put back.
+* *A bridge window read from the wrong register.* `plan()` decoded the bridge memory window
+  from the I/O base/limit word at `0x1c` instead of the memory base/limit word at `0x20`. A
+  bridge that had closed its memory window and kept an I/O window therefore appeared to
+  forward memory at the I/O window's low address; a missing BAR was assigned inside that
+  phantom range and the real window register was never written. The fixture now reads the two
+  words separately (`memory_types` from `0x20`, `io_types` from `0x1c`), and
+  `resources::tests::a_closed_memory_window_is_never_invented_from_the_io_base_register`
+  fails if an assignment is placed in the phantom range.
+
+**Root discovery now refuses what it cannot represent.** `nolx-power-core::root` evaluates
+`_SEG` and `_BBN` through one helper: a missing member is `None`, but a method that fails or
+returns a non-integer is `Error::Aml`, never segment zero. The module plans only the
+segment-zero, root-bus-zero profile, so a root that advertises another segment or base bus is
+refused with `Error::Topology` instead of being silently aliased to zero; two roots claiming
+one segment are refused as well. This is the explicit refusal side of the open nonzero-segment
+gate, not a native binding implementation. `root_path()` uses the same evaluation, and the
+root tests assert the three-window template, the single bridge and the refusal cases.
+
+**S3 suspend entry.** `kernel/src/hal/power.rs` now carries `SleepState::{S3,S5}` and a shared
+`request_quiesced`; `request_s3_quiesced` resolves the firmware's `_S3_` type, refuses PM1b or
+a sub-word control block, enables ACPI mode, prints the request and stores `SLP_EN | _S3_`
+with interrupts disabled. The new `hal-power-test-s3` feature runs it after the memory
+selftests, refusing first if any segment-zero function is a bus master:
+
+```
+power: requesting ACPI S3 via PM1a 0x604, control 0x2401
+```
+
+`scripts/check-power-s3.py` boots that image on PC and Q35 with no storage or network device,
+waits for the request, requires the QMP `SUSPEND` event, sends `system_wakeup`, requires
+`WAKEUP`, rejects `PANIC|BUGCHECK|CPU exception`, and exits through QMP `quit`. Local results:
+both machines pass, the control word is `0x2401` (`_S3_` = 1 in SLP_TYP, SLP_EN set, SCI_EN
+preserved), and the guest does not re-enter the kernel within the observation window.
+
+**What S3 still is not.** No firmware waking vector is installed, no trampoline below 1 MiB
+exists, and no CR3/GDT/device state is saved or restored. QEMU's FACS carries a zero
+`firmware_waking_vector`, and SeaBIOS resumes only with CMOS `0x0f = 0xfe` plus a nonzero
+vector; a `system_wakeup` in this profile therefore produces the platform wake event but no
+restored execution. The assertion records suspend entry alone, and the power gate stays open.
+
+Other local checks on this revision: `cargo test --tests` (no integration tests),
+`tools/conformance-report.py` (432 assertions, regenerated), and the kernel build. The
+pre-existing formatting drift in `nolx-df-core`, `nolx-pci-core/ecam.rs` and three kernel HAL
+files is unchanged; `cargo fmt --check` still reports those files, so no formatting claim is
+made. CI has not yet run on this revision.
+
+## S3 resume: long-mode re-entry through the firmware waking vector (2026-10-22)
+
+The previous checkpoint recorded suspend entry alone: the FACS waking vector was zero, CMOS
+`0x0f` was untouched, and a `system_wakeup` produced the platform WAKEUP event without any
+kernel execution afterwards. This revision installs a real hand-off, so the wake path now
+returns to NOLX in long mode and proves it by printing a tag written into kernel RAM before
+the sleep. S3 **save/resume as an M9 gate is still open**: no device is restored, the ACPI PM
+block is not re-decoded, and nothing has run on real hardware.
+
+**FACS plumbing (`crates/nolx-power-core`).** `Fadt::parse` now exposes `firmware_ctrl`,
+preferring a nonzero `X_FIRMWARE_CTRL` (offset 132) over the 32-bit `FIRMWARE_CTRL` (offset 36)
+on revision 2 and later. `facs_waking_vector` / `set_facs_waking_vector` validate the `FACS`
+signature and the declared length (at least 16 bytes, the offset of the vector) and read or
+replace the 32-bit vector at offset 12. Two tests cover the preferred 64-bit address and the
+refusal cases (`FacsError::{TooShort,WrongSignature}`). Assertions PWR-030 and PWR-031 record
+these rules and the boot behaviour; the conformance database is now 434 assertions.
+
+**Hand-off layout (`kernel/src/hal/power.rs`).** One `global_asm!` block, copied to `0x8000`
+before the sleep:
+
+```
++0x000  real-mode entry: zero DS/ES/SS, mov esp,0x7000, lgdt 0x8228, PE, ljmp $0x08,$0x8040
++0x040  .code32: data 0x10, CR3 = temporary PML4 0x9000, CR4/CR0/EFER from the saved data
++0x100  .code64: jmp through the absolute kernel pointer at 0x8308
++0x200  GDT: null, 32-bit code/data, 64-bit code, data
++0x228  GDTR for that GDT (base 0x8200, limit 0x27)
++0x300  saved CR3 (masked), resume entry VA, kernel stack top, saved GDTR and IDTR,
+        saved CR0, CR4 and EFER
++0x360  end of the copied blob
+```
+
+`s3_resume_entry` sits immediately after the blob in the image; it restores the saved CR3,
+RSP, GDTR and IDTR through the direct map, loads CS = `0x08` with `lretq`, sets the data
+segments to `0x10`, and calls `s3_resume_rust`. That function prints
+`power: resumed from S3 with tag {tag:#x}; kernel RAM state preserved`, asserts the tag equals
+`0x534c_3352_4553_554d` (the bytes of `SL3RESUM` stored before the sleep), and halts.
+
+Before the sleep `prepare_s3_resume` copies the live PML4 to `0x9000`, replaces only
+`PML4[0]` with a PDPT that maps the first 4 MiB of physical memory with 2 MiB pages, saves
+CR0/CR4/EFER/CR3/RSP/GDTR/IDTR and the tag, writes the hand-off address into the FACS and sets
+CMOS `0x0f = 0xfe`. The whole first megabyte is already reserved by
+`mm::reserve_kernel_memory`, so the blob and the temporary tables can never be handed to a
+driver.
+
+**Two failure modes found by running it.** The first build refused to install the hand-off
+because `prepare_s3_resume` still bounded the blob length by the old `S3_DATA_OFFSET` (0x300)
+while the blob had grown to 0x340 — the `Unsupported` panic happened before the S3 request and
+therefore produced no SUSPEND/WAKEUP at all. After fixing the bound, the resume marker printed
+and the CPU immediately took a general-protection fault (vector 6) at the first kernel
+instruction: `.org 0x80` placed the `.code64` stub inside the following region, and the
+trampoline programmed CR4/EFER/CR0 from immediates instead of the saved values. The stub now
+lives at `0x100`, and all three control registers are loaded from the saved data block.
+
+**Evidence.** `scripts/check-power-s3.py` now requires the resume marker and quits QEMU once
+it appears (the resumed kernel has no driver or ACPI PM path to shut down cleanly). On the
+`hal-power-test-s3` image both machines pass:
+
+```
+power: S3 hand-off at 0x8000 via FACS 0x1ffe0000, CMOS 0x0f=0xfe
+power: requesting ACPI S3 via PM1a 0x604, control 0x2401
+power: resumed from S3 with tag 0x534c33524553554d; kernel RAM state preserved
+PASS: power-s3-pc
+PASS: power-s3-q35
+```
+
+QMP reported exactly `SUSPEND` then `WAKEUP`, the control word kept SCI_EN with `_S3_` = 1 and
+SLP_EN, and neither run contains `PANIC`, `BUGCHECK` or `CPU exception`. This is T2 evidence
+with QEMU's own ACPI/FACS/SeaBIOS resume path — it is not a hardware run and does not restore
+devices.
+
+**What is still open.** Device power-state policy and restore, re-decoding the ACPI PM block
+after resume, re-initialising xHCI/PCI/HPET and interrupt routing, and any multi-CPU resume.
+The tag proves only that the CPU, the page tables and the kernel stack survived; every device
+is in its post-firmware state. Host checks on this revision: 904 unit tests across
+`cargo test --lib --bins`, 434 conformance assertions, `cargo clippy --all-targets -- -D
+warnings` clean, and `cargo fmt --all -- --check` now clean (the earlier reported drift in
+`nolx-df-core`, `nolx-pci-core` and three kernel HAL files was formatted). The run recorded
+in the next section covers it.
+
+## CI follow-up: legacy segment-zero planning and the unsafe audit (2026-10-22)
+
+CI run [39761210692](https://github.com/NeXuS4Dev/NOLX/actions/runs/39761210692) on `fa69ee8`
+failed three of nineteen jobs. Two were fixture/lint defects introduced by the S3 work, one
+was a real resource-planning regression.
+
+**Unsafe audit.** `scripts/check-unsafe.sh` requires a `// SAFETY:` comment above every
+`unsafe` block. The two one-line wrappers `request_s3_quiesced`/`request_s5_quiesced` had
+their contract in the doc comment but not above the block, so the lint job failed with two
+annotations. Both blocks now state the caller obligation. The audit reports 293 blocks, 0
+missing.
+
+**Two stale marker assertions.** `check-aml.py` and `check-pci-resources.py` still expected
+`aml: evaluated PCI root resources authorized`, a marker the kernel stopped printing when it
+began counting root bridges (`aml: evaluated 1 PCI root bridge(s) authorized`). The AML job
+failed on that assertion, before any of its real checks ran. Both scripts now assert the
+current marker; `check-aml.py` passes all three fixtures locally.
+
+**Segment zero was never planned without ECAM.** `prepare_resources` collected its segment
+list *only* from successfully mapped MCFG allocations. A legacy-transport machine therefore
+iterated an empty list, committed no assignments, and — after the fixture cleared the firmware
+BARs — brought up nothing: `virtio-blk: not brought up: BarNotMemory(4)`,
+`ahci: not brought up: BarNotMemory`, `nvme`, `e1000` likewise, and the lifecycle selftest
+never completed. Segment zero is always writable (ECAM when a mapping covers it, legacy ports
+otherwise), so the planner now starts from `{0}` and adds the mapped segments:
+
+```rust
+let mut segments: BTreeSet<u16> = MAPPINGS.lock().iter().flatten().map(|m| m.segment).collect();
+segments.insert(0);
+```
+
+**The fixture also asserted markers that lost their segment prefix.** Once planning ran,
+CI showed the whole assignment working — 21 BARs, six storage devices up, four NICs, multi
+adapter isolation — and then failed in `check-pci-resources.py` because the kernel prints
+`pci: segment 0000: assigned ...` and `pci: segment 0000: native resource assignment: ...`
+while the script still searched for the unqualified forms. Both patterns now accept the
+optional `segment NNNN: ` prefix and sum the per-segment summaries, so a multi-segment machine
+would be checked as a whole rather than by its first segment alone. The root memory aperture
+lines carry a `segment NNNN` word without a colon (`aml: PCI root segment 0000 Memory
+aperture ...`), unlike the PCI markers, so the aperture pattern needs its own prefix form.
+
+The geometry block was then replayed against real captured logs for all six fixture shapes
+(PC/Q35, bridge depth 0/1/2): 21--23 BARs and 0/2/4 windows each, every range inside an
+evaluated root aperture, clear of every loader-map exclusion and alias-free.
+
+A local PC build with `hal-pci-resource-test,hal-driver-multi-test` now prints
+`pci: resource fault injection: 6 BAR addresses and bridge forwarding cleared`,
+six `pci: segment 0000: assigned ...` lines and
+`pci: segment 0000: native resource assignment: 6 BARs, 0 bridge windows, readback verified`,
+and then brings virtio-blk (`queue size 8`, MSI-X), AHCI (`abar 0x80009000`) and NVMe
+(`namespace 1`) up through `nolx-df` with real reads and writes. PCI-038 records this rule;
+the conformance database is 435 assertions. The sandbox's QEMU build has no `user` netdev, so
+`check-pci-resources.py` itself (which needs four NICs and packet capture) cannot run here;
+CI is the executor for that fixture, and the local run is executable evidence for the
+planning defect only.
+
+**Result.** CI run [39769451515](https://github.com/NeXuS4Dev/NOLX/actions/runs/39769451515)
+on `568a222` passed all nineteen jobs, including the power job (S3 fixtures now require the
+resume tag), the AML job, the fmt/clippy/unsafe audit, and the native resource job with PC and
+Q35 fixtures at bridge depth 0, 1 and 2. That run is the T2 evidence behind PWR-028..PWR-031
+and PCI-024/PCI-026/PCI-038; the S3 gate itself stays open, because device state, the ACPI PM
+block and driver state are still not restored after a wake.
+
+## After the wake: what a resume actually has to re-take (2026-10-22)
+
+The previous checkpoint ended with the resumed kernel halting on purpose, because the wake
+reset leaves the platform in a state the kernel's cached view no longer describes. This
+revision replaces the halt with the smallest honest re-take: the resumed kernel re-selects its
+configuration transport, repairs the PM block and enters ACPI mode again, then powers the
+machine off through S5 — with no host `quit`, so a clean QEMU exit is the proof.
+
+**What the wake reset actually clears.** Instrumenting the resumed kernel showed three
+independent losses, all of which a marker-only test would have hidden:
+
+* *The configuration window.* On Q35 the kernel had selected MCFG/ECAM at boot; after the wake
+  every ECAM read returned `0x00000000` for every function, which discovery would have read as
+  "no device here" rather than "device reset". The legacy ports still answered
+  (`0x29308086` for the host bridge), so the identity check in `select_transport` is enough to
+  reject the stale window — it now prints `pci: ECAM identity mismatch; legacy fallback
+  retained` after a resume. `pci::refresh_transport` drops the mappings and re-selects.
+* *The PM base.* The ICH9 LPC bridge comes back with its PM base register at `0x1`
+  (`0x600` cleared), and every read of the FADT's PM1 ports returns `0xffff`.
+* *The ACPI enable gate.* Writing the base alone changed nothing: QEMU's ICH9 maps the PM I/O
+  block only while `ACPI_CTRL` (config `0x44`) bit 7 is set, and the wake reset clears that bit
+  too (`0x44 = 0x00`). This is `ich9_lpc_pmbase_sci_update`: with the gate clear it forces
+  `pm_io_base = 0` regardless of the base register. Only after both writes does `0x604`
+  decode again.
+
+The PIIX4 profile is different: the base survives (`0x601` → `0x600`) and the block decodes,
+but `SCI_EN` is clear, so the resumed kernel reads `0x0000` at `0x604` and has to enter ACPI
+mode again.
+
+**A latent bug in `enable_acpi`.** It returned success whenever bit 0 of the PM1 control word
+was set, and `0xffff` has bit 0 set. On Q35 that made the post-resume path report "ACPI mode
+re-entered" while the port was not decoding at all, and the S5 write went nowhere. An all-ones
+readback is now treated as "no chipset decodes this port" and never as success. The polling
+loop also gained a hard iteration cap: it waits on the HPET, and a resumed platform can hold an
+HPET mapping that no longer advances.
+
+**Evidence.** `scripts/check-power-s3.py` no longer sends `quit`. It requires the resume tag,
+then waits for the machine to power itself off and asserts the QMP event order:
+
+```
+power: resumed from S3 with tag 0x534c33524553554d; kernel RAM state preserved
+power: post-resume PM block restored on 00:1f.0, base 0x600, ACPI enable set
+power: post-resume PM1a 0x604 control 0x1 (readback 0x1), ACPI mode re-entered
+power: requesting ACPI S5 via PM1a 0x604, control 0x2001
+PASS: power-s3-pc;  QMP SUSPEND + WAKEUP, control 0x2401, resume tag verified, PM re-entered at 0x1 and powered off
+PASS: power-s3-q35; QMP SUSPEND + WAKEUP, control 0x2401, resume tag verified, PM re-entered at 0x1 and powered off
+```
+
+`SUSPEND` → `WAKEUP` → `SHUTDOWN`, QEMU exit status 0 on both machines. PWR-032 records the
+rule; the conformance database is 436 assertions. Host checks: 906 unit tests,
+`cargo clippy --all-targets -- -D warnings` clean, `cargo fmt --all -- --check` clean, 294
+unsafe blocks each with a SAFETY comment, and the ordinary PC image still boots to
+`NOLX: address space selftest: ... audit ok`. CI run
+[39800575322](https://github.com/NeXuS4Dev/NOLX/actions/runs/39800575322) on `2a3477e` passed
+all nineteen jobs, including the power job that now requires the resumed guest to power itself
+off.
+
+**What this is not.** No driver, PCI command register, interrupt route or device power state is
+restored: the fixture machine deliberately has no storage or network controller, so there is
+nothing to re-initialise. The tag plus the PM re-take prove that the CPU, the page tables, the
+kernel heap and the ACPI tables survived and that the resumed kernel can still drive the
+chipset; they do not prove a usable post-resume device tree. S3 save/resume stays open.
