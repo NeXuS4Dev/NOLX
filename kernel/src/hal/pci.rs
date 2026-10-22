@@ -762,3 +762,21 @@ pub fn prepare_resources(console: &mut dyn HalConsole) {
         ));
     }
 }
+
+/// Re-establish the configuration transport after a firmware resume.
+///
+/// The wake reset clears the chipset's memory-mapped configuration window and resets every
+/// function's command register, so the mappings this module holds describe memory that no
+/// longer answers: a read through them returns zeroes, which discovery would read as "absent"
+/// rather than "reset". Drop the mappings and select the transport again. The identity check
+/// against the legacy ports refuses a window that no longer answers, leaving segment zero on
+/// the legacy ports until a real ECAM is found.
+pub fn refresh_transport(console: &mut dyn HalConsole) {
+    {
+        let mut mappings = MAPPINGS.lock();
+        for slot in mappings.iter_mut() {
+            *slot = None;
+        }
+    }
+    select_transport(console);
+}

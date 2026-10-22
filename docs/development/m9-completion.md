@@ -2088,3 +2088,63 @@ resume tag), the AML job, the fmt/clippy/unsafe audit, and the native resource j
 Q35 fixtures at bridge depth 0, 1 and 2. That run is the T2 evidence behind PWR-028..PWR-031
 and PCI-024/PCI-026/PCI-038; the S3 gate itself stays open, because device state, the ACPI PM
 block and driver state are still not restored after a wake.
+
+## After the wake: what a resume actually has to re-take (2026-10-22)
+
+The previous checkpoint ended with the resumed kernel halting on purpose, because the wake
+reset leaves the platform in a state the kernel's cached view no longer describes. This
+revision replaces the halt with the smallest honest re-take: the resumed kernel re-selects its
+configuration transport, repairs the PM block and enters ACPI mode again, then powers the
+machine off through S5 — with no host `quit`, so a clean QEMU exit is the proof.
+
+**What the wake reset actually clears.** Instrumenting the resumed kernel showed three
+independent losses, all of which a marker-only test would have hidden:
+
+* *The configuration window.* On Q35 the kernel had selected MCFG/ECAM at boot; after the wake
+  every ECAM read returned `0x00000000` for every function, which discovery would have read as
+  "no device here" rather than "device reset". The legacy ports still answered
+  (`0x29308086` for the host bridge), so the identity check in `select_transport` is enough to
+  reject the stale window — it now prints `pci: ECAM identity mismatch; legacy fallback
+  retained` after a resume. `pci::refresh_transport` drops the mappings and re-selects.
+* *The PM base.* The ICH9 LPC bridge comes back with its PM base register at `0x1`
+  (`0x600` cleared), and every read of the FADT's PM1 ports returns `0xffff`.
+* *The ACPI enable gate.* Writing the base alone changed nothing: QEMU's ICH9 maps the PM I/O
+  block only while `ACPI_CTRL` (config `0x44`) bit 7 is set, and the wake reset clears that bit
+  too (`0x44 = 0x00`). This is `ich9_lpc_pmbase_sci_update`: with the gate clear it forces
+  `pm_io_base = 0` regardless of the base register. Only after both writes does `0x604`
+  decode again.
+
+The PIIX4 profile is different: the base survives (`0x601` → `0x600`) and the block decodes,
+but `SCI_EN` is clear, so the resumed kernel reads `0x0000` at `0x604` and has to enter ACPI
+mode again.
+
+**A latent bug in `enable_acpi`.** It returned success whenever bit 0 of the PM1 control word
+was set, and `0xffff` has bit 0 set. On Q35 that made the post-resume path report "ACPI mode
+re-entered" while the port was not decoding at all, and the S5 write went nowhere. An all-ones
+readback is now treated as "no chipset decodes this port" and never as success. The polling
+loop also gained a hard iteration cap: it waits on the HPET, and a resumed platform can hold an
+HPET mapping that no longer advances.
+
+**Evidence.** `scripts/check-power-s3.py` no longer sends `quit`. It requires the resume tag,
+then waits for the machine to power itself off and asserts the QMP event order:
+
+```
+power: resumed from S3 with tag 0x534c33524553554d; kernel RAM state preserved
+power: post-resume PM block restored on 00:1f.0, base 0x600, ACPI enable set
+power: post-resume PM1a 0x604 control 0x1 (readback 0x1), ACPI mode re-entered
+power: requesting ACPI S5 via PM1a 0x604, control 0x2001
+PASS: power-s3-pc;  QMP SUSPEND + WAKEUP, control 0x2401, resume tag verified, PM re-entered at 0x1 and powered off
+PASS: power-s3-q35; QMP SUSPEND + WAKEUP, control 0x2401, resume tag verified, PM re-entered at 0x1 and powered off
+```
+
+`SUSPEND` → `WAKEUP` → `SHUTDOWN`, QEMU exit status 0 on both machines. PWR-032 records the
+rule; the conformance database is 436 assertions. Host checks: 904 unit tests,
+`cargo clippy --all-targets -- -D warnings` clean, `cargo fmt --all -- --check` clean, 294
+unsafe blocks each with a SAFETY comment, and the ordinary PC image still boots to
+`NOLX: address space selftest: ... audit ok`. CI has not run on this revision yet.
+
+**What this is not.** No driver, PCI command register, interrupt route or device power state is
+restored: the fixture machine deliberately has no storage or network controller, so there is
+nothing to re-initialise. The tag plus the PM re-take prove that the CPU, the page tables, the
+kernel heap and the ACPI tables survived and that the resumed kernel can still drive the
+chipset; they do not prove a usable post-resume device tree. S3 save/resume stays open.

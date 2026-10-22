@@ -32,7 +32,9 @@ unsafe fn write_control(port: u16, value: u16) {
 fn enable_acpi(fadt: &Fadt) -> Result<u16, Error> {
     // SAFETY: the caller checked FADT PM1 control width and the parser validated its I/O port.
     let current = unsafe { read_control(fadt.pm1a_control) };
-    if current & 1 != 0 {
+    // All ones means no chipset decodes the port at all, not "SCI_EN is set": the PM base has
+    // to be restored first. Treating it as success would report ACPI mode on a dead block.
+    if current != u16::MAX && current & 1 != 0 {
         return Ok(current);
     }
     let port = fadt.smi_command.ok_or(Error::Unsupported)?;
@@ -42,10 +44,12 @@ fn enable_acpi(fadt: &Fadt) -> Result<u16, Error> {
     // SAFETY: the SMI command is a validated 16-bit port explicitly designated by firmware.
     unsafe { super::outb(port, fadt.acpi_enable) };
     let clock = super::hpet::counter().zip(super::hpet::frequency_hz());
-    for index in 0..100_000_000u32 {
+    // The iteration bound is a hard cap, not just a fallback: a resumed platform can hold an
+    // HPET mapping that no longer advances, and waiting on a dead counter would never end.
+    for index in 0..16_000_000u32 {
         // SAFETY: same validated control port as the first read above.
         let current = unsafe { read_control(fadt.pm1a_control) };
-        if current & 1 != 0 {
+        if current != u16::MAX && current & 1 != 0 {
             return Ok(current);
         }
         match (clock, super::hpet::counter()) {
@@ -210,13 +214,109 @@ pub extern "C" fn s3_resume_rust() -> ! {
     );
     console.flush();
     assert_eq!(tag, S3_RESUME_TAG, "the S3 resume tag did not survive");
-    // The firmware re-posted every device, so the ACPI PM block is not yet re-decoded and a
-    // second sleep request would be a no-op. The fixture only needs this marker; a resumed
-    // driver/PM restore path is a later step.
+    match resume_platform(&mut console) {
+        Ok(()) => {
+            // SAFETY: the fixture machine carries no storage, network or other DMA device, no
+            // other CPU runs, and this is the last thing the resumed kernel does.
+            if let Err(error) = unsafe { request_s5_quiesced(&mut console) } {
+                let _ = writeln!(console, "power: post-resume S5 failed: {error:?}");
+                console.flush();
+            }
+        }
+        Err(error) => {
+            let _ = writeln!(
+                console,
+                "power: post-resume platform re-take failed: {error:?}"
+            );
+            console.flush();
+        }
+    }
     loop {
         // SAFETY: the resumed CPU has no work and no interrupt is required to leave this loop.
         unsafe { core::arch::asm!("hlt", options(nomem, nostack)) }
     }
+}
+
+/// Re-take the parts of the platform a wake reset clears, so the resumed kernel can drive it.
+///
+/// A firmware resume is not a no-op for the chipset: the wake reset clears the memory-mapped
+/// configuration window this kernel had selected and the LPC bridge's PM base, so the FADT's
+/// PM1 ports stop answering (`0xffff` on Q35) even though the table itself survived in RAM.
+/// Restoring the PM base and entering ACPI mode again is what makes the PM block usable; it is
+/// not a driver or device-state restore.
+fn resume_platform(console: &mut dyn HalConsole) -> Result<(), Error> {
+    let tables = super::acpi::discover().ok_or(Error::Firmware)?;
+    let fadt = tables.fadt.ok_or(Error::Firmware)?;
+    super::pci::refresh_transport(console);
+    restore_pm_base(console, &fadt)?;
+    let current = enable_acpi(&fadt)?;
+    // SAFETY: the FADT parser validated the port and the control block width.
+    let readback = unsafe { read_control(fadt.pm1a_control) };
+    let _ = writeln!(
+        console,
+        "power: post-resume PM1a {:#x} control {current:#x} (readback {readback:#x}), ACPI mode re-entered",
+        fadt.pm1a_control
+    );
+    console.flush();
+    Ok(())
+}
+
+/// Restore the LPC/ISA bridge's PM base after a wake reset left it clear.
+///
+/// The FADT names the PM1a control port; the chipset decodes that port only while its own PM
+/// base register agrees. The ICH9 LPC bridge comes out of a QEMU wake reset with the register
+/// at zero, while the PIIX4 keeps its value, so this writes the FADT-derived base only when
+/// firmware left the register empty and never moves a base firmware already programmed.
+fn restore_pm_base(console: &mut dyn HalConsole, fadt: &Fadt) -> Result<(), Error> {
+    use nolx_pci_core::{Bdf, ConfigSpace};
+    let mut cfg = super::pci::LegacyPorts;
+    let base = fadt.pm1a_control & 0xff80;
+    for (device, function) in [(0x01u8, 3u8), (0x1f, 0)] {
+        let Ok(bdf) = Bdf::new(0, device, function) else {
+            continue;
+        };
+        let id = cfg.read_u32(bdf, 0);
+        // The low half is the vendor, the high half the device: only these two bridges own a
+        // PM block this profile knows how to re-programme.
+        let mask = match id >> 16 {
+            0x7113 => 0xffc0u32,
+            0x2918 => 0xff80,
+            _ => continue,
+        };
+        let ich9 = id >> 16 == 0x2918;
+        let value = cfg.read_u32(bdf, 0x40);
+        let programmed = value & mask != 0;
+        // The ICH9 also gates the whole block on ACPI_CTRL bit 7, which the wake reset clears.
+        let gated = ich9 && cfg.read_u32(bdf, 0x44) & 0x80 == 0;
+        if programmed && !gated {
+            return Ok(());
+        }
+        let expected = if programmed {
+            value & mask
+        } else {
+            u32::from(base)
+        };
+        if !programmed {
+            cfg.write_u32(bdf, 0x40, (value & !mask) | expected);
+        }
+        if gated {
+            let control = cfg.read_u32(bdf, 0x44);
+            cfg.write_u32(bdf, 0x44, control | 0x80);
+        }
+        if cfg.read_u32(bdf, 0x40) & mask != expected {
+            return Err(Error::Unsupported);
+        }
+        let _ = writeln!(
+            console,
+            "power: post-resume PM block restored on {:02x}:{:02x}.{function}, base {:#x}{}",
+            bdf.bus,
+            bdf.device,
+            expected,
+            if gated { ", ACPI enable set" } else { "" }
+        );
+        return Ok(());
+    }
+    Ok(())
 }
 
 /// Which sleep state to request from the firmware.

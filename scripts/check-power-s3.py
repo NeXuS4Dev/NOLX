@@ -6,9 +6,15 @@ This fixture proves that the kernel stores the firmware's S3 sleep type with SLP
 the platform parks the VM (QMP SUSPEND). Before suspending, the kernel installs a real-mode
 hand-off in low memory, writes it into the FACS waking vector and sets CMOS shutdown status
 0xfe. A QMP system_wakeup then produces WAKEUP, SeaBIOS calls the waking vector, and the
-hand-off re-enters long mode and prints a tag stored in kernel RAM before the sleep. Device
-state is not restored, so the resumed kernel has no driver or ACPI PM path to shut down
-cleanly; the fixture quits QEMU after observing the marker.
+hand-off re-enters long mode and prints a tag stored in kernel RAM before the sleep.
+
+The wake reset also clears the chipset state the kernel was using: on Q35 the memory-mapped
+configuration window stops answering and the ICH9 LPC bridge forgets both its PM base and the
+ACPI enable bit. The resumed kernel therefore re-selects its configuration transport, restores
+the PM base, enters ACPI mode again and powers the machine off through S5. The fixture requires
+that shutdown to happen on its own: it never sends `quit`, so a clean QEMU exit is the proof
+that the resumed kernel could drive the platform again. Device state (drivers, PCI command
+registers, interrupts) is still not restored, and that stays open.
 """
 import argparse
 import json
@@ -54,6 +60,7 @@ def boot(qemu, kernel, machine):
             suspended_at = None
             woke_at = None
             requested = False
+            resumed_at = None
             while time.monotonic() < deadline:
                 text = log.read_text(errors='replace')
                 assert not re.search(r'PANIC|BUGCHECK|CPU exception', text), text
@@ -80,9 +87,15 @@ def boot(qemu, kernel, machine):
                     # RUN_STATE_SUSPENDED or the request is refused.
                     connection.sendall(b'{"execute":"system_wakeup"}\r\n')
                     woke_at = time.monotonic()
-                if woke_at and 'power: resumed from S3 with tag' in text:
-                    connection.sendall(b'{"execute":"quit"}\r\n')
-                    break
+                if 'power: resumed from S3 with tag' in text:
+                    # The resumed kernel powers the machine off by itself; sending `quit` here
+                    # would hide whether the post-resume PM path actually works.
+                    if resumed_at is None:
+                        resumed_at = time.monotonic()
+                    if any(e['event'] == 'SHUTDOWN' for e in events):
+                        break
+                    assert time.monotonic() - resumed_at < 20, \
+                        'the resumed kernel never powered the machine off' + text
                 if process.poll() is not None:
                     break
                 time.sleep(.05)
@@ -104,14 +117,24 @@ def boot(qemu, kernel, machine):
     assert text.count('power: requesting ACPI S3') == 1, text
     assert 'power: S3 refused' not in text, text
     assert 'power: resumed from S3 with tag 0x534c33524553554d' in text, text
+    resumed = text.split('power: resumed from S3', 1)[1]
+    assert 'power: post-resume PM1a 0x604' in resumed, text
+    assert 'ACPI mode re-entered' in resumed, text
+    assert resumed.count('power: requesting ACPI S5') == 1, text
+    if machine == 'q35':
+        # The stale ECAM mapping must be rejected rather than read as "no device".
+        assert 'pci: ECAM identity mismatch; legacy fallback retained' in resumed, text
     word = int(re.search(r'power: requesting ACPI S3 via PM1a 0x[0-9a-f]+, control (0x[0-9a-f]+)', text).group(1), 16)
     # SLP_TYP comes from the firmware's `_S3_` (1 here); SLP_EN must be set and the unrelated
     # SCI_EN bit preserved from the current control word.
     assert word & 0x3C00 == 0x2400, hex(word)
     assert word & 0x2000, hex(word)
-    assert any(e['event'] == 'SUSPEND' for e in events), events
-    assert any(e['event'] == 'WAKEUP' for e in events), events
-    print(f'PASS: {name}; QMP SUSPEND + WAKEUP, control {hex(word)}, S3 resume tag verified')
+    order = [e['event'] for e in events if e['event'] in {'SUSPEND', 'WAKEUP', 'SHUTDOWN'}]
+    assert order == ['SUSPEND', 'WAKEUP', 'SHUTDOWN'], events
+    post = re.search(r'power: post-resume PM1a 0x[0-9a-f]+ control (0x[0-9a-f]+)', resumed)
+    assert post and int(post.group(1), 16) & 1, text
+    print(f'PASS: {name}; QMP SUSPEND + WAKEUP, control {hex(word)}, resume tag verified, '
+          f'PM re-entered at {post.group(1)} and powered off')
 
 
 def main():
