@@ -2229,6 +2229,14 @@ refused`, and still requires the guest to power itself off (no host `quit`). The
 `hal-power-test-s3` profile keeps passing unchanged, so the new path does not depend on there
 being a device to restore.
 
+**CI.** Run [39840435734](https://github.com/NeXuS4Dev/NOLX/actions/runs/39840435734) on
+`2ca9e5a` passed **all 19 jobs**. The power job now builds `hal-power-s3-device-test` and runs
+`check-power-s3.py --with-devices` after the no-device profile; the USB job runs
+`check-usb-ss-recovery.py` after the default boot-HID fixture; the AML job runs the extended
+fixture that includes `aml: region-write selftest`. PWR-033..PWR-037 and PWR-039 are
+`tested-T2`, USB-039 is `tested-T2`, PWR-038 (the EC handshake, which has no machine model to
+run against) stays `tested-T1`, and the database holds 444 assertions with 0 problems.
+
 **Other checks on this revision.** 13/13 AML fixtures (`check-aml.py`, including the new
 `aml: region-write selftest`), 4/4 S3 fixtures, `check-absent-devices.py` in both modes,
 `check-usb-ss-recovery.py` on PC and Q35, `make bootcheck`, 910 host tests

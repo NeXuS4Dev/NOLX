@@ -744,6 +744,8 @@ jobs:
         run: make kernel 2>&1 | tee /tmp/job.log
       - name: Verify a machine without storage, USB or network controllers falls back cleanly
         run: python3 scripts/check-absent-devices.py 2>&1 | tee -a /tmp/job.log
+      - name: Verify an xHCI controller with empty root ports binds no USB device
+        run: python3 scripts/check-absent-devices.py --with-xhci-but-no-devices 2>&1 | tee -a /tmp/job.log
       - name: Verify PC and Q35 boot-HID input, ring wrap and disconnect reclamation
         run: python3 scripts/check-usb-input.py 2>&1 | tee -a /tmp/job.log
       - name: Verify refused SuperSpeed slots give their port back while the USB2 peer stays live

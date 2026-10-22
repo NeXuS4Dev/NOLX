@@ -838,6 +838,47 @@ following `read(2)` returns the injected record byte for byte. A machine with no
 reports the phase as skipped and keeps booting. INP-010..INP-012 cover the contract, the block and
 that honesty test; the fixture is `scripts/check-input-poll.py`. All three are `tested-T2` in run [39671976393](https://github.com/NeXuS4Dev/NOLX/actions/runs/39671976393) on `5d3707d`, which passed all 19 jobs — the same run that promoted the hub assertions, on the first commit that carried both gates.
 
+### M9 device restore across S3, applied region writes and SuperSpeed slot recovery (2026-10-22)
+
+A wake reset leaves the machine awake but not usable, and this batch changes that. Suspend is
+now reversible: `nolx-df-core::Registry::suspend` flushes every started driver, stops the
+controllers in reverse discovery order and releases only proven-quiet MMIO, but unlike the
+shutdown quiesce it does **not** freeze admission, so `Registry::resume` can start the same
+records again in forward order after the wake. `scripts/check-power-s3.py --with-devices`
+boots a real virtio-blk disk, suspends it, wakes the machine, restores the driver and proves it
+with a real sector-0 read before the fail-closed quiesce and the guest's own S5.
+
+Running that found two losses a marker-only test would have hidden. The resumed kernel faulted
+at `movzbl %gs:0x20` (`cr2=0x20`) because the wake reset zeroes `IA32_GS_BASE`,
+`IA32_KERNEL_GS_BASE` and `IA32_FS_BASE`; all three are now saved by `prepare_s3_resume` and
+reloaded by `s3_resume_entry` before any compiled code runs. With that fixed the driver refused
+with `BarNotMemory(4)`, because the reset also returns every BAR to its power-on value, so the
+resumed kernel re-runs the same bounded, board-profile-checked assignment with readback
+(`resume_platform` calls `pci::prepare_resources` after `pci::refresh_transport`).
+
+Operation-region writes stopped being journal-only. The namespace takes a region writer, the
+kernel installs the authorized `FirmwareRegions` provider (memory/port windows plus an ACPI EC
+handshake provider that speaks RD_EC/WR_EC with bounded IBF/OBF polling and only after a
+firmware-validated port pair), and `hal-aml-test` exercises the applying half on hardware by
+writing the PCI configuration address port the value it already holds — a real store with a
+verified readback — while refusing an unpermitted value, a field outside every window and an
+unauthorized EC write. No x86 QEMU machine model provides an embedded controller, so the
+handshake itself stays `tested-T1` (PWR-038) while the applied write path is `tested-T2`
+(PWR-039).
+
+`scripts/check-usb-ss-recovery.py` adds the SuperSpeed half of the USB recovery gate: a USB3
+mass storage device attached beside a live USB2 boot keyboard completes Address Device and its
+descriptor reads at actual speed 4 with a 512-byte EP0, is refused for its class, returns its
+DMA to the baseline, and the next cycle lands on a *different* root port — the port was given
+back, not wedged — while the keyboard keeps answering. `scripts/check-absent-devices.py` gained
+an xHCI-present-but-empty mode for the same hardware path.
+
+CI run [39840435734](https://github.com/NeXuS4Dev/NOLX/actions/runs/39840435734) on `2ca9e5a`
+passed all 19 jobs with the device-backed S3 fixture, the SuperSpeed recovery fixture and the
+extended AML fixture; PWR-033..PWR-037, PWR-039 and USB-039 are `tested-T2`. **M9 remains in
+progress:** per-device D-states, multi-CPU resume and the higher-layer cache/user-task
+orchestration around S3 are not implemented, and the EC handshake has no machine to run on.
+
 ## M10 — POSIX conformance waves
 
 Each wave is a numbered, testable set of System Interfaces functions.
