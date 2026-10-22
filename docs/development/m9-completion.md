@@ -2141,7 +2141,10 @@ PASS: power-s3-q35; QMP SUSPEND + WAKEUP, control 0x2401, resume tag verified, P
 rule; the conformance database is 436 assertions. Host checks: 904 unit tests,
 `cargo clippy --all-targets -- -D warnings` clean, `cargo fmt --all -- --check` clean, 294
 unsafe blocks each with a SAFETY comment, and the ordinary PC image still boots to
-`NOLX: address space selftest: ... audit ok`. CI has not run on this revision yet.
+`NOLX: address space selftest: ... audit ok`. CI run
+[39800575322](https://github.com/NeXuS4Dev/NOLX/actions/runs/39800575322) on `2a3477e` passed
+all nineteen jobs, including the power job that now requires the resumed guest to power itself
+off.
 
 **What this is not.** No driver, PCI command register, interrupt route or device power state is
 restored: the fixture machine deliberately has no storage or network controller, so there is
