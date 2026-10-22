@@ -2025,3 +2025,45 @@ is in its post-firmware state. Host checks on this revision: 904 unit tests acro
 warnings` clean, and `cargo fmt --all -- --check` now clean (the earlier reported drift in
 `nolx-df-core`, `nolx-pci-core` and three kernel HAL files was formatted). CI has not run on
 this revision.
+
+## CI follow-up: legacy segment-zero planning and the unsafe audit (2026-10-22)
+
+CI run [39761210692](https://github.com/NeXuS4Dev/NOLX/actions/runs/39761210692) on `fa69ee8`
+failed three of nineteen jobs. Two were fixture/lint defects introduced by the S3 work, one
+was a real resource-planning regression.
+
+**Unsafe audit.** `scripts/check-unsafe.sh` requires a `// SAFETY:` comment above every
+`unsafe` block. The two one-line wrappers `request_s3_quiesced`/`request_s5_quiesced` had
+their contract in the doc comment but not above the block, so the lint job failed with two
+annotations. Both blocks now state the caller obligation. The audit reports 293 blocks, 0
+missing.
+
+**Two stale marker assertions.** `check-aml.py` and `check-pci-resources.py` still expected
+`aml: evaluated PCI root resources authorized`, a marker the kernel stopped printing when it
+began counting root bridges (`aml: evaluated 1 PCI root bridge(s) authorized`). The AML job
+failed on that assertion, before any of its real checks ran. Both scripts now assert the
+current marker; `check-aml.py` passes all three fixtures locally.
+
+**Segment zero was never planned without ECAM.** `prepare_resources` collected its segment
+list *only* from successfully mapped MCFG allocations. A legacy-transport machine therefore
+iterated an empty list, committed no assignments, and — after the fixture cleared the firmware
+BARs — brought up nothing: `virtio-blk: not brought up: BarNotMemory(4)`,
+`ahci: not brought up: BarNotMemory`, `nvme`, `e1000` likewise, and the lifecycle selftest
+never completed. Segment zero is always writable (ECAM when a mapping covers it, legacy ports
+otherwise), so the planner now starts from `{0}` and adds the mapped segments:
+
+```rust
+let mut segments: BTreeSet<u16> = MAPPINGS.lock().iter().flatten().map(|m| m.segment).collect();
+segments.insert(0);
+```
+
+A local PC build with `hal-pci-resource-test,hal-driver-multi-test` now prints
+`pci: resource fault injection: 6 BAR addresses and bridge forwarding cleared`,
+six `pci: segment 0000: assigned ...` lines and
+`pci: segment 0000: native resource assignment: 6 BARs, 0 bridge windows, readback verified`,
+and then brings virtio-blk (`queue size 8`, MSI-X), AHCI (`abar 0x80009000`) and NVMe
+(`namespace 1`) up through `nolx-df` with real reads and writes. PCI-038 records this rule;
+the conformance database is 435 assertions. The sandbox's QEMU build has no `user` netdev, so
+`check-pci-resources.py` itself (which needs four NICs and packet capture) cannot run here;
+CI is the executor for that fixture, and the local run is executable evidence for the
+planning defect only.

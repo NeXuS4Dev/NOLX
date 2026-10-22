@@ -693,16 +693,18 @@ pub fn prepare_resources(console: &mut dyn HalConsole) {
             assert!(cleared > 0, "resource fixture needs supported devices");
             let _ = writeln!(console, "pci: resource fault injection: {cleared} BAR addresses and bridge forwarding cleared before native assignment");
         }
-        // Plan resources for each segment that has a valid ECAM mapping.
-        // Collect unique segments from mappings.
-        let segments: alloc::vec::Vec<u16> = MAPPINGS
+        // Plan every segment the transport can actually write. Segment zero is always
+        // reachable: an ECAM mapping when one covers it, legacy ports otherwise. Planning only
+        // the mapped segments left a legacy-only machine with no assignment at all, so a
+        // fixture that cleared the firmware BARs never got them back.
+        let mut segments: alloc::collections::BTreeSet<u16> = MAPPINGS
             .lock()
             .iter()
             .flatten()
             .map(|m| m.segment)
-            .collect::<alloc::collections::BTreeSet<_>>()
-            .into_iter()
             .collect();
+        segments.insert(0);
+        let segments: alloc::vec::Vec<u16> = segments.into_iter().collect();
         for segment in segments {
             // Clone pools for this segment (they share physical address space on PC/Q35)
             let memory = base_memory.clone();

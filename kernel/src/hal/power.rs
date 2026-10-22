@@ -395,6 +395,8 @@ pub fn prepare_s3_resume(console: &mut dyn HalConsole) -> Result<u32, Error> {
 /// No resume vector is installed by this primitive: firmware that cannot resume will restart
 /// or stay suspended. This function makes no claim that memory state is restored.
 pub unsafe fn request_s3_quiesced(console: &mut dyn HalConsole) -> Result<(), Error> {
+    // SAFETY: the caller upholds the quiescence contract documented above; this wrapper adds
+    // nothing but the sleep-state selection.
     unsafe { request_quiesced(console, SleepState::S3) }
 }
 
@@ -406,6 +408,8 @@ pub unsafe fn request_s3_quiesced(console: &mut dyn HalConsole) -> Result<(), Er
 /// No resume is possible after this request. The dedicated QEMU harness supplies a machine
 /// with no active DMA devices; this primitive does not claim to implement that global policy.
 pub unsafe fn request_s5_quiesced(console: &mut dyn HalConsole) -> Result<(), Error> {
+    // SAFETY: the caller upholds the quiescence contract documented above; this wrapper adds
+    // nothing but the sleep-state selection.
     unsafe { request_quiesced(console, SleepState::S5) }
 }
 

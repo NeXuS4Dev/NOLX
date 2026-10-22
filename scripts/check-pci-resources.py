@@ -26,7 +26,7 @@ def main():
             text = boot(args.qemu, args.kernel.resolve(), ['e1000', 'e1000', 'virtio-net', 'virtio-net'],
                         machine, bridge=levels > 0, nested=levels == 2, storage=True, memory=memory)
             assert 'pci: resource policy=AML root _CRS;' in text, text
-            assert 'aml: evaluated PCI root resources authorized' in text, text
+            assert 'aml: evaluated ' in text and 'PCI root bridge' in text and ' authorized' in text, text
             injected = re.search(r'pci: resource fault injection: (\d+) BAR addresses and bridge forwarding cleared before native assignment', text)
             assert injected, text
             summary = re.search(r'pci: native resource assignment: (\d+) BARs, (\d+) bridge windows, readback verified', text)
