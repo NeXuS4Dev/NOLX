@@ -17,7 +17,56 @@ from xhci_irq_checks import verify_interrupts
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def exhaust_boot(qemu, kernel, machine):
+    """Boot-time vector-exhaustion fixture: no QMP input, no second controller.
+
+    Requires hal-xhci-exhaust-test. The fixture stops the controller QEMU enumerated, takes
+    every candidate of its vector pool for a synthetic owner, and requires the start that has
+    no vector to be refused as NoVector without leaking DMA, MMIO or a held vector.
+    """
+    label = f'input-xhci-lifecycle-{machine}-exhaust'
+    log = ROOT / 'build' / f'{label}.log'
+    command = [qemu, '-machine', 'q35,sata=off' if machine == 'q35' else 'pc',
+               '-kernel', str(kernel), '-m', '512M', '-nographic', '-no-reboot',
+               '-net', 'none', '-device', 'qemu-xhci,id=keys',
+               '-device', 'usb-kbd,bus=keys.0,id=kbd']
+    with log.open('w') as output:
+        process = subprocess.Popen(command, cwd=ROOT, stdout=output, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 90
+            while time.monotonic() < deadline:
+                text = log.read_text(errors='replace')
+                assert not re.search(r'PANIC|BUGCHECK|CPU exception|panicked at', text), text
+                if 'xhci-exhaust: PASS' in text and 'final DMA 0' in text:
+                    break
+                assert process.poll() is None, text
+                time.sleep(.05)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+    text = log.read_text(errors='replace')
+    assert 'xhci-exhaust: PASS' in text, f'{log}\n{text}'
+    assert not re.search(r'PANIC|BUGCHECK|CPU exception|panicked at', text), text
+    match = re.search(
+        r'xhci-exhaust: synthetic handle took (\d+) vector\(s\), pool exhausted', text)
+    assert match and 0 < int(match.group(1)) <= 256, text
+    assert 'xhci-exhaust: start refused as NoVector with no DMA/MMIO/ownership leak' in text, text
+    assert 'xhci-exhaust: released pool reacquired by the controller, DMA/MMIO restored' in text, text
+    assert 'xhci-exhaust: PASS' in text and 'final DMA 0' in text, text
+    print(f'PASS: xhci-exhaust-{machine}: a {match.group(1)}-vector pool was exhausted and '
+          'refused start as NoVector with no DMA/MMIO/ownership leak, reclaimed and removed',
+          flush=True)
+
+
 def boot(qemu, kernel, machine, mode, interrupts=False):
+    if mode == 'exhaust':
+        exhaust_boot(qemu, kernel, machine)
+        return
     label = f'input-xhci-lifecycle-{machine}-{mode}'
     log = ROOT / 'build' / f'{label}.log'
     qmp = ROOT / 'build' / f'{label}.sock'
@@ -176,7 +225,7 @@ def boot(qemu, kernel, machine, mode, interrupts=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kernel', type=Path, default=ROOT / 'build' / 'nolx.elf')
-    parser.add_argument('--mode', choices=('lifecycle', 'start-fault', 'stop-fault', 'recovery', 'irq-start-fault', 'transfer-fault'), default='lifecycle')
+    parser.add_argument('--mode', choices=('lifecycle', 'start-fault', 'stop-fault', 'recovery', 'irq-start-fault', 'transfer-fault', 'exhaust'), default='lifecycle')
     parser.add_argument('--interrupts', action='store_true', help='also require hal-xhci-irq-test; prove independent IRQ vectors and re-arming')
     args = parser.parse_args()
     for machine in ('pc', 'q35'):

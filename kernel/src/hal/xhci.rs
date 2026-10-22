@@ -11,6 +11,8 @@
 //! USB3 EP0/class refusal is hardware-checked; single-burst SS HID has portable rules only.
 //! Hubs, verified SuperSpeed HID input, general HID and S3/Executive integration remain open.
 
+#[cfg(feature = "hal-xhci-exhaust-test")]
+mod exhaust;
 #[cfg(feature = "hal-xhci-transfer-fault-test")]
 mod faults;
 mod irq;
@@ -168,6 +170,8 @@ pub fn probe(console: &mut dyn HalConsole) {
     if !found {
         let _ = writeln!(console, "xhci: no controller on the PCI bus");
     }
+    #[cfg(feature = "hal-xhci-exhaust-test")]
+    exhaust::run(console);
 }
 
 fn start_device(dev: usize) -> bool {
@@ -394,6 +398,7 @@ pub fn poll_on(dev: usize, console: &mut dyn HalConsole) -> Result<(), Failure> 
         "xhci",
         || {
             let Some(delivered) = irq::work(dev) else {
+                live::poll_hubs(dev, console);
                 return Ok(());
             };
             let (more, reports) = live::poll_events(dev, console);

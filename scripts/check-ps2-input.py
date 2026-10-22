@@ -18,11 +18,15 @@ def main():
     global LOG, QMP
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--objects',action='store_true',help='require hal-input-object-test and independent reader evidence')
+    parser.add_argument('--read-t2',action='store_true',help='require hal-input-read-test: a ring-3 read(2) on the keyboard device')
     parser.add_argument('--kernel',type=Path,default=BUILD/'nolx.elf')
     args=parser.parse_args()
     if args.objects:
         LOG=BUILD/'input-ps2-objects.serial.log'
         QMP=BUILD/'input-ps2-objects-qmp.sock'
+    if args.read_t2:
+        LOG=BUILD/'input-ps2-read.serial.log'
+        QMP=BUILD/'input-ps2-read-qmp.sock'
     BUILD.mkdir(exist_ok=True)
     QMP.unlink(missing_ok=True)
     with LOG.open("w") as log:
@@ -47,10 +51,19 @@ def main():
                     time.sleep(0.05)
                 raise TimeoutError(f"missing: {description}")
 
-            # Do not inject while the strict scheduler trace is still running.
-            wait_for(lambda text: "input: PS/2 keyboard IRQ1, mouse IRQ12 ready" in text
-                     and "NOLX: timer reached 100 ticks; nominal 100 Hz" in text,
-                     "PS/2 readiness and completed scheduler/user boot")
+            if args.read_t2:
+                # The ring-3 reader is polled by a user thread, and a running user thread
+                # keeps the kernel's idle loop off the CPU, so the 100-tick marker does not
+                # appear until the phase is over. Waiting for it here would guarantee that the
+                # key is injected after the program has already given up.
+                wait_for(lambda text: "input: PS/2 keyboard IRQ1" in text
+                         and "send one key now" in text,
+                         "PS/2 readiness and the ring-3 reader waiting on the device")
+            else:
+                # Do not inject while the strict scheduler trace is still running.
+                wait_for(lambda text: "input: PS/2 keyboard IRQ1, mouse IRQ12 ready" in text
+                         and "NOLX: timer reached 100 ticks; nominal 100 Hz" in text,
+                         "PS/2 readiness and completed scheduler/user boot")
             connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             connection.settimeout(5)
             connection.connect(str(QMP))
@@ -76,6 +89,34 @@ def main():
                         return response["return"]
 
             execute("qmp_capabilities")
+
+            if args.read_t2:
+                # The ring-3 reader has its own subscription: the key must be injected after it
+                # opens, not when the console reports the keyboard, or the program would be
+                # waiting for a record that was published before it existed.
+                wait_for(lambda t: "NOLX: input read(2) T2: inputread (pid " in t
+                         and "send one key now" in t,
+                         "ring-3 inputread waiting on the keyboard descriptor", 90)
+                execute("send-key", {"keys": [{"type": "qcode", "data": "a"}], "hold-time": 60})
+                wait_for(lambda t: "NOLX: input read(2) T2: ring-3 open/read/close on the PS/2 "
+                         "keyboard device returned the injected press and release records" in t,
+                         "ring-3 read(2) evidence chain", 60)
+                text = LOG.read_text(errors="replace")
+                assert re.search(r"inputread: open/read/close on \\Device\\Input\d+ ok", text), text
+                assert "NOLX: input read(2) T2: device descriptors still open: 0" in text, text
+                assert re.search(r"NOLX: input read\(2\) T2: inputread zombie=true status=42 "
+                                 r"wrote=48", text), text
+                assert re.search(r"input: ps2 keyboard usage=0x04 pressed=true device="
+                                 r"\d+:\d+ sequence=[1-9]", text), text
+                assert re.search(r"input: ps2 keyboard usage=0x04 pressed=false device="
+                                 r"\d+:\d+ sequence=[1-9]", text), text
+                execute("quit")
+                if process.wait(timeout=5) != 0:
+                    raise RuntimeError("QEMU did not exit cleanly")
+                print("PASS: a ring-3 program read the injected press and release through "
+                      "open/read/close on the PS/2 keyboard device")
+                return
+
             execute("send-key", {"keys": [{"type": "qcode", "data": "a"}], "hold-time": 60})
             wait_for(lambda text: "input: ps2 keyboard usage=0x04 pressed=true" in text
                      and "input: ps2 keyboard usage=0x04 pressed=false" in text,

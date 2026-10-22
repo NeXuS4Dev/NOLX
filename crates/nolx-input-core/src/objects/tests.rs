@@ -6,6 +6,7 @@ fn usb(port: u8) -> Location {
     Location::Usb {
         controller: 3 << 3,
         port,
+        route: 0,
     }
 }
 fn attach<const D: usize, const R: usize, const Q: usize>(
@@ -221,10 +222,12 @@ fn usb_controller_identity_keeps_the_pci_segment() {
     let segment_zero = Location::Usb {
         controller: 3 << 8,
         port: 1,
+        route: 0,
     };
     let segment_one = Location::Usb {
         controller: (1 << 16) | (3 << 8),
         port: 1,
+        route: 0,
     };
     r.attach(Source::UsbHid, Class::Keyboard, segment_zero)
         .unwrap();
@@ -335,4 +338,105 @@ fn repeated_queue_and_object_slot_wrap_never_replays_old_records() {
         r.close(rd).unwrap();
         previous = Some((d, rd));
     }
+}
+
+#[test]
+fn usb_route_separates_devices_that_share_a_root_port() {
+    let mut r = Registry::<8, 2, 1>::new();
+    let at = |route| Location::Usb {
+        controller: 3 << 8,
+        port: 5,
+        route,
+    };
+    let root = at(0);
+    let behind_port_one = at(0x1);
+    let behind_port_two = at(0x2);
+    r.attach(Source::UsbHid, Class::Keyboard, root).unwrap();
+    r.attach(Source::UsbHid, Class::Keyboard, behind_port_one)
+        .unwrap();
+    r.attach(Source::UsbHid, Class::Keyboard, behind_port_two)
+        .unwrap();
+    assert_eq!(
+        r.attach(Source::UsbHid, Class::Keyboard, behind_port_one),
+        Err(Error::Duplicate)
+    );
+    // A second tier: two hubs under the same root port, each with a device on port three.
+    for route in [0x13, 0x23] {
+        r.attach(Source::UsbHid, Class::Keyboard, at(route))
+            .unwrap();
+    }
+    assert_eq!(r.devices().count(), 5);
+}
+
+#[test]
+fn usb_route_rejects_a_gap_below_an_absent_hub() {
+    let mut r = Registry::<8, 1, 1>::new();
+    for route in [0x10, 0x102, 1 << 20] {
+        assert_eq!(
+            r.attach(
+                Source::UsbHid,
+                Class::Keyboard,
+                Location::Usb {
+                    controller: 0,
+                    port: 1,
+                    route,
+                },
+            ),
+            Err(Error::Invalid),
+            "route {route:#x} must be refused"
+        );
+    }
+    for route in [0, 0x1, 0x2f, 0x1234, 0xfedcb] {
+        assert!(
+            r.attach(
+                Source::UsbHid,
+                Class::Keyboard,
+                Location::Usb {
+                    controller: 0,
+                    port: 1,
+                    route,
+                },
+            )
+            .is_ok(),
+            "route {route:#x} must be accepted"
+        );
+    }
+}
+
+#[test]
+fn readiness_answers_what_read_would_without_consuming_it() {
+    let mut r = Registry::<2, 2, 4>::new();
+    let device = attach(&mut r, 1);
+    let reader = r.open(device).unwrap();
+    // Nothing published: a live producer that owes this reader nothing.
+    assert_eq!(r.ready(reader), Ok(Readiness::Empty));
+    r.publish(device, key(true)).unwrap();
+    // Readiness is a question, not a reservation: asking twice must not swallow the record.
+    assert_eq!(r.ready(reader), Ok(Readiness::Record));
+    assert_eq!(r.ready(reader), Ok(Readiness::Record));
+    assert!(matches!(r.read(reader), Ok(Read::Event(_))));
+    assert_eq!(r.ready(reader), Ok(Readiness::Empty));
+    // The neutral release the disconnect synthesizes is still a record to read.
+    r.disconnect(device).unwrap();
+    assert_eq!(r.ready(reader), Ok(Readiness::Record));
+    assert!(matches!(r.read(reader), Ok(Read::Event(_))));
+    assert_eq!(r.ready(reader), Ok(Readiness::Disconnected));
+    // A closed reader is stale, not ready: the caller must not spin on it.
+    r.close(reader).unwrap();
+    assert_eq!(r.ready(reader), Err(Error::Stale));
+}
+
+#[test]
+fn readiness_reports_a_pending_resynchronisation() {
+    // Queue of two: a third publication forces the drop/resync path `read` reports first.
+    let mut r = Registry::<1, 1, 2>::new();
+    let device = attach(&mut r, 1);
+    let reader = r.open(device).unwrap();
+    for pressed in [true, false, true] {
+        r.publish(device, key(pressed)).unwrap();
+    }
+    assert_eq!(r.ready(reader), Ok(Readiness::Resync));
+    assert!(matches!(r.read(reader), Ok(Read::Resync { .. })));
+    // The overflow flushed this reader's queue, so the resync record was all there was to read.
+    assert_eq!(r.ready(reader), Ok(Readiness::Empty));
 }

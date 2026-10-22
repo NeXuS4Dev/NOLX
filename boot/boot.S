@@ -58,7 +58,11 @@
     .set EFER_LME,              1 << 8
 
     .set CR0_PAGING,            1 << 31
+    .set CR0_EM,                1 << 2      /* no x87 emulation: an FPU exists */
+    .set CR0_TS,                1 << 3      /* no lazy FPU switching at boot */
     .set CR4_PAE,               1 << 5
+    .set CR4_OSFXSR,            1 << 9      /* FXSAVE and SSE instructions     */
+    .set CR4_OSXMMEXCPT,        1 << 10     /* SSE exceptions, not #UD         */
 
     .set CPUID_EXT_MAX_FN,      0x80000000
     .set CPUID_EXT_FEATURES,    0x80000001
@@ -265,9 +269,24 @@ __start32:
     movl    $pml4, %eax
     movl    %eax, %cr3
 
+    /* SSE, because the Rust core library is compiled with it. The kernel uses no
+     * floating point itself, but the compiler is entitled to use SSE for a `memcpy` or a
+     * struct copy, and those instructions fault until CR4.OSFXSR says the operating system
+     * saves the state. Clearing CR0.EM/TS and installing the default MXCSR mask completes
+     * the contract: from here on any code path, including one that reaches a core-library
+     * routine rather than a Rust function compiled for this kernel, may execute SSE. */
+    movl    %cr0, %eax
+    andl    $(~(CR0_EM | CR0_TS)), %eax
+    movl    %eax, %cr0
+
     movl    %cr4, %eax
-    orl     $CR4_PAE, %eax
+    orl     $(CR4_PAE | CR4_OSFXSR | CR4_OSXMMEXCPT), %eax
     movl    %eax, %cr4
+
+    /* LDMXCSR itself faults with #UD until CR4.OSFXSR is set, so the MXCSR load has to
+     * follow the CR4 write. 0x1F80 is the architectural default: every exception masked. */
+    movl    $0x1F80, mxcsr_value
+    ldmxcsr mxcsr_value
 
     movl    $MSR_EFER, %ecx
     rdmsr
@@ -776,6 +795,11 @@ gdt64_ptr:
     .quad gdt64
 
 /* ================================================================== boot data */
+
+    .section .boot.data, "aw", @progbits
+    .align 4
+mxcsr_value:
+    .long 0x1F80                       /* scratch for the MXCSR load in the 32-bit path */
 
     .section .boot.data, "aw", @progbits
     .align 4

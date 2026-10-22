@@ -340,6 +340,18 @@ pub(crate) fn pci_route_supported(gsi: u32) -> bool {
         .is_some_and(|base| base.load(Ordering::Acquire) != 0)
 }
 
+/// Why a route could not be acquired.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RouteError {
+    /// The GSI is outside the bounded PCI domain, unrouted, reserved, quarantined, or its
+    /// current programming does not read back as the expected value.
+    Unavailable,
+    /// The route itself is usable but every vector in its kind's pool is owned. This is the
+    /// one refusal an exhausted allocator produces, and drivers report it distinctly so a
+    /// start that failed for lack of a vector is never mistaken for a broken route.
+    NoVector,
+}
+
 /// Acquire the readback-verified current firmware route for one e1000 source.
 ///
 /// The route is keyed by GSI: adapters sharing the same GSI share one local-APIC vector,
@@ -348,15 +360,15 @@ pub(crate) fn pci_route_supported(gsi: u32) -> bool {
 /// conflicting or unverified routes are refused. Failed programming is remasked and checked;
 /// if the mask cannot be confirmed, the vector is retained and the GSI quarantined so a later
 /// acquisition cannot claim a second vector for the uncertain route.
-pub fn acquire_pci_route(irq: nolx_power_core::routing::Interrupt) -> Option<u8> {
-    let index = usize::try_from(irq.gsi).ok()?;
+pub fn acquire_pci_route(irq: nolx_power_core::routing::Interrupt) -> Result<u8, RouteError> {
+    let index = usize::try_from(irq.gsi).map_err(|_| RouteError::Unavailable)?;
     if index >= PCI_GSIS || !irq.level || !irq.shared {
-        return None;
+        return Err(RouteError::Unavailable);
     }
     let _guard = PCI_ROUTE_LOCK.lock();
     let base = PCI_BASE[index].load(Ordering::Acquire);
     if base == 0 {
-        return None;
+        return Err(RouteError::Unavailable);
     }
     let register = PCI_REGISTER[index].load(Ordering::Relaxed) as u8;
     let destination = PCI_DESTINATION.load(Ordering::Relaxed);
@@ -366,7 +378,7 @@ pub fn acquire_pci_route(irq: nolx_power_core::routing::Interrupt) -> Option<u8>
     if PCI_QUARANTINED_VECTOR[index].load(Ordering::Acquire) != 0 {
         // Ownership from an earlier failed transaction is unverified. Keep its claim and refuse
         // this GSI rather than leaking another vector on each retry.
-        return None;
+        return Err(RouteError::Unavailable);
     }
     if references != 0 {
         let vector = programmed as u8;
@@ -376,17 +388,18 @@ pub fn acquire_pci_route(irq: nolx_power_core::routing::Interrupt) -> Option<u8>
             || ioapic_read(base, register) & PCI_REDIRECTION_WRITABLE != expected
             || ioapic_read(base, register + 1) & 0xff000000 != destination
         {
-            return None;
+            return Err(RouteError::Unavailable);
         }
-        PCI_REFERENCES[index].store(references.checked_add(1)?, Ordering::Release);
-        return Some(vector);
+        let references = references.checked_add(1).ok_or(RouteError::Unavailable)?;
+        PCI_REFERENCES[index].store(references, Ordering::Release);
+        return Ok(vector);
     }
     if programmed != 0 {
         // A nonempty route without a reference is stale or inconsistent; never overwrite it.
-        return None;
+        return Err(RouteError::Unavailable);
     }
 
-    let vector = irq_vectors::claim(E1000_INTX_KIND, index)?;
+    let vector = irq_vectors::claim(E1000_INTX_KIND, index).ok_or(RouteError::NoVector)?;
     let value = pci_route_value(vector, irq);
     let masked = value | REDIRECTION_MASKED;
     ioapic_write(
@@ -396,7 +409,7 @@ pub fn acquire_pci_route(irq: nolx_power_core::routing::Interrupt) -> Option<u8>
     );
     if ioapic_read(base, register) & REDIRECTION_MASKED == 0 {
         retain_or_release_failed_pci_route(index, base, register, vector, masked);
-        return None;
+        return Err(RouteError::Unavailable);
     }
     ioapic_write(base, register + 1, destination);
     ioapic_write(base, register, masked);
@@ -404,16 +417,16 @@ pub fn acquire_pci_route(irq: nolx_power_core::routing::Interrupt) -> Option<u8>
         || ioapic_read(base, register + 1) & 0xff000000 != destination
     {
         retain_or_release_failed_pci_route(index, base, register, vector, masked);
-        return None;
+        return Err(RouteError::Unavailable);
     }
     ioapic_write(base, register, value);
     if ioapic_read(base, register) & PCI_REDIRECTION_WRITABLE != value {
         retain_or_release_failed_pci_route(index, base, register, vector, masked);
-        return None;
+        return Err(RouteError::Unavailable);
     }
     PCI_PROGRAMMED[index].store(value, Ordering::Relaxed);
     PCI_REFERENCES[index].store(1, Ordering::Release);
-    Some(vector)
+    Ok(vector)
 }
 
 /// A failed transaction can relinquish its vector only after the route's mask bit reads back

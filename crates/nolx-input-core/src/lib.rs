@@ -19,6 +19,7 @@
 
 pub mod events;
 pub mod objects;
+pub mod wire;
 
 /// The data port: bytes from the keyboard, and the data written to it.
 pub const DATA_PORT: u16 = 0x60;

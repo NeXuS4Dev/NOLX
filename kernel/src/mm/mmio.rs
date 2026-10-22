@@ -215,6 +215,7 @@ pub(crate) unsafe fn release_owned(owner: usize) {
     feature = "hal-ahci-nvme-recovery-test",
     feature = "hal-xhci-lifecycle-test",
     feature = "hal-xhci-recovery-test",
+    feature = "hal-xhci-exhaust-test",
     feature = "hal-xhci-transfer-fault-test"
 ))]
 pub(crate) fn live_mappings() -> usize {

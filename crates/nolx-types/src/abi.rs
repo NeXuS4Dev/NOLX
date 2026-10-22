@@ -101,6 +101,66 @@ pub mod cld {
 /// Signal number for "child state changed", the signal `waitid` reports through.
 pub const SIGCHLD: i32 = 17;
 
+/// `poll(2)` event bits.
+///
+/// The values are the x86-64 ABI's, so a program that was built against any other libc can
+/// still test `revents` with its own constants.
+pub mod poll {
+    /// Data is available to read without blocking.
+    pub const IN: i16 = 0x0001;
+    /// Writing would not block. NOLX has no writable input object, so it never reports this.
+    pub const OUT: i16 = 0x0004;
+    /// The descriptor is not open. Like POSIX, this is reported even if `events` is zero.
+    pub const NVAL: i16 = 0x0020;
+}
+
+/// One `struct pollfd`, the eight-byte record `poll(2)` reads and writes.
+///
+/// The layout is fixed by the x86-64 ABI (`int fd; short events; short revents;`) and is
+/// spelled out here so the kernel decodes it once, with a test, instead of everywhere it is
+/// used. `revents` is an output: the kernel writes it, and a program must not rely on what it
+/// held before the call.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PollFd {
+    /// Descriptor the caller asks about.
+    pub fd: i32,
+    /// Events the caller is interested in, as [`poll`] bits.
+    pub events: i16,
+    /// Events that actually hold, written by the kernel.
+    pub revents: i16,
+}
+
+impl PollFd {
+    /// Bytes one entry occupies: `sizeof(struct pollfd)`.
+    pub const SIZE: usize = 8;
+
+    /// Decode one entry from its eight bytes, little-endian as the ABI lays it out.
+    #[must_use]
+    pub fn decode(bytes: [u8; Self::SIZE]) -> Self {
+        Self {
+            fd: i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            events: i16::from_le_bytes([bytes[4], bytes[5]]),
+            revents: i16::from_le_bytes([bytes[6], bytes[7]]),
+        }
+    }
+
+    /// Encode one entry into its eight bytes, `revents` included.
+    ///
+    /// The kernel is the writer of `revents`, so its encode has to carry the value it computed;
+    /// an encode that dropped it would make every `poll` report zero even when the descriptor
+    /// was ready. A caller preparing a fresh request starts from `revents: 0` and is answered
+    /// for every entry, so a reused array never shows stale readiness either.
+    #[must_use]
+    pub fn encode(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[..4].copy_from_slice(&self.fd.to_le_bytes());
+        bytes[4..6].copy_from_slice(&self.events.to_le_bytes());
+        bytes[6..8].copy_from_slice(&self.revents.to_le_bytes());
+        bytes
+    }
+}
+
 /// The `siginfo_t` subset NOLX fills for `waitid(2)`.
 ///
 /// The layout is the common x86-64 Linux/SysV shape, truncated to the fields the kernel
@@ -257,7 +317,63 @@ pub mod pathconf_name {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::mem::{align_of, size_of};
+    use core::mem::{align_of, offset_of, size_of};
+
+    #[test]
+    fn pollfd_is_the_eight_byte_abi_record() {
+        assert_eq!(size_of::<PollFd>(), PollFd::SIZE);
+        assert_eq!(size_of::<PollFd>(), 8);
+        // The ABI fixes the field offsets, not just the total size.
+        assert_eq!(offset_of!(PollFd, fd), 0);
+        assert_eq!(offset_of!(PollFd, events), 4);
+        assert_eq!(offset_of!(PollFd, revents), 6);
+        assert_eq!(align_of::<PollFd>(), 4);
+    }
+
+    #[test]
+    fn pollfd_round_trips_every_field_it_encodes() {
+        let request = PollFd {
+            fd: 7,
+            events: poll::IN,
+            revents: 0,
+        };
+        let bytes = request.encode();
+        assert_eq!(
+            bytes,
+            [7, 0, 0, 0, poll::IN as u8, 0, 0, 0],
+            "pollfd must encode little-endian"
+        );
+        assert_eq!(PollFd::decode(bytes), request);
+        // `revents` is an output, so the kernel's encode has to carry the answer it computed.
+        // An encode that dropped it would report a ready descriptor as quiet, and a program
+        // that trusted `revents` would then read a queue it was told was empty.
+        let answered = PollFd {
+            fd: 7,
+            events: poll::IN | poll::OUT,
+            revents: poll::IN,
+        };
+        assert_eq!(
+            answered.encode(),
+            [
+                7,
+                0,
+                0,
+                0,
+                (poll::IN | poll::OUT) as u8,
+                0,
+                poll::IN as u8,
+                0
+            ]
+        );
+        assert_eq!(PollFd::decode(answered.encode()), answered);
+        // A refused descriptor is reported the same way: the answer survives the round trip.
+        let refused = PollFd {
+            fd: 0,
+            events: 0,
+            revents: poll::NVAL,
+        };
+        assert_eq!(PollFd::decode(refused.encode()).revents, poll::NVAL);
+    }
 
     #[test]
     fn siginfo_is_the_fixed_128_byte_record() {

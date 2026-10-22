@@ -690,6 +690,17 @@ jobs:
         run: |
           sudo apt-get update 2>&1 | tail -1
           sudo apt-get install -y qemu-system-x86 2>&1 | tail -3
+      # The two single-adapter recovery fixtures are independent of the multi-adapter one, so
+      # they run first: a regression in the multi-adapter step must not silently skip them, and
+      # the vector-exhaustion phases of both drivers live here.
+      - name: Build checked e1000 failed-controller recovery fixture
+        run: make kernel KERNEL_FEATURES=hal-e1000-recovery-test 2>&1 | tee -a /tmp/job.log
+      - name: Verify partial startup, shared-INTx remask quarantine and fresh captured peer traffic
+        run: python3 scripts/check-e1000-recovery.py 2>&1 | tee -a /tmp/job.log
+      - name: Build checked virtio-net failed-controller recovery fixture
+        run: make kernel KERNEL_FEATURES=hal-virtio-net-recovery-test 2>&1 | tee -a /tmp/job.log
+      - name: Verify modern/transitional partial startup and MSI-X recovery with captured traffic
+        run: python3 scripts/check-virtio-net-recovery.py 2>&1 | tee -a /tmp/job.log
       - name: Build multi-adapter network test
         run: make kernel KERNEL_FEATURES=hal-driver-net-multi-test 2>&1 | tee /tmp/job.log
       - name: Verify independent adapters, shared INTx and captured public RX/TX
@@ -706,14 +717,6 @@ jobs:
         run: make kernel KERNEL_FEATURES=hal-driver-multi-test,hal-driver-net-multi-test 2>&1 | tee -a /tmp/job.log
       - name: Verify all ten devices together on Q35
         run: python3 scripts/check-network-multi.py --storage-fixture-only 2>&1 | tee -a /tmp/job.log
-      - name: Build checked e1000 failed-controller recovery fixture
-        run: make kernel KERNEL_FEATURES=hal-e1000-recovery-test 2>&1 | tee -a /tmp/job.log
-      - name: Verify partial startup, shared-INTx remask quarantine and fresh captured peer traffic
-        run: python3 scripts/check-e1000-recovery.py 2>&1 | tee -a /tmp/job.log
-      - name: Build checked virtio-net failed-controller recovery fixture
-        run: make kernel KERNEL_FEATURES=hal-virtio-net-recovery-test 2>&1 | tee -a /tmp/job.log
-      - name: Verify modern/transitional partial startup and MSI-X recovery with captured traffic
-        run: python3 scripts/check-virtio-net-recovery.py 2>&1 | tee -a /tmp/job.log
       - name: Annotate serial logs on failure
         if: failure()
         run: |
@@ -739,8 +742,23 @@ jobs:
           sudo apt-get install -y qemu-system-x86 2>&1 | tail -3
       - name: Build default kernel
         run: make kernel 2>&1 | tee /tmp/job.log
+      - name: Verify a machine without storage, USB or network controllers falls back cleanly
+        run: python3 scripts/check-absent-devices.py 2>&1 | tee -a /tmp/job.log
       - name: Verify PC and Q35 boot-HID input, ring wrap and disconnect reclamation
         run: python3 scripts/check-usb-input.py 2>&1 | tee -a /tmp/job.log
+      - name: Verify a USB 2.0 hub descriptor, route strings, hub-port hotplug and subtree teardown
+        # Keep the fixture's stderr separate: the serial dump it prints on the way out fills any
+        # annotation built from the combined stream, and the assertion is what has to be read.
+        run: |
+          set +e
+          python3 scripts/check-usb-input.py --hubs > /tmp/hubs.out 2> /tmp/hubs.err
+          status=$?
+          cat /tmp/hubs.out >> /tmp/job.log
+          cat /tmp/hubs.err >> /tmp/job.log
+          if [ "$status" -ne 0 ]; then
+            python3 scripts/annotate-failure.py "hub fixture assertion" /tmp/hubs.err 3500
+          fi
+          exit "$status"
       - name: Reject misleading interrupt proof logs
         run: python3 -m unittest discover -s scripts -p 'test_xhci_irq_checks.py' 2>&1 | tee -a /tmp/job.log
       - name: Build interrupt observer image
@@ -759,18 +777,42 @@ jobs:
         run: python3 scripts/check-usb-input.py --objects --interrupts 2>&1 | tee -a /tmp/job.log
       - name: Verify PS/2 through the same input-object API
         run: python3 scripts/check-ps2-input.py --objects 2>&1 | tee -a /tmp/job.log
+      - name: Build the ring-3 input `read(2)` image
+        run: make kernel KERNEL_FEATURES=hal-input-read-test 2>&1 | tee -a /tmp/job.log
+      - name: Verify a ring-3 program reads injected key records through open/read/close
+        run: python3 scripts/check-ps2-input.py --read-t2 2>&1 | tee -a /tmp/job.log
+      - name: Build the ring-3 blocking `poll(2)` image
+        run: make kernel KERNEL_FEATURES=hal-input-wait-test 2>&1 | tee -a /tmp/job.log
+      - name: Verify a ring-3 poll suspends the caller and wakes on injected pointer motion
+        run: |
+          python3 scripts/check-input-poll.py 2>&1 | tee -a /tmp/job.log
+          python3 scripts/check-input-poll.py --absent 2>&1 | tee -a /tmp/job.log
       - name: Verify controller lifecycle, actual transfer STALL and fail-closed slot repair
         run: |
           for mode in lifecycle start-fault stop-fault recovery irq-start-fault transfer-fault; do
             make kernel KERNEL_FEATURES=hal-xhci-${mode}-test,hal-xhci-irq-test 2>&1 | tee -a /tmp/job.log
             python3 scripts/check-xhci-lifecycle.py --mode "$mode" --interrupts 2>&1 | tee -a /tmp/job.log
           done
-      - name: Annotate USB serial logs on failure
+      - name: Build interrupt-vector exhaustion fixture
+        run: make kernel KERNEL_FEATURES=hal-xhci-exhaust-test 2>&1 | tee -a /tmp/job.log
+      - name: Verify an exhausted xHCI vector pool is refused without a leak
+        run: python3 scripts/check-xhci-lifecycle.py --mode exhaust 2>&1 | tee -a /tmp/job.log
+      - name: Build allocator-exhaustion fixture
+        run: make kernel KERNEL_FEATURES=hal-mm-exhaust-test 2>&1 | tee -a /tmp/job.log
+      - name: Verify an empty frame allocator and a full kernel heap refuse instead of corrupting
+        run: python3 scripts/check-mm-exhaust.py 2>&1 | tee -a /tmp/job.log
+      - name: Annotate the failing step and its newest serial log
+        # Annotations are capped at ten per step, and a whole serial dump is thousands of lines,
+        # so annotate the tail of the step output (where the assertion is) plus the newest log.
         if: failure()
+        # `set +e`: an annotation step must never add a failure of its own, and `ls` exits 2
+        # when no log matches.
         run: |
-          for log in build/input-usb-*.log build/input-xhci-lifecycle-*.log; do
-            tr -cd '\11\12\40-\176' < "$log" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed 's/^/::error::/' || true
-          done
+          set +e
+          python3 scripts/annotate-failure.py "job log" /tmp/job.log 6000
+          newest=$(ls -t build/input-usb-*.log build/input-xhci-lifecycle-*.log build/input-ps2-*.log build/input-poll-*.log 2>/dev/null | head -1)
+          [ -n "$newest" ] && python3 scripts/annotate-failure.py "$(basename "$newest")" "$newest" 2500
+          exit 0
       - uses: ./.github/actions/report-failure
         if: failure()
 

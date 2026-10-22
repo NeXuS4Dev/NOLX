@@ -275,8 +275,12 @@ fn allocate_bytes(size: usize, align: usize) -> *mut u8 {
     let request = if align <= ALIGNMENT as usize {
         size
     } else {
-        // Room for the unaligned start, the round-up, and the header words.
-        size + align
+        // Room for the payload, the round-up to `align`, and the two header words that
+        // `serve` writes in front of the aligned start. The header has to be part of the
+        // reservation: without it the caller's last `ALIGNED_HEADER` bytes land on the next
+        // block's header, and the damage only shows up in a later free-list walk -- which is
+        // exactly how the exhaustion fixture found it.
+        size + align + ALIGNED_HEADER
     };
 
     for _ in 0..=MAX_REGIONS {
@@ -309,6 +313,16 @@ fn serve(request: usize, align: usize) -> Option<*mut u8> {
     // stable for the duration of this search.
     unsafe {
         for index in 0..region_count() {
+            // A request larger than the region itself can never be served from it, whatever
+            // the region's own bookkeeping says. Checking the length first means a damaged
+            // free-list entry cannot make an impossible request look servable, and the
+            // refusals a caller sees stay honest.
+            let region_bytes = (*REGIONS.get())[index]
+                .as_ref()
+                .map_or(0, |region| region.bytes);
+            if request > region_bytes {
+                continue;
+            }
             let heap = region_heap(index);
             let Some(offset) = heap.allocate(request) else {
                 continue;
@@ -320,10 +334,18 @@ fn serve(request: usize, align: usize) -> Option<*mut u8> {
             if align <= ALIGNMENT as usize {
                 return Some(payload);
             }
-            // The payload keeps the header word in front of it; `request` includes a full
-            // `align` of slack, so this never runs past the end of the block.
+            // The caller's pointer must be `align`-aligned, and the two header words must sit
+            // immediately in front of it: `deallocate_bytes` finds the region and the block by
+            // reading them at `pointer - ALIGNED_HEADER`. Writing them *at* the returned
+            // pointer instead puts them inside the caller's own payload, where the caller's
+            // first write clobbers them -- the block then cannot be freed, and the region
+            // index read back is whatever the payload happened to contain.
+            //
+            // `request` includes the payload, a full `align` of round-up slack, and
+            // `ALIGNED_HEADER` for these words, so the aligned pointer and everything the
+            // caller writes after it stay inside the block.
             let aligned = (payload as usize + ALIGNED_HEADER).next_multiple_of(align);
-            let header = aligned as *mut u32;
+            let header = (aligned - ALIGNED_HEADER) as *mut u32;
             header.write(index as u32);
             header.add(1).write(offset);
             return Some(aligned as *mut u8);

@@ -121,3 +121,62 @@ pub(crate) fn user_test_complete() -> bool {
 pub(crate) fn report_user_test(console: &mut crate::hal::console::Console) -> bool {
     user::selftest::report(console)
 }
+
+/// Begin the ring-3 input `read(2)` phase in the dedicated image.
+#[cfg(feature = "hal-input-read-test")]
+pub(crate) fn begin_input_read_test(console: &mut crate::hal::console::Console) {
+    user::selftest::read_test::begin(console);
+}
+
+/// Whether the input `read(2)` phase is still running.
+#[cfg(feature = "hal-input-read-test")]
+#[must_use]
+pub(crate) fn input_read_test_running() -> bool {
+    user::selftest::read_test::running()
+}
+
+/// Whether the input `read(2)` phase had no PS/2 keyboard to read from.
+#[cfg(feature = "hal-input-read-test")]
+#[must_use]
+pub(crate) fn input_read_test_skipped() -> bool {
+    user::selftest::read_test::skipped()
+}
+
+/// Report the input `read(2)` phase; false when the evidence chain was not exact.
+#[cfg(feature = "hal-input-read-test")]
+pub(crate) fn report_input_read_test(console: &mut crate::hal::console::Console) -> bool {
+    user::selftest::read_test::report(console)
+}
+
+/// Begin the ring-3 blocking `poll(2)` phase in the dedicated image.
+#[cfg(feature = "hal-input-wait-test")]
+pub(crate) fn begin_input_poll_test(console: &mut crate::hal::console::Console) {
+    user::selftest::poll_test::begin(console);
+}
+
+/// Whether the blocking `poll(2)` phase has resolved (a waiter was spawned, or it was skipped).
+#[cfg(feature = "hal-input-wait-test")]
+#[must_use]
+pub(crate) fn input_poll_test_started() -> bool {
+    user::selftest::poll_test::started()
+}
+
+/// Whether the blocking `poll(2)` phase is still running.
+#[cfg(feature = "hal-input-wait-test")]
+#[must_use]
+pub(crate) fn input_poll_test_running() -> bool {
+    user::selftest::poll_test::running()
+}
+
+/// Whether the blocking `poll(2)` phase had no pointer device to wait on.
+#[cfg(feature = "hal-input-wait-test")]
+#[must_use]
+pub(crate) fn input_poll_test_skipped() -> bool {
+    user::selftest::poll_test::skipped()
+}
+
+/// Report the blocking `poll(2)` phase; false when the evidence chain was not exact.
+#[cfg(feature = "hal-input-wait-test")]
+pub(crate) fn report_input_poll_test(console: &mut crate::hal::console::Console) -> bool {
+    user::selftest::poll_test::report(console)
+}

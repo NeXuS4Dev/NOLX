@@ -134,6 +134,8 @@ static MATCHES: &[Match] = &[Match::by_ids(VENDOR_INTEL, DEVICE_82540EM)];
 pub enum Failure {
     /// Firmware INTx assignment is unavailable or its interrupt was not delivered.
     Interrupt,
+    /// The route is usable but every vector in its pool is owned by another source.
+    NoVector,
     /// No matching ARP reply was received from the QEMU network peer.
     Receive,
     /// No e1000 is on the PCI bus.
@@ -325,6 +327,14 @@ pub fn probe(console: &mut dyn HalConsole) {
 
 fn accept(_: &DeviceId) -> bool {
     true
+}
+
+/// Whether the last start refused because the vector pool was exhausted.
+///
+/// A distinct reason lets a test prove that an exhausted pool is refused *as an exhausted
+/// pool*, not that the driver failed for one of the many other reasons a start can fail.
+pub fn last_failure_was_no_vector(dev: usize) -> bool {
+    matches!(STATE[dev].lock().error, Some(Failure::NoVector))
 }
 
 /// The framework's start operation: the whole bring-up. The result goes to [`STATE`].
@@ -577,7 +587,10 @@ fn bring_up(dev: usize) -> Result<Report, Failure> {
     // Keep local interrupts masked across route acquisition and publication of the source
     // identity. The GSI may already be shared and unmasked for a peer adapter.
     let _interrupts = super::cpu::InterruptGuard::disable();
-    let vector = super::ioapic::acquire_pci_route(irq).ok_or(Failure::Interrupt)?;
+    let vector = super::ioapic::acquire_pci_route(irq).map_err(|error| match error {
+        super::ioapic::RouteError::NoVector => Failure::NoVector,
+        super::ioapic::RouteError::Unavailable => Failure::Interrupt,
+    })?;
     *PCI_ROUTE[dev].lock() = Some((irq, vector));
     RX_VECTOR[dev].store(vector, Ordering::Release);
     // Clear stale causes, enable the NIC source and PCI INTx only after the shared vector is

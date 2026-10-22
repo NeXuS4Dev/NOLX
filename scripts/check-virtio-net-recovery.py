@@ -56,6 +56,14 @@ def boot(qemu, kernel, machine, modern):
                    'RX-queue-only partial startup retained all four pages until checked reset',
                    'deliberately withheld PCI exclusion proof pinned DMA despite actual bus-master disable']:
         assert f'virtio-net-recovery: {marker}' in text, text
+
+    # Interrupt-vector exhaustion across both queue kinds: every candidate held, the start
+    # refused as NoVector without a leak, and both vectors reclaimed once the pools are free.
+    exhaustion = re.search(
+        r'virtio-net-recovery: exhausted (\d+)/(\d+) RX/TX vector\(s\) refused start as '
+        r'NoVector with no DMA/MMIO/vector leak; released pools let it start again', text)
+    assert exhaustion, text
+    assert 0 < int(exhaustion.group(1)) <= 256 and 0 < int(exhaustion.group(2)) <= 256, exhaustion.group(0)
     vectors = re.search(
         r'virtio-net-recovery: vectors (0x[0-9a-f]+)/(0x[0-9a-f]+) released after checked stop and reclaimed on restart',
         text,

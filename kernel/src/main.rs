@@ -169,6 +169,9 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         if let Err(error) = obj::boot::init(&mut console) {
             panic!("obj: namespace init failed: {error:?}");
         }
+        // HID devices that enumerated during the controller probes predate the type table; give
+        // them their Executive names now, before anything binds a process to them.
+        hal::input::publish_unbound(&mut console);
         // The object manager checks its own reference rules before anything depends on them.
         // A failure is fatal for the same reason the memory self test's is.
         if let Err(error) = obj::boot::selftest(&mut console) {
@@ -214,13 +217,42 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         #[cfg(feature = "hal-driver-lifecycle-test")]
         let mut lifecycle_test_done = false;
         let mut round_robin_reported = false;
+        let mut input_exec_reported = false;
         let mut user_test_started = false;
         let mut user_test_reported = false;
+        #[cfg(feature = "hal-input-read-test")]
+        let mut input_read_test_started = false;
+        #[cfg(feature = "hal-input-read-test")]
+        let mut input_read_test_reported = false;
+        #[cfg(feature = "hal-input-wait-test")]
+        let mut input_poll_test_reported = false;
         #[cfg(any(feature = "hal-power-test-s5", feature = "hal-power-quiesce-test"))]
         let mut power_test_started = false;
         loop {
-            hal::xhci::poll_events(&mut console);
-            hal::input::report_events(&mut console);
+            // Device polling prints, and the round-robin phase checks the exact interleaving of
+            // its own output: a hub or HID device completing enumeration inside that window
+            // splits the trace it is comparing. The phase is twelve timer quanta, so holding
+            // device work until it finishes costs the devices nothing and keeps both pieces of
+            // evidence exact.
+            // `round_robin_reported`, not `round_robin_complete()`: the workers finish their
+            // letters one iteration before this loop prints the trace's ` complete: ...` suffix,
+            // so the gate has to stay shut until the whole line is out.
+            if round_robin_reported {
+                hal::xhci::poll_events(&mut console);
+                hal::input::report_events(&mut console);
+            }
+            // A process suspended in `poll(2)` is completed here, outside any interrupt and
+            // outside the syscall: the request is re-evaluated against the queues the producers
+            // just filled, and the caller's frame is resumed with the count of ready
+            // descriptors.
+            for (pid, ready, timed_out) in exec::user::service_polls() {
+                if pid != 0 {
+                    let _ = writeln!(
+                        console,
+                        "input: poll woke pid={pid} ready={ready} timed_out={timed_out}"
+                    );
+                }
+            }
             #[cfg(feature = "hal-xhci-transfer-fault-test")]
             if memory_selftest_done {
                 hal::xhci::transfer_selftest(&mut console);
@@ -258,6 +290,12 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
                     panic!("round-robin context-switch test produced an unexpected trace");
                 }
             }
+            // The input devices are attached by now, so the Executive binding can be checked
+            // before the ring-3 phase binds the same handles into the first process.
+            if !input_exec_reported && round_robin_reported {
+                input_exec_reported = true;
+                hal::input::executive_selftest(&mut console);
+            }
 
             // The M6 ring-3 phase runs right after the kernel-thread round-robin, while the
             // clock is live: the same boot run carries both T2 tests. It must finish before
@@ -271,6 +309,62 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
                 user_test_reported = true;
                 if !exec::report_user_test(&mut console) {
                     panic!("user mode T2 test produced an unexpected evidence chain");
+                }
+            }
+
+            // The ring-3 input `read(2)` phase runs after the M6/M7 evidence and before the
+            // memory selftests, which activate their own address spaces.
+            #[cfg(feature = "hal-input-read-test")]
+            {
+                if user_test_reported && !input_read_test_started {
+                    input_read_test_started = true;
+                    exec::begin_input_read_test(&mut console);
+                }
+                if input_read_test_started
+                    && !input_read_test_reported
+                    && !exec::input_read_test_running()
+                {
+                    input_read_test_reported = true;
+                    let passed = exec::report_input_read_test(&mut console);
+                    // A machine without a PS/2 keyboard legitimately has nothing to read; the
+                    // phase says so and must not fail the boot. With a keyboard present, an
+                    // inexact evidence chain is fatal.
+                    if !passed && !exec::input_read_test_skipped() {
+                        panic!("input read(2) T2 test produced an unexpected evidence chain");
+                    }
+                }
+            }
+
+            // The blocking `poll(2)` phase runs after the `read(2)` phase, on the same image
+            // family, and before the memory selftests for the same reason.
+            #[cfg(feature = "hal-input-wait-test")]
+            let poll_ready = {
+                #[cfg(feature = "hal-input-read-test")]
+                {
+                    input_read_test_reported
+                }
+                #[cfg(not(feature = "hal-input-read-test"))]
+                {
+                    user_test_reported
+                }
+            };
+            #[cfg(feature = "hal-input-wait-test")]
+            {
+                // The waiter needs a USB pointer, which enumerates asynchronously: keep asking
+                // until the phase either spawns it or reports that this machine has none.
+                if poll_ready {
+                    exec::begin_input_poll_test(&mut console);
+                }
+                if poll_ready
+                    && exec::input_poll_test_started()
+                    && !input_poll_test_reported
+                    && !exec::input_poll_test_running()
+                {
+                    input_poll_test_reported = true;
+                    let passed = exec::report_input_poll_test(&mut console);
+                    if !passed && !exec::input_poll_test_skipped() {
+                        panic!("input poll(2) T2 test produced an unexpected evidence chain");
+                    }
                 }
             }
 
@@ -288,11 +382,22 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
                 timer_marker_reported = true;
             }
 
+            // Every ring-3 phase has to finish before the memory selftests: they activate
+            // their own address spaces, which cannot interleave with live user threads.
+            #[cfg(all(feature = "hal-input-read-test", feature = "hal-input-wait-test"))]
+            let ring3_done = input_read_test_reported && input_poll_test_reported;
+            #[cfg(all(feature = "hal-input-read-test", not(feature = "hal-input-wait-test")))]
+            let ring3_done = input_read_test_reported;
+            #[cfg(all(feature = "hal-input-wait-test", not(feature = "hal-input-read-test")))]
+            let ring3_done = input_poll_test_reported;
+            #[cfg(not(any(feature = "hal-input-read-test", feature = "hal-input-wait-test")))]
+            let ring3_done = true;
+
             // Exercise the frame allocator once the clock is live, so the stress runs while
             // timer interrupts keep arriving instead of in the quiet window before they
             // start. A failure is fatal: a memory manager that did not survive its own self
             // test must not go on to serve allocations.
-            if timer_marker_reported && user_test_reported && !memory_selftest_done {
+            if timer_marker_reported && user_test_reported && ring3_done && !memory_selftest_done {
                 memory_selftest_done = true;
                 if let Err(message) = mm::selftest::run(&mut console) {
                     let _ = writeln!(console, "NOLX: mm selftest: FAILED: {message}");
@@ -311,6 +416,11 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
                     let _ = writeln!(console, "NOLX: address space selftest: FAILED: {message}");
                     panic!("address space selftest: {message}");
                 }
+                // The dedicated exhaustion fixture: with the clock live, take every free
+                // frame and every region the heap may grow to, prove both allocators refuse
+                // cleanly, and require the counters to come back exactly.
+                #[cfg(feature = "hal-mm-exhaust-test")]
+                mm::exhaust::run(&mut console);
             }
 
             #[cfg(feature = "hal-driver-lifecycle-test")]

@@ -784,6 +784,60 @@ The complete unchecked gates remain in the linked checklist.
 - Power: ACPI table parsing, `_STA`/`_CRS`, S3/S5, device power policy.
 - Tests: T2 boot with each storage backend and checksum a written file.
 
+M9 USB hub checkpoint (2026-10-21): a USB 2.0 hub is now enumerated as a hub rather than
+refused. The rules live in `crates/nolx-usb-core/src/hub.rs`: the class descriptor (length
+`7 + ceil(ports/8)` up to eleven bytes, 1..15 ports, characteristics and TT think time, the
+removable bitmap, the power-on delay times two milliseconds), the class requests (the descriptor
+is read with `bmRequestType` `0xa0` and type `0x29`; port requests target "other", `0xa3`/`0x23`),
+the port status and change words, the route string and the slot-context/translator words, and the
+status-change endpoint with its clamped transfer length. The kernel gives every device a route in
+its slot context and in its input-object location, arms the hub's interrupt IN endpoint so a port
+change wakes the controller, re-arms it per completion, and reads the ports in a five-phase scan
+(root retire, detached retire, hub cascade, leaf-first sweep, root attach). Two defects found by
+measurement are fixed: an event that lands while the interrupter is masked is now seen by
+re-reading the event ring after re-enabling, and an idle backstop reads the ports every 100 ms so
+a lost hub wakeup cannot strand hotplug.
+
+Local evidence (QEMU 11.1.50, PC and Q35, repeated): a four-port hub takes its own slot on the
+root port QEMU assigns, a full-speed mouse behind hub port 1 enumerates at route `0x1` in a
+different slot, hotplug onto hub port 3 enumerates at route `0x3`, unplugging one device retires
+exactly that route and publishes `dx=0 dy=0 buttons=0`, removing the hub retires routes `0x2`
+and `0x4` before `0x0`, the DMA counter returns to the one-device baseline (8 pages) and a
+re-plugged two-port hub enumerates on the same root port. `cargo test -p nolx-usb-core --lib`
+passes 42 tests and `-p nolx-input-core --lib` 26 (the route is part of the input identity).
+The new `scripts/check-usb-input.py --hubs` step adds key-press and held-key assertions that this
+sandbox cannot exercise (its QEMU delivers QMP pointer events but not key events, the same reason
+the PS/2 fixture cannot run here), so USB-036..USB-038 waited for CI. Run
+[39655463587](https://github.com/NeXuS4Dev/NOLX/actions/runs/39655463587) on `01c5aa3` passed all
+19 jobs, including that step on PC and Q35, so all three are `tested-T2`. Getting there also
+repaired two defects the fixtures found: a hub class request that consumed the hub's own
+status-change completion left the pipe unarmed (the completion is now replayed into a fresh
+transfer), and the leaf-first sweep retried a quarantined device's Disable Slot behind the repair
+path's back (the sweep now touches only `Retiring` devices). **M9 is not complete:** the open
+gates are `_PRT`/`_SRS` beyond segment zero, native nonzero-segment PCI, the embedded-controller
+handshake and a firmware-exercised region write, and device power/S3. SuperSpeed HID reports and
+hub nesting beyond one tier also remain open.
+
+M9 blocking input wait checkpoint (2026-10-21): `poll(2)` on `\Device\InputN` is now a real
+scheduler block instead of a suggestion to call it again. The syscall validates the caller's
+eight-byte `struct pollfd` array once, at call time, in the calling address space (`count` 1..8,
+`EINVAL`/`EFAULT` otherwise), answers immediately when something is ready or the timeout is zero,
+and otherwise records the request on the process and marks it blocked; the idle loop re-evaluates
+every suspended request after the producers have run, writes `revents` back for every entry, sets
+the return value in the saved frame and wakes the thread. `POLLNVAL` covers stdio and descriptors
+this kernel does not serve, `POLLIN` means a record or a pending resynchronisation is there, and
+`read(2)` keeps its own contract: still non-blocking, still `EAGAIN` on an empty queue. Readiness
+is a query, not a reservation — asking twice does not consume the record
+(`nlox-input-core::objects::Registry::ready`). A defect the ring-3 program found is worth naming:
+`PollFd::encode` used to zero `revents`, so the kernel computed the answer and then threw it away,
+which reported a ready descriptor as quiet. The ring-3 fixture `inputwait`
+(`hal-input-wait-test`) polls 20 ms (must expire with zero), then blocks for five seconds; the
+harness injects pointer motion only after `input: poll blocked ... timeout=5000ms` appears, and
+the program exits 42 only when the wake reports one ready descriptor with `POLLIN` and the
+following `read(2)` returns the injected record byte for byte. A machine with no USB pointer
+reports the phase as skipped and keeps booting. INP-010..INP-012 cover the contract, the block and
+that honesty test; the fixture is `scripts/check-input-poll.py`. All three are `tested-T2` in run [39671976393](https://github.com/NeXuS4Dev/NOLX/actions/runs/39671976393) on `5d3707d`, which passed all 19 jobs — the same run that promoted the hub assertions, on the first commit that carried both gates.
+
 ## M10 — POSIX conformance waves
 
 Each wave is a numbered, testable set of System Interfaces functions.
@@ -1277,3 +1331,262 @@ passed all nineteen jobs; PCI-036 is `tested-T1` and PCI-037 `tested-T2`, and th
 conformance database holds 406 assertions. Segment zero/root bus zero and the verified
 ByteAcc PIRQ profile only; general link reprogramming, nonzero-segment binding, USB hubs,
 Executive input bindings and device power/S3 remain open. M9 is not complete.
+
+
+M9 interrupt-vector exhaustion checkpoint (2026-10-21): the shared vector domain is now
+exercised end to end for every native kind, not only the three storage transports. The xHCI
+transport gained a boot-time fixture (`hal-xhci-exhaust-test`): it stops the enumerated
+controller, proves the checked stop retired eight DMA pages and the MMIO window, has a
+synthetic handle take all 128 candidates of the xHCI pool, and requires the start with no
+vector to fail as `NoVector` with the DMA and MMIO baselines unchanged, the framework in
+`Failed`, and every held claim still owned by the synthetic handle. Recovering, releasing
+the pool, and restarting must take a vector and restore the exact DMA/MMIO baselines; stopping
+and removing must return every page. `scripts/check-xhci-lifecycle.py --mode exhaust` drives
+it on PC and Q35 without QMP input, and the existing lifecycle modes are unchanged.
+
+The e1000 route manager now reports exhaustion distinctly: `acquire_pci_route` returns a
+`RouteError` whose `NoVector` case comes only from the vector claim, so an exhausted pool can
+never be mistaken for an unprogrammable route. Its recovery fixture takes the whole shared
+INTx pool, requires `NoVector` on the start, no route reference, no DMA/MMIO leak and no
+stolen claim, then releases the pool and requires a clean start with a fresh route. The
+virtio-net recovery fixture does the same for both queue kinds and requires the released
+pair to be reclaimed. Storage already had this coverage.
+
+A second boot fixture, `scripts/check-absent-devices.py`, boots the default image with no
+storage, USB or network controller: all six native drivers must refuse with their own
+reason (`NoDevice`/`NoController`/`no controller on the PCI bus`), no block request may be
+dispatched, nothing may report a framework start, and initialization must still complete.
+
+The sandbox build path was also repaired, because it had been silently wrong rather than
+merely inconvenient. `arena-rust-toolchain` installs a 4 KB stub unless the `[all]` extras
+are requested, and `scripts/bootstrap-rust.sh` did not request them or check the result; it
+now installs every payload part, extracts with `zstd` or the Python module, and fails loudly
+when no compiler appears. The checked-in freestanding helpers in `.nolx-deps/stubs` were bare
+`ret` instructions, so LLVM's `memset` for the 16 MiB frame-map fill wrote nothing and the
+machine reported zero usable frames; they are now real `rep movsb`/`rep stosb` implementations,
+assembled from `kernel_stubs.S` on every build by `scripts/nolx-env.sh`. The fallback link also
+became `-static -no-pie` (no `.interp` a Multiboot loader never resolves), and the boot
+trampoline now enables SSE before long mode, because the host target's `core` library is
+compiled with it and the first core-library `movups` raised #UD. With those three fixes the
+tree builds and boots under the pinned 1.97.0 toolchain on the host-target fallback.
+
+Local evidence for this checkpoint: the xHCI exhaust fixture passed on both PC and Q35 with
+QEMU 11.1.50 (128 candidates, `NoVector` refusal, reacquisition, final DMA 0), the
+absent-device fixture passed on both machines, a mixed virtio-blk/AHCI/NVMe/xHCI-keyboard boot
+dispatched and completed 1221 block requests with all three retained reads verified, and the
+untouched boot self-tests, 832 host tests, `cargo fmt`, host Clippy, the filesystem/ELF/safety
+checks and the conformance check passed. The e1000/virtio-net fixtures could not run here because this
+QEMU build has no user-mode network backend, so their first execution is CI. The e1000
+`NoVector` distinction and the two network phases compile under their feature sets. This
+closes the missing xHCI and network exhaustion fixtures behind PCI-031; it does not close
+general interrupt-resource reclamation, nonzero-segment binding, USB hubs/SuperSpeed/hotplug,
+Executive input bindings, the remaining AML providers or device power/S3. PCI-031 stays
+`pending-T2` until the CI run for this revision passes. **M9 is not complete.**
+
+
+M9 kernel-stack overflow checkpoint (2026-10-21): the seven CI jobs that had been red since
+`8036bf7b` — *Native PCI BAR and nested bridge resource recovery*, *Multi-controller storage
+identity and lifecycle*, *ACPI S5, six-driver shutdown and fail-closed DMA refusal*, *AHCI and
+NVMe checked failure recovery*, *Multi-adapter network wire identity and lifecycle*,
+*Persistent five-driver hardware lifecycle* and *Virtio-blk checked failure recovery* — were
+all one bug, and it was not in any of the subsystems they name.
+
+`AddressSpace::create_in_place` wrote every field of a new address space in place except the
+VAD tree, which it passed to `write()` as `VadTree::new(..)`. That argument is materialised as
+a by-value temporary — 256 node descriptors, 0x6800 bytes — and `spawn_impl` runs on the
+*calling* process's kernel stack. Those stacks were 32 KiB, so the first ring-3 spawn (init
+creating its child) wrote a 26 KiB frame that started 0x30 bytes above the top of slot 0's
+stack and ran into `.bss`, overwriting `blockdev::BINDINGS` — its mutex word (0 → 1) and five
+binding records. Every later block request then spun at the `lock cmpxchg` in
+`blockdev::device` with interrupts masked. The fixtures were not timing out on I/O; they were
+waiting forever on a mutex that a stack overflow had welded shut, with no panic and no output.
+
+The evidence is a hardware watchpoint on the *virtual* address of the binding-table lock
+(`memcpy+0x8`, `rdx = 0x6800`, destination above the stack top, called from
+`create_in_place`), QMP dumps of the whole `BINDINGS` object before and after the ring-3 window
+showing exactly the eight changed bytes, and the `.bss` neighbourhood that explains why the
+same corruption looked like e1000 route refusal and like an S5 quiesce failure.
+
+The fix is in `kernel/src/exec/user/mod.rs`: kernel stacks are 128 KiB, each stack is banded by
+4 KiB of `NOLXSTAC` sentinels on both ends (a narrow band would have been stepped over — the
+observed write began 0x30 bytes past the top), and the bands are checked in `spawn_impl`
+immediately after `create_in_place` and in `exit_current`. Rebuilt at the old 32 KiB size, the
+fixture that used to hang now stops with `spawn from process slot 0 overflowed its kernel
+stack`; at 128 KiB the boot is clean.
+
+Verification: CI run [39609375684](https://github.com/NeXuS4Dev/NOLX/actions/runs/39609375684)
+on `e16ee67` passed all 19 jobs on 2026-10-21, the first fully green run since `ab2a8d05`. The
+same run is the first execution of the network exhaustion phases on a revision whose statics
+are intact, so PCI-031 moves from `pending-T2` to `tested-T2`; the conformance database holds
+408 assertions with none waiting for a T2 result. Locally (QEMU 11.1.50, Rust 1.97.0) the
+virtio-blk, AHCI and NVMe checked-recovery fixtures, the nine non-NIC storage-multi profiles,
+the three storage legs of driver-lifecycle, power-s5 on PC and Q35, and absent-devices all
+pass; this sandbox's QEMU has no user-mode network backend, so the e1000/virtio-net fixtures
+and the NIC profiles remain CI-only. Still open, unchanged: general `_PRT`/link `_SRS`
+reprogramming beyond segment zero, native nonzero-segment binding, USB hubs/SuperSpeed/hotplug,
+Executive input bindings, remaining AML providers and device power/S3. **M9 is not complete.**
+
+
+M9 Executive input-bindings checkpoint (2026-10-21): input devices are Executive objects. Each
+device the kernel input registry attaches publishes a new `InputDevice` type at
+`\Device\InputN`, with the four properties the completion gate asked for.
+
+The namespace holds only names the binding itself produces: the type's create hook refuses any
+name outside the sixteen it owns, so nothing else can call itself an input device, and a
+disconnect withdraws the binding so a stale path cannot resolve to a retired incarnation. The
+descriptor names SYSTEM as owner, refuses POSIX user 1001 before considering grants, and grants
+user 1000 `READ | SYNCHRONIZE`; the type's access mask carries no `WRITE` bit, so no handle can
+ever inject input — producers stay kernel drivers. The self test also asserts that a
+low-integrity token is *allowed*, because an input report is not lower-integrity data and the
+descriptor deliberately carries no label.
+
+`spawn` opens one handle per published device into the new process's own handle table under the
+process token, and `exit` closes them, with the ring-3 spawn reporting
+`input executive: init holds 2 input handle(s) from spawn`. Readiness is per device, auto-reset
+and interrupt-safe: the publication path sets an atomic flag before the record becomes
+observable, the first waiter to observe it clears it, and a draining reader clears it again, so
+two waiters can never act on one event.
+
+Boot evidence from `NOLX: input executive selftest` on PC and Q35 under QEMU 11.1.50 in this
+sandbox: two objects published, `\Device\Input0` granted read+synchronize, user 1001 refused
+without leaving a handle, a write open refused with `UnsupportedAccess`, idle → signaled →
+consumed → drained verified, two process handles installed and released, and the object's
+reference counts returning to 1 -> 1. The self test asserts each of those rather than printing
+markers, and asserts that nothing was published on a machine with no input device. INP-004 and
+INP-005 are `tested-T2`; the conformance database holds 414 assertions with none waiting for a
+T2 result. Not claimed: a `read(2)`-shaped syscall and a scheduler-blocking wait — the binding
+is the layer below them, and that interface remains an open M9 item along with link
+reprogramming beyond the verified segment-zero profile, nonzero-segment binding, USB
+hubs/SuperSpeed/hotplug, the remaining AML providers and device power/S3. **M9 is not
+complete.**
+
+### M9 firmware resource decoding (2026-10-21)
+
+Before the AML operation-region providers can be built, the resources a firmware method returns
+have to be read the way the firmware writes them. The catalog decoder had been written from the
+descriptor *shapes* rather than from a template: Word (0x88) and DWord (0x87) address-space
+descriptors were taken to carry their minimum one width earlier than they do, QWord windows were
+handled separately, and an extended interrupt descriptor (0x89, fourteen bytes for three lines)
+was confused with a twenty-three byte address window. A PC boot showed the cost: the PCI root's
+own `_CRS` was refused with `InvalidRange`, all six interrupt-link devices with `InvalidLength`,
+the floppy controller with `Unsupported(42)`, and `9 resource results, 8 refusals`.
+
+The layout was settled from data rather than memory. A booted PC's DSDT was dumped out of guest
+RAM through QMP `pmemsave` (8599 bytes at `0x1ffe0040`), and each `_CRS` buffer was walked
+descriptor by descriptor. The offsets that satisfy the specification's own postcondition — with a
+non-zero length, `_MAX` must equal `_MIN + _LEN - 1` — are unambiguous: the payload is resource
+type, general flags, type flags, then five width-sized values (granularity, minimum, maximum,
+translation, length), which is `3 + 5 * width` bytes, hence 13 / 23 / 43. Read that way the root's
+bus descriptor is 0..255 with a length of 256 and its I/O and memory windows land on the real
+hardware addresses; read one width earlier they collapse into `0..0xFF00` and fail their own
+check, which is exactly the noise the boot log showed.
+
+`parse_resources` now decodes all three width forms through one function, refuses subtractive
+decode, a non-zero granularity or a non-zero translation instead of flattening them into a plain
+range, requires the window's own consistency, and keeps I/O ranges 32-bit end to end so a full
+64 KiB window is not truncated. Two descriptor kinds that real firmware emits were missing and are
+now modelled: the extended interrupt descriptor (0x89) becomes an IRQ mask — its count must match
+its length, and a line above 63 is refused rather than truncated — and the DMA descriptor (0x2A)
+becomes a channel mask. The mask widened to 64 lines because a Q35 root port publishes GSIs 16 and
+above, which a 16-bit mask cannot hold.
+
+One consequence had to be handled with it: the PCI root bridge is itself a catalog device, and its
+`_CRS` lists the apertures it *produces*. Reserving those as if they were device reservations
+emptied the very pool they define, because a reservation that covers a pool's whole free list
+leaves nothing allocatable. The catalog now records the root bridge's identity and allocation
+skips it, printing `pci: \_SB_.PCI0 root _CRS apertures govern the pool, not reserved as device
+resources`.
+
+Evidence, all from this sandbox (QEMU 11.1.50) on this revision: 105 `nolx-power-core` host tests
+pass, including one that decodes the real 156-byte `\_SB.PCI0._CRS` and requires the strict
+host-bridge decoder to agree with it about the same bytes. The PC boot now reports
+`\_SB_.PCI0 _CRS evaluated and decoded: 7 resources`, one line per link device, `16 resource
+results, 1 refusals` (the remaining refusal is the unrelated HPET `_STA`), authorizes
+`128 INTx rows` and completes ring-3 execution; Q35 reports `27 resource results, 1 refusals`.
+The absent-device fixture (pc, q35), all four virtio-blk recovery profiles (two unchanged-media
+boots each, host-mounted files, CRC `0x9ea14b00`) and the AHCI/NVMe recovery paths pass on this
+revision. CI has not run on this revision yet, so PWR-022..PWR-025 are recorded as verified in the
+sandbox and pending CI.
+
+Then the providers themselves. `aml::FieldLocation` now resolves a `Field` element either to the
+PCI configuration byte it always supported or to a region field — space, byte address, bit width,
+bit shift and the unit width its access flags declare — and a `RegionFieldReader` provider serves
+`SystemMemory`, `SystemIo` and `EmbeddedControl` spaces. The evaluator keeps the masking and
+shifting: a provider is asked only for naturally aligned units, only inside the region the table
+declared, and only after the field's alignment and bounds have been checked, so a provider cannot
+widen a field or be talked into an address outside it. Every region read is journaled in
+`MethodEffects::region_reads`, because the value a method computed now depends on live hardware.
+
+The kernel's provider (`kernel/src/hal/aml_region.rs`) answers only for windows another validated
+table named: the HPET register block from the ACPI HPET table, mapped through the MMIO window
+(0xFED0_0000 sits above the two-gigabyte direct map), and the FADT's PM1a control block as ports.
+That turned the last refusal on both machines into a real result: the HPET device's own `_STA`
+reads its vendor and period registers through the region, so a PC boot now reports
+`\_SB_.HPET _STA=0xf, defaulted=false`, `17 resource results, 0 refusals`, and Q35 reports
+`28 resource results, 0 refusals`, both completing ring-3 execution. Region writes then follow the same discipline the PCI
+byte writes already used: a `Field` store becomes an intent only when the caller declared a
+permission for that exact field *and* value, the intent is journaled with the value masked to the
+field width, and applying the journal re-checks every permission, reads each field before
+writing, verifies the readback and restores attempted writes in reverse order when anything
+fails. The kernel backend writes only inside the windows it already authorized, through the
+mapped region or the port primitives. What that does **not** buy yet is firmware coverage: no
+PC/Q35 method in this profile writes a region field, so the write path is host-tested rather than
+boot-exercised (`PWR-028`), and an embedded controller still needs a handshake this kernel does
+not have, so it is refused rather than faked.
+PWR-026 is `tested-T1` and PWR-027 `tested-T2`; run
+[39620576799](https://github.com/NeXuS4Dev/NOLX/actions/runs/39620576799) on `528f4f4` passed all 19
+jobs. **M9 is not complete.**
+
+Then the interface a program can actually call. The Executive binding published
+`\Device\InputN` and gave each spawned process a handle to it, but ring 3 still had no way to
+*read* a device: `read(2)` went straight to the `tmpfs` descriptor table. The read path now
+exists, and it is deliberately thin, because the layer below it was already correct:
+
+* `open(2)` resolves the path as an **Executive** name. It is not a VFS inode: `stat`,
+  `readdir` and `unlink` should not have to answer questions about a keyboard. The DACL check
+  runs through the same object `open` the spawn path uses, so a refused token leaves no
+  descriptor behind, and any flag combination other than `O_RDONLY` is `EACCES`.
+* Each descriptor owns its **own** reader, bound to the device *incarnation* rather than the
+  name. Two processes that open the same device cannot steal each other's records, and a
+  device that disconnects and is replaced by a later `\Device\Input0` drains its own queue and
+  then returns zero bytes instead of resolving to whatever reused the name.
+* `read(2)` returns exactly one **eight-byte record**, defined in `nolx-input-core::wire`:
+  class, source, a 16-bit little-endian code (HID usage or button mask) and a 32-bit value
+  (1/0 for a key, signed `dx`/`dy` halves for a pointer, a saturating dropped count for a
+  resync). The record exists so a program can compare it byte for byte; the resync class is
+  what keeps a lost-record report from being mistaken for an event.
+* `close(2)` releases the reader, and a later `read(2)` on that number is `EBADF` rather than
+  falling through to the VFS. `exit` releases whatever the process still held, because a
+  reader outliving its process would queue records nobody can drain.
+* An empty queue is `EAGAIN`. It is *not* a blocking wait: sleeping on the device's auto-reset
+  waitable needs a scheduler transition the syscall path does not have yet, and pretending
+  otherwise would be worse than the honest poll. That remains open.
+
+The new ring-3 image `inputread` is the evidence, and it is written so it cannot pass by
+accident. It opens the device the kernel names in `argv[1]`, polls `read(2)` until a record
+arrives, requires the **press** record to carry class 1 (keyboard), source 1 (PS/2), a nonzero
+usage and value 1, then requires the **release** record to carry the same usage and value 0,
+closes the descriptor, and requires the next `read(2)` on it to be `EBADF`. Only then does it
+exit 42. The kernel records that status, counts the bytes the program wrote, and requires the
+descriptor table to be empty before it prints
+`NOLX: input read(2) T2: ring-3 open/read/close on the PS/2 keyboard device returned the
+injected press and release records`.
+
+The key itself is not fabricated by the kernel: `scripts/check-ps2-input.py --read-t2` waits for
+the phase's "send one key now" line and only then sends a QMP `send-key`, so the record travels
+the real path — i8042, IRQ1, the scancode decoder, the producer, the registry, the descriptor's
+reader, `read(2)`, ring 3. That ordering is not a detail: the first CI attempt failed with
+`status=2` because the fixture's pre-injection gate waited for the kernel's 100-tick marker,
+which is printed by the idle loop — and a running user thread keeps the idle loop off the CPU,
+so the marker only appears after the phase is over. The gate now waits for the phase's own
+"send one key now" line, which is printed before the program polls.
+
+Two limitations are stated rather than hidden. The QEMU built for this sandbox has **no display
+backend** (`-display help` lists only `none`), so `send-key` has no route into the i8042 and even
+the pre-existing `check-ps2-input.py` fails here; the syscall path was verified locally by
+publishing the record through the same producer entry point (status 42, 48 bytes written,
+descriptor table empty, marker printed), and the QMP-keyed fixture is what CI runs. Run
+[39633910912](https://github.com/NeXuS4Dev/NOLX/actions/runs/39633910912) on `7f0d208` passed
+all 19 jobs with the new step in it, so INP-007/INP-008 are `tested-T2`. The second limitation
+is the descriptor's shape: `read(2)` on an empty queue is `EAGAIN`, not a sleep, because the
+syscall path has no scheduler transition onto the device's auto-reset waitable yet.

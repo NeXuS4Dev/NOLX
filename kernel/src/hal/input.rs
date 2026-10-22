@@ -2,12 +2,17 @@
 //! Producers never call consumers. Console reads are one subscription, outside the state lock.
 use crate::sync::IrqMutex;
 use nolx_hal_core::console::HalConsole;
-pub use nolx_input_core::objects::{Class, DeviceId, Error, Info, Location, Read, ReaderId};
+pub use nolx_input_core::objects::{
+    Class, DeviceId, Error, Info, Location, Read, ReaderId, Readiness,
+};
 use nolx_input_core::{
     events::{Kind, Source},
     objects::Registry,
 };
 const DEVICES: usize = 16;
+/// The Executive binding: names, security, handles and the waitable for these objects.
+pub(crate) mod executive;
+pub(crate) use executive::{bind_process, process_token, release_process};
 struct State {
     registry: Registry<DEVICES, 32, 64>,
     console: [Option<(DeviceId, ReaderId)>; DEVICES],
@@ -48,6 +53,10 @@ pub fn subscribe(id: DeviceId) -> Result<(ReaderId, Info), Error> {
 pub fn read(reader: ReaderId) -> Result<Read, Error> {
     STATE.lock().registry.read(reader)
 }
+/// Whether a `read` on `reader` would return a record now, without consuming it.
+pub fn ready(reader: ReaderId) -> Result<Readiness, Error> {
+    STATE.lock().registry.ready(reader)
+}
 /// Close a reader. Its generation is invalid even if the slot is subsequently reused.
 pub fn close(reader: ReaderId) -> Result<(), Error> {
     STATE.lock().registry.close(reader)
@@ -75,13 +84,32 @@ pub(super) fn register(
     state.console[index] = Some((id, reader));
     drop(state);
     let _=writeln!(console,"input: object attached device={}:{} source={source:?} class={class:?} location={location:?}",id.slot(),id.generation());
+    // The Executive object is best-effort: a namespace or header shortage must not take the
+    // kernel-side device with it, so a refusal is reported and the object still works.
+    match executive::publish(id, class) {
+        Ok(name) => {
+            let _=writeln!(console,"input: executive object \\Device\\{name} published type={} access=read|synchronize",executive::TYPE_NAME);
+        }
+        Err(error) => {
+            let _ = writeln!(console, "input: executive binding refused: {error:?}");
+        }
+    }
     Ok(id)
 }
 pub(super) fn publish(id: DeviceId, kind: Kind) -> Result<(), Error> {
-    STATE.lock().registry.publish(id, kind)
+    let published = STATE.lock().registry.publish(id, kind);
+    if published.is_ok() {
+        // Set the waitable before the record is observable, so a waiter that wakes on it can
+        // always read the report that made it ready.
+        executive::signal(id);
+    }
+    published
 }
 pub(super) fn disconnect(id: DeviceId) -> Result<(), Error> {
-    STATE.lock().registry.disconnect(id)
+    let result = STATE.lock().registry.disconnect(id);
+    // The name goes away with the device: a stale path must not find a retired incarnation.
+    executive::withdraw(id);
+    result
 }
 /// Consume console subscriptions through the public read API, without holding the registry
 /// while printing. Other readers retain their own queues and disconnected object references.
@@ -126,7 +154,12 @@ pub fn report_events(console: &mut dyn HalConsole) {
                     );
                     break;
                 }
-                Ok(Read::Empty) => break,
+                Ok(Read::Empty) => {
+                    // Drained: the device is no longer ready, which is the auto-reset half of
+                    // the waitable's contract.
+                    executive::reset(id);
+                    break;
+                }
                 Err(error) => panic!("input console stale subscription: {error:?}"),
             }
         }
@@ -138,4 +171,46 @@ mod tests;
 #[cfg(feature = "hal-input-object-test")]
 pub fn hardware_selftest(console: &mut dyn HalConsole) {
     tests::step(console);
+}
+
+/// Publish the Executive objects of devices that attached before the Object Manager was up.
+///
+/// The controller probes run before `obj::init` registers the built-in types, so a HID device
+/// that finishes enumeration during a probe has its binding refused with `UnknownType` and
+/// never retries. That leaves it readable through the kernel console and *unopenable* by name,
+/// which is the difference between the console and a program. This pass runs once the namespace
+/// exists and gives every such device the name it should have had.
+pub fn publish_unbound(console: &mut dyn HalConsole) {
+    let mut pending = [None; DEVICES];
+    {
+        let state = STATE.lock();
+        for (index, info) in state.registry.devices().enumerate().take(DEVICES) {
+            if info.connected && executive::name_of(info.id).is_none() {
+                pending[index] = Some((info.id, info.class));
+            }
+        }
+    }
+    for (id, class) in pending.into_iter().flatten() {
+        let slot = id.slot();
+        let generation = id.generation();
+        match executive::publish(id, class) {
+            Ok(name) => {
+                let _ = writeln!(
+                    console,
+                    "input: deferred object \\Device\\{name} published device={slot}:{generation} class={class:?}"
+                );
+            }
+            Err(error) => {
+                let _ = writeln!(
+                    console,
+                    "input: deferred binding refused device={slot}:{generation} class={class:?}: {error:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Run the Executive binding's boot checks. Called once from the kernel idle loop.
+pub fn executive_selftest(console: &mut dyn HalConsole) {
+    executive::selftest(console);
 }

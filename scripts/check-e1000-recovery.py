@@ -58,6 +58,15 @@ def boot(qemu, kernel, machine):
                    'deliberately withheld PCI exclusion proof pinned DMA despite actual bus-master disable',
                    'inconclusive remask readback quarantined GSI']:
         assert f'e1000-recovery: {marker}' in text, text
+
+    # Interrupt-vector exhaustion: the whole bounded pool held by a synthetic owner, a start
+    # that must be refused as NoVector, and a released pool that must be reclaimed.
+    exhaustion = re.search(
+        r'e1000-recovery: exhausted (\d+) vector\(s\) refused start as NoVector with no '
+        r'route reference or DMA/MMIO leak; released pool was reclaimed', text)
+    assert exhaustion, text
+    exhausted = int(exhaustion.group(1))
+    assert 0 < exhausted <= 256, exhaustion.group(0)
     route_release = re.search(
         r'e1000-recovery: shared GSI (\d+) vector (0x[0-9a-f]+) released only after last checked stop',
         text,

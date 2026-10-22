@@ -54,14 +54,26 @@ fi
 STUBS_DIR="$REPO_ROOT/.nolx-deps/stubs"
 LINKER_SCRIPT="$REPO_ROOT/kernel/linker.ld"
 
+# The boot trampoline, the interrupt stubs and the freestanding runtime helpers are assembled
+# from source on every kernel build. Using the checked-in objects instead would let a stale
+# object outlive a change to boot/boot.S; that is exactly how a build once ran without SSE
+# enabled and faulted on the first `movups` the core library emitted.
+STUBS_BUILD="$REPO_ROOT/build/stubs"
+mkdir -p "$STUBS_BUILD"
+as --64 --fatal-warnings -o "$STUBS_BUILD/boot.o" "$REPO_ROOT/boot/boot.S"
+as --64 --fatal-warnings -o "$STUBS_BUILD/interrupts.o" "$REPO_ROOT/kernel/src/hal/interrupts.S"
+as --64 --fatal-warnings -o "$STUBS_BUILD/syscall.o" "$REPO_ROOT/kernel/src/hal/syscall.S"
+as --64 --fatal-warnings -o "$STUBS_BUILD/kernel_stubs.o" "$REPO_ROOT/.nolx-deps/stubs/kernel_stubs.S"
+
 export NOLX_KERNEL_RUSTFLAGS="-C panic=abort -C relocation-model=static -C code-model=kernel \
   -C link-arg=-nostartfiles \
   -C link-arg=-T$LINKER_SCRIPT \
-  -C link-arg=$STUBS_DIR/kernel_stubs.o \
-  -C link-arg=$STUBS_DIR/boot.o \
-  -C link-arg=$STUBS_DIR/interrupts.o \
-  -C link-arg=$STUBS_DIR/syscall.o \
-  -C link-arg=-Wl,--relax"
+  -C link-arg=$STUBS_BUILD/kernel_stubs.o \
+  -C link-arg=$STUBS_BUILD/boot.o \
+  -C link-arg=$STUBS_BUILD/interrupts.o \
+  -C link-arg=$STUBS_BUILD/syscall.o \
+  -C link-arg=-Wl,--relax \
+  -C link-arg=-static -C link-arg=-no-pie"
 
 # ---------------------------------------------------------------------------
 # 4. Convenience functions
