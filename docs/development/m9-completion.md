@@ -2023,8 +2023,8 @@ The tag proves only that the CPU, the page tables and the kernel stack survived;
 is in its post-firmware state. Host checks on this revision: 904 unit tests across
 `cargo test --lib --bins`, 434 conformance assertions, `cargo clippy --all-targets -- -D
 warnings` clean, and `cargo fmt --all -- --check` now clean (the earlier reported drift in
-`nolx-df-core`, `nolx-pci-core` and three kernel HAL files was formatted). CI has not run on
-this revision.
+`nolx-df-core`, `nolx-pci-core` and three kernel HAL files was formatted). The run recorded
+in the next section covers it.
 
 ## CI follow-up: legacy segment-zero planning and the unsafe audit (2026-10-22)
 
@@ -2081,3 +2081,10 @@ the conformance database is 435 assertions. The sandbox's QEMU build has no `use
 `check-pci-resources.py` itself (which needs four NICs and packet capture) cannot run here;
 CI is the executor for that fixture, and the local run is executable evidence for the
 planning defect only.
+
+**Result.** CI run [39769451515](https://github.com/NeXuS4Dev/NOLX/actions/runs/39769451515)
+on `568a222` passed all nineteen jobs, including the power job (S3 fixtures now require the
+resume tag), the AML job, the fmt/clippy/unsafe audit, and the native resource job with PC and
+Q35 fixtures at bridge depth 0, 1 and 2. That run is the T2 evidence behind PWR-028..PWR-031
+and PCI-024/PCI-026/PCI-038; the S3 gate itself stays open, because device state, the ACPI PM
+block and driver state are still not restored after a wake.
