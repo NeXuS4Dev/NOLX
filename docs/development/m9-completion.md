@@ -2354,6 +2354,12 @@ S3 modes (`--dstate`, `--dstate-refused`, `--with-devices --dstate`) on both mac
 unsafe audit (300 blocks, 0 missing SAFETY comments) and the conformance database at 450
 assertions with 0 problems.
 
+**CI.** Run [39919799716](https://github.com/NeXuS4Dev/NOLX/actions/runs/39919799716) on
+`0c541a8` passed **all 19 jobs**. The AML job now builds `hal-power-dstate-test` and runs the
+`dstate` fixture on PC and Q35; the power job runs `check-power-s3.py --dstate` and
+`--dstate-refused` after the no-device and device-backed profiles. PWR-041..PWR-045 are
+`tested-T2`, PWR-040 is `tested-T1`, and the database holds 450 assertions with 0 problems.
+
 **Still open.** Multi-CPU resume is not closable in M9 and is not claimed: `kernel/src/hal/apic.rs`
 only ever selects the BSP's local APIC and no AP is ever started, so there is no AP state to
 restore — AP startup is the M10 item named in `ROADMAP.md`. `_PS3` methods that toggle a device's
