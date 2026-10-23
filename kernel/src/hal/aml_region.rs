@@ -9,9 +9,11 @@
 //!
 //! Reads are real: memory through a mapped [`Region`], ports through the port primitives. Both
 //! are side-effect-free for the registers firmware inspects (`_STA` of an HPET device reads the
-//! vendor and period registers). Writes are not implemented here at all: the evaluator refuses
-//! a field write into a region, because a write is a hardware effect that needs its own
-//! permission model.
+//! vendor and period registers). Writes go through the same authorized windows: a field write is
+//! an intent until [`RegionFieldWriteBackend::write_field`] applies it with exact permission and
+//! a verified readback. An embedded-controller region is served through the standard EC handshake
+//! (RD_EC/WR_EC commands with IBF/OBF polling) once its ports are authorized, instead of being
+//! journaled only.
 
 use crate::mm::mmio;
 use nolx_power_core::aml::{
@@ -291,6 +293,225 @@ impl RegionWindows {
                 Ok(())
             }
             _ => Err(Error::Unsupported(0x5b80)),
+        }
+    }
+}
+
+/// The embedded controller's Status/Command port is two registers at one address: reads
+/// return status, writes latch a command. The Data port transfers bytes. Every poll is
+/// bounded, so a wedged EC fails the transaction instead of spinning the interpreter.
+const EC_COMMAND_READ: u8 = 0x80; // RD_EC: read the EC byte at an offset
+const EC_COMMAND_WRITE: u8 = 0x81; // WR_EC: write the EC byte at an offset
+const EC_STATUS_IBF: u8 = 0x02; // input buffer full: the EC has not latched the last byte written
+const EC_STATUS_OBF: u8 = 0x01; // output buffer full: the EC has a byte ready for the host
+const EC_POLL_LIMIT: u32 = 10_000; // bounded: a silent EC fails rather than hangs
+
+/// An operation-region provider for the ACPI embedded-controller space
+/// (`RegionSpace::EmbeddedControl`).
+///
+/// A field's address is the EC byte offset and only byte-wide access is supported: the EC
+/// transaction protocol transfers one byte at a time (command, offset, then data, each step
+/// guarded by the input/output buffer flags). Refuses every access until
+/// [`EcRegion::authorize_ec`] has been given a command/data port pair the kernel validated
+/// from firmware (the ECDT table or an EC device's resources); an EC is never defaulted to
+/// present.
+#[derive(Clone, Copy, Default)]
+pub struct EcRegion {
+    command: Option<u16>,
+    data: Option<u16>,
+}
+
+impl EcRegion {
+    /// No ports authorized: every embedded-controller access is refused.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            command: None,
+            data: None,
+        }
+    }
+
+    /// Authorize one command/data port pair. Refuses a degenerate pair or a second pair.
+    pub fn authorize_ec(&mut self, command: u16, data: u16) -> bool {
+        if command == data || self.command.is_some() {
+            return false;
+        }
+        self.command = Some(command);
+        self.data = Some(data);
+        true
+    }
+
+    /// Wait until the input buffer is empty so the EC can latch the next byte written.
+    fn wait_ibf_clear(command: u16) -> Result<(), Error> {
+        let mut count = 0u32;
+        while unsafe { super::inb(command) } & EC_STATUS_IBF != 0 {
+            count += 1;
+            if count >= EC_POLL_LIMIT {
+                return Err(Error::Unsupported(0x5b82));
+            }
+            core::hint::spin_loop();
+        }
+        Ok(())
+    }
+
+    /// Wait until the output buffer holds a byte for the host.
+    fn wait_obf_set(command: u16) -> Result<(), Error> {
+        let mut count = 0u32;
+        while unsafe { super::inb(command) } & EC_STATUS_OBF == 0 {
+            count += 1;
+            if count >= EC_POLL_LIMIT {
+                return Err(Error::Unsupported(0x5b82));
+            }
+            core::hint::spin_loop();
+        }
+        Ok(())
+    }
+
+    /// Read one EC byte at `offset`: command, then offset, then data, each step guarded by
+    /// the buffer flags.
+    fn read_byte(command: u16, data: u16, offset: u8) -> Result<u8, Error> {
+        Self::wait_ibf_clear(command)?;
+        // SAFETY: the command port was authorized from firmware-validated resources.
+        unsafe { super::outb(command, EC_COMMAND_READ) };
+        Self::wait_ibf_clear(command)?;
+        // SAFETY: the data port was authorized from firmware-validated resources.
+        unsafe { super::outb(data, offset) };
+        Self::wait_obf_set(command)?;
+        // SAFETY: as above, one data-byte read after OBF.
+        Ok(unsafe { super::inb(data) })
+    }
+
+    /// Write one EC byte at `offset`: command, offset, then value, each step guarded by the
+    /// input buffer flag.
+    fn write_byte(command: u16, data: u16, offset: u8, value: u8) -> Result<(), Error> {
+        Self::wait_ibf_clear(command)?;
+        // SAFETY: both ports were authorized from firmware-validated resources, and the input
+        // buffer was observed empty immediately before this command byte.
+        unsafe { super::outb(command, EC_COMMAND_WRITE) };
+        Self::wait_ibf_clear(command)?;
+        // SAFETY: as above, one data byte after the EC accepted the command.
+        unsafe { super::outb(data, offset) };
+        Self::wait_ibf_clear(command)?;
+        // SAFETY: as above, one data byte after the EC accepted the register offset.
+        unsafe { super::outb(data, value) };
+        Self::wait_ibf_clear(command)
+    }
+}
+
+impl RegionFieldReader for EcRegion {
+    fn read(&self, space: RegionSpace, address: u64, bytes: u8) -> Result<u64, Error> {
+        if space != RegionSpace::EmbeddedControl || bytes != 1 {
+            return Err(Error::Unsupported(0x5b82));
+        }
+        let (Some(command), Some(data)) = (self.command, self.data) else {
+            return Err(Error::Unsupported(0x5b82));
+        };
+        let offset = u8::try_from(address).map_err(|_| Error::Unsupported(0x5b82))?;
+        Self::read_byte(command, data, offset).map(u64::from)
+    }
+}
+
+impl RegionFieldWriteBackend for EcRegion {
+    type Error = Error;
+
+    fn read_field(&mut self, field: RegionField) -> Result<u64, Error> {
+        if field.space != RegionSpace::EmbeddedControl || field.access != 1 {
+            return Err(Error::Unsupported(0x5b82));
+        }
+        let offset = u8::try_from(field.address).map_err(|_| Error::Unsupported(0x5b82))?;
+        let (Some(command), Some(data)) = (self.command, self.data) else {
+            return Err(Error::Unsupported(0x5b82));
+        };
+        Self::read_byte(command, data, offset).map(u64::from)
+    }
+
+    fn write_field(&mut self, field: RegionField, value: u64) -> Result<(), Error> {
+        if field.space != RegionSpace::EmbeddedControl || field.access != 1 {
+            return Err(Error::Unsupported(0x5b82));
+        }
+        let offset = u8::try_from(field.address).map_err(|_| Error::Unsupported(0x5b82))?;
+        let value = u8::try_from(value).map_err(|_| Error::Unsupported(0x5b82))?;
+        let (Some(command), Some(data)) = (self.command, self.data) else {
+            return Err(Error::Unsupported(0x5b82));
+        };
+        Self::write_byte(command, data, offset, value)
+    }
+}
+
+/// All operation-region providers the kernel authorizes: the validated memory and I/O
+/// windows plus the optional embedded-controller handshake provider.
+///
+/// The reader answers a region by its space: `EmbeddedControl` goes to the EC handshake,
+/// everything else goes to the authorized windows. The writer applies region-field writes
+/// through [`apply_region_field_writes`]: exact-permission checked with a verified readback.
+/// A space with no provider is refused.
+#[derive(Clone, Copy)]
+pub struct FirmwareRegions {
+    windows: RegionWindows,
+    ec: EcRegion,
+}
+
+impl FirmwareRegions {
+    /// No provider authorized: every region access is refused.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            windows: RegionWindows::empty(),
+            ec: EcRegion::empty(),
+        }
+    }
+
+    /// Authorize and map a memory window (delegates to the windows provider).
+    pub fn authorize_memory(&mut self, physical: u64, length: u64) -> bool {
+        self.windows.authorize_memory(physical, length)
+    }
+
+    /// Authorize a port window (delegates to the windows provider).
+    pub fn authorize_io(&mut self, port: u64, length: u64) -> bool {
+        self.windows.authorize_io(port, length)
+    }
+
+    /// Authorize the embedded controller's command/data port pair.
+    pub fn authorize_ec(&mut self, command: u16, data: u16) -> bool {
+        self.ec.authorize_ec(command, data)
+    }
+
+    /// How many authorized memory/port windows this provider holds (the EC pair is separate).
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.windows.len()
+    }
+
+    /// Whether nothing at all is authorized: no window and no embedded controller.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.windows.is_empty() && self.ec.command.is_none() && self.ec.data.is_none()
+    }
+}
+
+impl RegionFieldReader for FirmwareRegions {
+    fn read(&self, space: RegionSpace, address: u64, bytes: u8) -> Result<u64, Error> {
+        match space {
+            RegionSpace::EmbeddedControl => self.ec.read(space, address, bytes),
+            _ => self.windows.read(space, address, bytes),
+        }
+    }
+}
+
+impl RegionFieldWriteBackend for FirmwareRegions {
+    type Error = Error;
+
+    fn read_field(&mut self, field: RegionField) -> Result<u64, Error> {
+        match field.space {
+            RegionSpace::EmbeddedControl => self.ec.read_field(field),
+            _ => self.windows.read_field(field),
+        }
+    }
+
+    fn write_field(&mut self, field: RegionField, value: u64) -> Result<(), Error> {
+        match field.space {
+            RegionSpace::EmbeddedControl => self.ec.write_field(field, value),
+            _ => self.windows.write_field(field, value),
         }
     }
 }

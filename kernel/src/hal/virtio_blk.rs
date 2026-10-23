@@ -307,6 +307,27 @@ fn start_device(dev: usize) -> bool {
 
 /// Complete/partial owners survive every refusal. A failed flush quarantines the source;
 /// explicit recovery resets it without retrying potentially unsafe or timed-out I/O.
+/// Print this handle's last bring-up outcome and diagnostic log.
+///
+/// The resume and recovery paths need to say *why* a controller did not come back, and the
+/// dispatch table's callbacks have no console. This reads only retained per-handle state.
+pub fn diagnose(console: &mut dyn HalConsole, dev: usize) {
+    let state = STATE[dev].lock();
+    state.log.replay(console);
+    match &state.outcome {
+        Some(Err(failure)) => {
+            let _ = writeln!(
+                console,
+                "virtio-blk: handle={dev} last bring-up refused: {failure:?}"
+            );
+        }
+        Some(Ok(())) => {
+            let _ = writeln!(console, "virtio-blk: handle={dev} last bring-up succeeded");
+        }
+        None => {}
+    }
+}
+
 /// Whether the last bring-up of this controller was refused because every interrupt
 /// vector this driver may own was taken by another controller.
 pub fn last_failure_was_no_vector(dev: usize) -> bool {

@@ -229,7 +229,9 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
         #[cfg(any(
             feature = "hal-power-test-s5",
             feature = "hal-power-test-s3",
-            feature = "hal-power-quiesce-test"
+            feature = "hal-power-s3-device-test",
+            feature = "hal-power-quiesce-test",
+            feature = "hal-power-dstate-test"
         ))]
         let mut power_test_started = false;
         loop {
@@ -442,12 +444,73 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
                 hal::power::quiesce_selftest(&mut console);
             }
 
-            #[cfg(feature = "hal-power-test-s3")]
+            // The device power-state fixture: transition a firmware-declared device to its
+            // low-power state and back, without a sleep, so the applied-and-verified write path
+            // is exercised on both board profiles rather than only under the S3 hand-off.
+            #[cfg(feature = "hal-power-dstate-test")]
             if memory_selftest_done && !power_test_started {
                 power_test_started = true;
-                // The dedicated S3 fixture has no DMA-capable devices; refuse rather than
-                // storing a sleep word while a bus master could still write memory.
-                if hal::power::test_vm_has_active_busmaster() {
+                hal::power::dstate_selftest(&mut console);
+            }
+
+            #[cfg(any(feature = "hal-power-test-s3", feature = "hal-power-s3-device-test"))]
+            if memory_selftest_done && !power_test_started {
+                power_test_started = true;
+                // Flush and stop every started driver before the sleep, keeping the records
+                // restartable so the wake path can re-take the same devices. Without this the
+                // sleep would be stored while a bus master could still write memory.
+                let suspended = match hal::power::suspend_devices(&mut console) {
+                    Ok(stopped) => {
+                        let _ = writeln!(
+                            console,
+                            "power: S3 pre-suspend: {stopped} controller(s) stopped, records retained"
+                        );
+                        true
+                    }
+                    Err(error) => {
+                        let _ = writeln!(
+                            console,
+                            "power: S3 refused: device suspend failed: {error:?}"
+                        );
+                        false
+                    }
+                };
+                // Firmware's own low-power transition comes after the driver quiesce: a driver
+                // that still owns the device would undo it. A refused transition aborts the
+                // sleep, because a device firmware would not power down can still be a bus
+                // master and the driver quiesce is not proof that it is not.
+                let mut powered_down = false;
+                if suspended {
+                    match hal::power::enter_device_low_power(&mut console) {
+                        Ok((transitioned, 0)) => {
+                            powered_down = true;
+                            if transitioned > 0 {
+                                let _ = writeln!(
+                                    console,
+                                    "power: pre-suspend device power transition: {transitioned} device(s) in firmware low power"
+                                );
+                            }
+                        }
+                        Ok((_, refused)) => {
+                            let _ = writeln!(
+                                console,
+                                "power: S3 refused: {refused} device power transition(s) refused"
+                            );
+                        }
+                        Err(error) => {
+                            let _ = writeln!(
+                                console,
+                                "power: S3 refused: device power transition failed: {error:?}"
+                            );
+                        }
+                    }
+                }
+                if !suspended {
+                    // A refused barrier or stop means a controller may still write memory; the
+                    // sleep word is not stored on the strength of the bus-master scan alone.
+                } else if !powered_down {
+                    // The refusal was reported above; the sleep word is not stored.
+                } else if hal::power::test_vm_has_active_busmaster() {
                     let _ = writeln!(console, "power: S3 refused: active PCI bus master");
                 } else {
                     hal::power::prepare_s3_resume(&mut console)

@@ -134,6 +134,10 @@ pub(crate) fn attach_prepared(
 pub fn state(dev: usize) -> Result<nolx_df_core::State, Error> {
     with_registry(|registry| registry.state(dev))
 }
+/// The driver name a handle was bound with, for diagnostics that outlive the probe.
+pub fn name(dev: usize) -> Result<&'static str, Error> {
+    with_registry(|registry| registry.driver_name(dev))
+}
 /// Whether a shutdown has frozen the registry's admission.
 pub fn frozen() -> bool {
     with_registry(|registry| Ok(registry.frozen())).unwrap_or(false)
@@ -201,6 +205,47 @@ pub fn remove(dev: usize) -> Result<(), Error> {
         }
         registry.remove(dev)
     })
+}
+
+/// Flush and stop every started device for a suspend, **without** closing admission.
+///
+/// This is the suspend half of S3: the records stay restartable, so a wake can bring the same
+/// devices back. Admission is still excluded across the whole operation (one registry checkout
+/// spans the barriers and every stop), every started driver must pass its durable barrier before
+/// any controller is stopped, stops run in reverse discovery order, and only a successful stop
+/// releases that handle's owned MMIO.
+pub fn suspend(console: &mut dyn HalConsole) -> Result<usize, Error> {
+    with_registry(|registry| {
+        registry.suspend(
+            |dev, name| {
+                let durable = match name {
+                    "virtio-blk" | "ahci" | "nvme" => super::blockdev::shutdown_flush(dev).is_ok(),
+                    "e1000" | "virtio-net" | "xhci" => true,
+                    _ => false,
+                };
+                let _ = writeln!(
+                    console,
+                    "power: suspend barrier handle={dev} driver={name} durable={durable}"
+                );
+                durable
+            },
+            |dev| {
+                // SAFETY: stop succeeded with hardware quiescence and detached software users;
+                // registry checkout excludes concurrent I/O, starts and callbacks.
+                unsafe {
+                    crate::mm::mmio::release_owned(dev);
+                }
+            },
+        )
+    })
+}
+
+/// Restart every stopped record after a suspended platform wakes.
+///
+/// Returns the number of controllers started and the number that refused. A refusal is not
+/// hidden: the caller must not treat a partially restored tree as usable.
+pub fn resume() -> Result<(usize, usize), Error> {
+    with_registry(|registry| registry.resume())
 }
 
 /// Irreversibly freeze all public transport admission and quiesce every started driver.

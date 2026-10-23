@@ -82,7 +82,13 @@ impl Path {
         p.0.pop();
         p
     }
-    fn child(&self, segment: [u8; 4]) -> Result<Self, Error> {
+    /// The name segments, root first.
+    #[must_use]
+    pub fn segments(&self) -> &[[u8; 4]] {
+        &self.0
+    }
+    /// Append one four-character name segment.
+    pub fn child(&self, segment: [u8; 4]) -> Result<Self, Error> {
         if self.0.len() == MAX_DEPTH {
             return Err(Error::Limit);
         }
@@ -737,6 +743,80 @@ fn restore_region_writes<B: RegionFieldWriteBackend>(
     restored
 }
 
+/// Apply a device power transition's region writes against the caller's authorized windows.
+///
+/// Unlike [`apply_region_field_writes`] this pins no values: the point of a `_PSx` method is that
+/// firmware programs its own device's power register, and the encoding is the firmware's. What
+/// still binds is everything that makes a write safe to attempt:
+///
+/// * the backend refuses any field outside a window the kernel authorized from a validated
+///   firmware table, before reading or writing anything;
+/// * every field is checked for self-consistency and no field may appear twice, so a rollback is
+///   always well defined;
+/// * each field is read before it is written, its readback is verified, and every write attempted
+///   so far is restored in reverse order if any step fails;
+/// * the journal is capped at [`MAX_FIELD_WRITES`].
+///
+/// The applied journal is returned so a caller can report what firmware actually wrote, rather
+/// than claiming a transition that produced no hardware effect.
+pub fn apply_region_field_writes_authorized<B: RegionFieldWriteBackend>(
+    effects: &MethodEffects,
+    backend: &mut B,
+) -> Result<Vec<RegionFieldWrite>, RegionWriteTransactionError<B::Error>> {
+    if effects.region_writes.len() > MAX_FIELD_WRITES {
+        return Err(RegionWriteTransactionError::Limit);
+    }
+    for (index, write) in effects.region_writes.iter().enumerate() {
+        if !valid_region_field(write.field) {
+            return Err(RegionWriteTransactionError::InvalidField);
+        }
+        if effects.region_writes[..index]
+            .iter()
+            .any(|previous| previous.field == write.field)
+        {
+            return Err(RegionWriteTransactionError::DuplicateField);
+        }
+    }
+    let mut previous = Vec::with_capacity(effects.region_writes.len());
+    for write in &effects.region_writes {
+        let before = match backend.read_field(write.field) {
+            Ok(value) => value,
+            Err(error) => {
+                if !restore_region_writes(backend, &previous) {
+                    return Err(RegionWriteTransactionError::RollbackFailed);
+                }
+                return Err(RegionWriteTransactionError::Read(error));
+            }
+        };
+        previous.push(RegionFieldWrite {
+            field: write.field,
+            value: before,
+        });
+        if let Err(error) = backend.write_field(write.field, write.value) {
+            if !restore_region_writes(backend, &previous) {
+                return Err(RegionWriteTransactionError::RollbackFailed);
+            }
+            return Err(RegionWriteTransactionError::Write(error));
+        }
+        match backend.read_field(write.field) {
+            Ok(value) if value == write.value => {}
+            Ok(_) => {
+                if !restore_region_writes(backend, &previous) {
+                    return Err(RegionWriteTransactionError::RollbackFailed);
+                }
+                return Err(RegionWriteTransactionError::ReadbackMismatch);
+            }
+            Err(error) => {
+                if !restore_region_writes(backend, &previous) {
+                    return Err(RegionWriteTransactionError::RollbackFailed);
+                }
+                return Err(RegionWriteTransactionError::Read(error));
+            }
+        }
+    }
+    Ok(effects.region_writes.clone())
+}
+
 /// Apply authorized region field writes, verify each readback, and roll back on failure.
 ///
 /// Every write is authorized and every field validated before the first backend operation, then
@@ -832,6 +912,9 @@ pub struct Namespace<'a> {
     integer_mask: u64,
     reader: Option<&'a dyn FieldReader>,
     regions: Option<&'a dyn RegionFieldReader>,
+    /// The provider that applies journaled region-field writes to hardware. Absent means the
+    /// writes stay intents and nothing is written.
+    region_writes: Option<&'a dyn RegionFieldWriteBackend<Error = Error>>,
 }
 impl Default for Namespace<'_> {
     fn default() -> Self {
@@ -854,6 +937,7 @@ impl<'a> Namespace<'a> {
             integer_mask: u64::MAX,
             reader: None,
             regions: None,
+            region_writes: None,
         }
     }
     /// Install a read-only provider; ordinary evaluation without one still refuses fields.
@@ -868,6 +952,17 @@ impl<'a> Namespace<'a> {
     pub fn set_region_reader(&mut self, regions: &'a dyn RegionFieldReader) {
         self.regions = Some(regions);
     }
+
+    /// Install the provider that applies operation-region field writes.
+    ///
+    /// A method's region writes are journaled intents until a writer is installed: then they
+    /// are applied through [`apply_region_field_writes`], exact-permission checked with a
+    /// verified readback. Without a writer the intents are dropped and no hardware write
+    /// occurs.
+    pub fn set_region_writer(&mut self, writer: &'a dyn RegionFieldWriteBackend<Error = Error>) {
+        self.region_writes = Some(writer);
+    }
+
     /// Notify a supported firmware interrupt-model method. Only the complete side-effect-free
     /// shape Store(Arg0, named integer) is accepted; validation precedes the single mutation.
     /// Absence is distinct from failure. No operation-region/global hardware writes occur.
@@ -910,6 +1005,14 @@ impl<'a> Namespace<'a> {
     /// Whether there are no objects (predefined scopes normally make this false).
     pub fn is_empty(&self) -> bool {
         self.objects.is_empty()
+    }
+    /// Whether the namespace holds an object at exactly this path.
+    ///
+    /// This is a static question: it distinguishes "the member does not exist" from "the member
+    /// exists and its evaluation failed", which no evaluation result can tell apart.
+    #[must_use]
+    pub fn contains(&self, path: &Path) -> bool {
+        self.objects.iter().any(|object| &object.path == path)
     }
     /// Device paths, without assuming their `_STA` result is usable.
     pub fn devices(&self) -> impl Iterator<Item = &Path> {
@@ -1366,6 +1469,51 @@ impl<'a> Namespace<'a> {
         permissions: &[PciFieldWritePermission],
     ) -> Result<MethodEffects, Error> {
         self.plan_device_method_with_regions(path, member, args, permissions, &[])
+    }
+
+    /// Plan a device method whose region writes are authorized by the caller's installed
+    /// windows rather than by exact values.
+    ///
+    /// This is the authority a device power transition needs: `_PS0` and `_PS3` program the
+    /// device's own power register, and this kernel cannot know the encoding firmware will use.
+    /// The bounds are elsewhere and still bind: the applying transaction refuses any field
+    /// outside a window the kernel authorized from a validated firmware table, journals every
+    /// write, verifies each readback and rolls back on failure, and the journal is capped at
+    /// [`MAX_FIELD_WRITES`]. An absent member is `Ok(None)`; a member that is present but is not
+    /// a method, or whose evaluation fails, is an error.
+    pub fn plan_device_method_authorized(
+        &self,
+        path: &Path,
+        member: [u8; 4],
+        args: &[Value],
+    ) -> Result<Option<MethodEffects>, Error> {
+        if !self
+            .objects
+            .iter()
+            .any(|o| &o.path == path && matches!(o.kind, Kind::Device))
+        {
+            return Err(Error::Type);
+        }
+        check_segment(&member)?;
+        let method = path.child(member)?;
+        let Some(index) = self.objects.iter().position(|object| object.path == method) else {
+            return Ok(None);
+        };
+        if !matches!(self.objects[index].kind, Kind::Method { .. }) {
+            return Err(Error::Type);
+        }
+        validate_arguments(args)?;
+        let mut steps = MAX_STEPS;
+        step(&mut steps)?;
+        let mut effects = EvaluationEffects::authorized_regions();
+        let result = self.run_method(index, args, 0, &mut steps, &mut effects)?;
+        Ok(Some(MethodEffects {
+            result,
+            reads: effects.reads,
+            writes: effects.writes,
+            region_reads: effects.region_reads,
+            region_writes: effects.region_writes,
+        }))
     }
 
     /// As [`Namespace::plan_device_method`], and additionally authorize exact region writes.
@@ -2010,8 +2158,8 @@ impl<'a> Namespace<'a> {
                                         (1u64 << field.bits) - 1
                                     };
                                     let value = value.integer()? & mask;
-                                    let allowed =
-                                        effects.region_permissions.is_some_and(|permissions| {
+                                    let allowed = effects.region_authorized
+                                        || effects.region_permissions.is_some_and(|permissions| {
                                             permissions.iter().any(|permission| {
                                                 permission.field == field
                                                     && permission.allows(value)
@@ -2186,6 +2334,10 @@ impl<'a> Namespace<'a> {
 struct EvaluationEffects<'a> {
     permissions: Option<&'a [PciFieldWritePermission]>,
     region_permissions: Option<&'a [RegionFieldWritePermission]>,
+    /// When set, any value may be written to a region field, because the caller is a device
+    /// power transition: the backend still refuses every field outside a window the kernel
+    /// authorized from validated firmware tables, and every write is journaled and read back.
+    region_authorized: bool,
     reads: Vec<PciFieldRead>,
     writes: Vec<PciFieldWrite>,
     region_reads: Vec<RegionFieldRead>,
@@ -2196,10 +2348,19 @@ impl<'a> EvaluationEffects<'a> {
         Self {
             permissions: None,
             region_permissions: None,
+            region_authorized: false,
             reads: Vec::new(),
             writes: Vec::new(),
             region_reads: Vec::new(),
             region_writes: Vec::new(),
+        }
+    }
+    /// Authority for a device power transition: region writes anywhere inside the windows the
+    /// caller authorized, with no PCI-config writes at all.
+    fn authorized_regions() -> Self {
+        Self {
+            region_authorized: true,
+            ..Self::read_only()
         }
     }
     fn with_region_permissions(
@@ -2209,6 +2370,7 @@ impl<'a> EvaluationEffects<'a> {
         Self {
             permissions: Some(permissions),
             region_permissions: Some(regions),
+            region_authorized: false,
             reads: Vec::new(),
             writes: Vec::new(),
             region_reads: Vec::new(),
@@ -2218,7 +2380,7 @@ impl<'a> EvaluationEffects<'a> {
 
     /// Whether any write intent is allowed to be produced at all.
     fn planning(&self) -> bool {
-        self.permissions.is_some() || self.region_permissions.is_some()
+        self.permissions.is_some() || self.region_permissions.is_some() || self.region_authorized
     }
 }
 struct Frame {

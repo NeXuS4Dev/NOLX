@@ -744,8 +744,12 @@ jobs:
         run: make kernel 2>&1 | tee /tmp/job.log
       - name: Verify a machine without storage, USB or network controllers falls back cleanly
         run: python3 scripts/check-absent-devices.py 2>&1 | tee -a /tmp/job.log
+      - name: Verify an xHCI controller with empty root ports binds no USB device
+        run: python3 scripts/check-absent-devices.py --with-xhci-but-no-devices 2>&1 | tee -a /tmp/job.log
       - name: Verify PC and Q35 boot-HID input, ring wrap and disconnect reclamation
         run: python3 scripts/check-usb-input.py 2>&1 | tee -a /tmp/job.log
+      - name: Verify refused SuperSpeed slots give their port back while the USB2 peer stays live
+        run: python3 scripts/check-usb-ss-recovery.py 2>&1 | tee -a /tmp/job.log
       - name: Verify a USB 2.0 hub descriptor, route strings, hub-port hotplug and subtree teardown
         # Keep the fixture's stderr separate: the serial dump it prints on the way out fills any
         # annotation built from the combined stream, and the assertion is what has to be read.
@@ -979,6 +983,8 @@ jobs:
         run: |
           make kernel KERNEL_FEATURES=hal-aml-test 2>&1 | tee /tmp/job.log
           cp build/nolx.elf build/nolx-aml.elf
+          make kernel KERNEL_FEATURES=hal-power-dstate-test 2>&1 | tee -a /tmp/job.log
+          cp build/nolx.elf build/nolx-dstate.elf
           make kernel 2>&1 | tee -a /tmp/job.log
       - name: Evaluate SeaBIOS DSDT and SSDT methods, malformed tables and no-ACPI fallback
         run: python3 scripts/check-aml.py 2>&1 | tee -a /tmp/job.log
@@ -1013,6 +1019,14 @@ jobs:
         run: make kernel KERNEL_FEATURES=hal-power-test-s3 2>&1 | tee -a /tmp/job.log
       - name: Observe S3 suspend and platform wake through QMP
         run: python3 scripts/check-power-s3.py 2>&1 | tee -a /tmp/job.log
+      - name: Build device-backed S3 suspend and resume test
+        run: make kernel KERNEL_FEATURES=hal-power-s3-device-test 2>&1 | tee -a /tmp/job.log
+      - name: Suspend a real device, restore and verify it after the wake
+        run: python3 scripts/check-power-s3.py --with-devices 2>&1 | tee -a /tmp/job.log
+      - name: Apply firmware _PS3 before the sleep and _PS0 after the wake
+        run: python3 scripts/check-power-s3.py --dstate 2>&1 | tee -a /tmp/job.log
+      - name: Refuse a power transition outside every authorized window, and the sleep
+        run: python3 scripts/check-power-s3.py --dstate-refused 2>&1 | tee -a /tmp/job.log
       - name: Build independent filesystem reader
         run: cargo build -p nolxfs-dump 2>&1 | tee -a /tmp/job.log
       - name: Verify six-driver quiescence and flush, stop and foreign-DMA refusals

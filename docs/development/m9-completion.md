@@ -184,10 +184,15 @@ segment-zero board profile and the broader open M9 gates below remain incomplete
       `_PRS`-selected `_SRS` reprogramming are consumed with live `_CRS` confirmation;
       general device binding beyond evaluated PCI INTx remains open.
 - [ ] Complete device power-state/quiesce policy and S3 save/resume path.
-      BSP device-level shutdown freeze/flush/stop and fail-closed S5 gates now have six-driver
-      PC/Q35 evidence, and S3 suspend entry has PC/Q35 QMP SUSPEND/WAKEUP evidence
-      (2026-10-22 checkpoint); higher-layer cache/user-task/SMP orchestration, a firmware
-      waking vector and any resume/state-restoration path remain open.
+      BSP device-level shutdown freeze/flush/stop and fail-closed S5 gates have six-driver
+      PC/Q35 evidence; S3 suspend entry, the long-mode firmware waking vector, the post-wake
+      platform re-take, the driver/device restore and firmware device power states (`_PSC`,
+      `_PRW`, `_PS3` before the sleep and `_PS0` after it) all have PC/Q35 QMP evidence
+      (2026-10-22 and 2026-10-23 checkpoints). Still open: multi-CPU resume (the kernel is
+      BSP-only and never starts an AP, which is an M10 item), PCI-configuration operation
+      regions (a `_PS3` that toggles a device's PCI power-management register is reported as
+      refused, not executed), a driver-to-namespace-node binding, and higher-layer cache and
+      user-task orchestration around the sleep.
 - [x] ACPI S5 entry with QMP observing actual guest shutdown and QEMU exit zero, not a
       printed hypothetical word. The unsafe primitive requires prior system quiescence;
       its test VM has no active DMA, and a negative test refuses an active bus master.
@@ -207,9 +212,12 @@ segment-zero board profile and the broader open M9 gates below remain incomplete
       (408 assertions, 0 problems, 0 `pending-T2`; README and ROADMAP both cite run
       [39609375684](https://github.com/NeXuS4Dev/NOLX/actions/runs/39609375684) on `e16ee67`).
 - [x] All checks on the final revision pass: run
-      [39609375684](https://github.com/NeXuS4Dev/NOLX/actions/runs/39609375684) on `e16ee67`
-      passed all 19 jobs on 2026-10-21. This item gates the *checks*; the boot-test item above is
-      still open, so M9 stays **in progress**.
+      [39844563970](https://github.com/NeXuS4Dev/NOLX/actions/runs/39844563970) on `f53d9d6`
+      passed all 19 jobs on 2026-10-22, including the device-backed S3 fixture, the SuperSpeed
+      slot-recovery fixture, the extended AML fixture and the xHCI-empty absent-device mode;
+      the feature commit `2ca9e5a` is covered by run
+      [39840435734](https://github.com/NeXuS4Dev/NOLX/actions/runs/39840435734). This item gates
+      the *checks*; the boot-test item above is still open, so M9 stays **in progress**.
 
 ## Verified progress in PR #15 (2026-10-16)
 
@@ -1670,7 +1678,8 @@ Remaining open gates (unchanged from the checkpoints above):
   under their feature sets, but this sandbox's QEMU has no user-mode network backend, so their
   first execution is CI. PCI-031 stays `pending-T2` until that run passes.
 - USB hubs, SuperSpeed device classes/hotplug and general endpoint recovery; SS HID selection
-  remains host-tested only.
+  remains host-tested only. Refused SuperSpeed slots now have a recovery fixture that proves
+  port/slot release against a live USB2 peer (`scripts/check-usb-ss-recovery.py`, awaiting CI).
 - Executive/process-handle, security/namespace, waitable and user-facing input-device
   bindings; PS/2 and input-object paths have no framework recovery contract.
 - Remaining AML operation-region providers and operations; general hardware-field AML/PCI
@@ -2151,3 +2160,211 @@ restored: the fixture machine deliberately has no storage or network controller,
 nothing to re-initialise. The tag plus the PM re-take prove that the CPU, the page tables, the
 kernel heap and the ACPI tables survived and that the resumed kernel can still drive the
 chipset; they do not prove a usable post-resume device tree. S3 save/resume stays open.
+
+## Device restore after S3, applied region writes and SuperSpeed slot recovery (2026-10-22)
+
+This checkpoint closes the "nothing runs after the wake" limitation of the S3 resume path and
+turns the operation-region write backend from a journaled intent into an exercised hardware
+path. It does **not** close the S3 gate itself: per-device D-state policy, multi-CPU resume and
+higher-layer cache/user-task orchestration are still missing, and no part of this ran on
+physical hardware.
+
+**A wake reset loses more than RAM state.** Instrumenting a device-backed resume found three
+independent losses on top of the three the previous checkpoint already repaired:
+
+* *The per-CPU segment bases.* The resumed kernel faulted with `CPU exception vector=14 …
+  cr2=0x20` at `movzbl %gs:0x20` — the first GS-relative read, which is the framework's
+  interrupt-level check inside its admission path. The wake reset leaves `IA32_GS_BASE`,
+  `IA32_KERNEL_GS_BASE` and `IA32_FS_BASE` at zero, and the hand-off saved CR0/CR4/EFER/CR3,
+  RSP, GDTR and IDTR but not those three MSRs. `prepare_s3_resume` now saves them and
+  `s3_resume_entry` writes them back before any compiled code runs.
+* *The BAR assignment.* With the segment bases restored the resume reached the drivers and
+  refused with `virtio-blk: handle=0 last bring-up refused: BarNotMemory(4)`: the wake reset
+  returns every function's BARs to their power-on value, so the addresses the bounded planner
+  assigned at boot were gone. `resume_platform` now re-runs `pci::prepare_resources` after
+  `pci::refresh_transport`, with the same board-profile check and readback as at boot.
+* *Nothing verified the result.* A resumed driver that merely reported "started" would be a
+  marker, not evidence, so `verify_restored_devices` makes each restored storage handle read
+  sector zero through its own public block path and checks the MBR signature before the
+  fail-closed shutdown quiesce; if that quiesce refuses, the S5 write is refused too.
+
+**Suspend has to be reversible.** The existing shutdown `quiesce` freezes admission
+irreversibly, which would make a post-wake restart impossible. `nolx-df-core` now has
+`Registry::suspend` (same barrier-before-stop ordering, same reverse discovery order, same
+release-only-after-proof rule, but **no** freeze) and `Registry::resume` (forward order, a
+failed record retried through its checked stop first, refusals counted rather than hidden).
+Four new framework tests cover the ordering, a failed barrier, a failed stop and a resume
+after a shutdown freeze.
+
+**Region writes now have an applied path.** `Namespace::set_region_writer` plus the
+`FirmwareRegions` provider (authorized memory/port windows *and* an embedded-controller
+handshake) are installed by `evaluate_devices`, and `hal-aml-test` exercises the applying half
+on hardware: it authorizes the PCI configuration address port, writes the value the port
+already holds (a real store with a verifiable readback that cannot disturb the latched
+address), and proves three refusals — an unpermitted value is denied before any hardware
+access, a field outside every window never reaches the port, and an unauthorized EC write is
+refused rather than defaulted. The EC provider itself implements the ACPI handshake (RD_EC
+0x80 / WR_EC 0x81, bounded IBF/OBF polls, byte-wide only, one authorized command/data pair,
+never a defaulted controller); **no x86 QEMU machine model provides an embedded controller**,
+so that handshake is not hardware-verified and is recorded as `tested-T1` at best.
+
+**Evidence (local, QEMU 11.1.50, Rust 1.97.0 in this sandbox):**
+
+```
+power: suspend barrier handle=0 driver=virtio-blk durable=true
+power: pre-suspend device quiesce: 1 controller(s) stopped, admission retained
+power: S3 pre-suspend: 1 controller(s) stopped, records retained
+power: S3 hand-off at 0x8000 via FACS 0x1ffe0000, CMOS 0x0f=0xfe
+power: requesting ACPI S3 via PM1a 0x604, control 0x2401
+power: resumed from S3 with tag 0x534c33524553554d; kernel RAM state preserved
+pci: ECAM identity mismatch; legacy fallback retained
+pci: segment 0000: native resource assignment: 6 BARs, 0 bridge windows, readback verified
+power: post-resume PM block restored on 00:1f.0, base 0x600, ACPI enable set
+power: post-resume PM1a 0x604 control 0x1 (readback 0x1), ACPI mode re-entered
+power: virtio-blk handle=0 restored after S3 wake
+power: post-resume device restore: 1 restored, 0 not restored
+power: post-resume virtio-blk handle=0 read sector 0: signature=0x550xaa ok=true
+power: post-resume shutdown quiesce: 1 controller(s) stopped, 1 verified after wake
+power: requesting ACPI S5 via PM1a 0x604, control 0x2001
+PASS: power-s3-pc;  QMP SUSPEND + WAKEUP, control 0x2401, resume tag verified,
+      PM re-entered at 0x1, 1 device suspended/restored/verified, powered off
+PASS: power-s3-q35; (same chain; Q35's stale ECAM is rejected and re-assigned)
+```
+
+`scripts/check-power-s3.py --with-devices` boots a real virtio-blk disk built by
+`tools/make-test-disk.py`, requires the whole chain above, forbids `power: post-resume S5
+refused`, and still requires the guest to power itself off (no host `quit`). The no-device
+`hal-power-test-s3` profile keeps passing unchanged, so the new path does not depend on there
+being a device to restore.
+
+**CI.** Run [39840435734](https://github.com/NeXuS4Dev/NOLX/actions/runs/39840435734) on
+`2ca9e5a` passed **all 19 jobs**. The power job now builds `hal-power-s3-device-test` and runs
+`check-power-s3.py --with-devices` after the no-device profile; the USB job runs
+`check-usb-ss-recovery.py` after the default boot-HID fixture; the AML job runs the extended
+fixture that includes `aml: region-write selftest`. PWR-033..PWR-037 and PWR-039 are
+`tested-T2`, USB-039 is `tested-T2`, PWR-038 (the EC handshake, which has no machine model to
+run against) stays `tested-T1`, and the database holds 444 assertions with 0 problems.
+
+**Other checks on this revision.** 13/13 AML fixtures (`check-aml.py`, including the new
+`aml: region-write selftest`), 4/4 S3 fixtures, `check-absent-devices.py` in both modes,
+`check-usb-ss-recovery.py` on PC and Q35, `make bootcheck`, 910 host tests
+(`cargo test --lib --bins`), `cargo clippy --all-targets -D warnings`, `cargo fmt --all --
+--check`, the unsafe audit (300 blocks, 0 missing SAFETY comments) and the conformance
+database at 444 assertions / 0 problems.
+
+**Sandbox limitation, stated rather than hidden.** This QEMU build has no input subsystem:
+`input-send-event` is accepted but never reaches a USB HID device, so the keyboard steps of
+`check-usb-input.py` fail here exactly as they do in the new SuperSpeed fixture. The
+SuperSpeed fixture's enumeration, refusal, DMA-baseline and port-release assertions all pass
+locally; its peer-liveness presses are CI-only, which is why USB-039 is `pending-T2`.
+
+**Still open after this checkpoint.** Per-device power states (`_PSx`/D-states) are not
+applied: a restored driver returns to its working state, not to the D-state it was in.
+Multi-CPU resume does not exist (the APs are never parked). Higher-layer cache and user-task
+orchestration around the sleep is unchanged. The general AML operation-region providers
+beyond the HPET page, the FADT PM1a block and the EC handshake are still missing, and the EC
+handshake has no machine to run against. M9 remains **in progress**.
+
+## Firmware device power states across a real S3 (2026-10-23)
+
+The previous checkpoint restored devices by re-running each driver, and said so: a restored
+driver returned to its *working* state, not to the D-state firmware thought it was in. That left
+the last firmware half of the S3 policy unused — `_PSC`, `_PRW`, `_PS3` and `_PS0` were not
+evaluated at all. This checkpoint implements them end to end and exercises both directions
+across a real suspend and wake.
+
+**The rules, in `crates/nolx-power-core/src/power_state.rs`.** `_PSC` decodes D0..D3hot and
+refuses anything above D3 rather than clamping it; an absent `_PSC` (`Ok(None)`) is a different
+answer from a failed one, and a failure is never defaulted to D0. `_PRW` accepts the
+specification's two-element `(GPE bit index, lowest wakeable sleep state)` package and refuses
+the extended form that names a GPE block device — this kernel has no block-device GPE model, and
+reading its first element as a bit index would invent a wake source. `wakes_from(S3)` is the
+"deepest state" rule, and a source that names only S0 can wake nothing. `_ADR` splits into device
+and function. Method presence is answered statically, so a policy can decide what it may ask
+before it invokes anything.
+
+**The kernel side.** `evaluate_devices` now records every node that declares a power method
+(`kernel/src/hal/acpi.rs`), evaluating `_PSC`/`_PRW` as data and reporting a refused declaration
+as refused rather than absent. It also retains the operation-region provider it authorized, so a
+transition applies its writes through the same validation instead of a second, unproven one. The
+transition itself is in `kernel/src/hal/power.rs`:
+
+* `_PS3` runs after the driver quiesce and before the sleep. A device still owned by a driver
+  would have the transition undone by that driver, and a device firmware would not power down is
+  a possible bus master — so a refused transition aborts the sleep.
+* `_PS0` runs after the platform re-take (the PM block must answer again) and before any driver
+  is restarted, so no driver programmes a controller firmware still considers asleep.
+* Both reload the validated tables, evaluate the method with the bounded interpreter, and apply
+  the method's journaled writes with `apply_region_field_writes_authorized`: read before write,
+  verified readback, reverse rollback, duplicate and malformed fields refused before any access,
+  and every field outside an authorized window refused. The value is whatever firmware stores,
+  which is exactly why this uses the scoped authority instead of an exact-value permission.
+
+**Why a fixture is unavoidable here.** Neither SeaBIOS DSDT declares a single device power
+method: on PC and Q35 the boot log says so, and the honest result is an empty plan in both
+directions. The transition path is therefore exercised with an injected SSDT that declares one
+device with all four members. Its `_PS3`/`_PS0` read the HPET general-configuration register —
+inside the window the kernel authorized from the parsed HPET table — and store the value back: a
+real memory-mapped write, with an exact readback, whose value the kernel never chose. The refused
+variant stores to a constant instead, at an address no validated table authorized.
+
+**Evidence (local, QEMU 11.1.50, Rust 1.97.0 in this sandbox):**
+
+```
+aml: \_SB_.PWR0 _STA=0xf, defaulted=true
+aml: \_SB_.PWR0 power: _PS0=1 _PS3=1 _PSC=1 _PRW=1 current=D0 wake=gpe11@S3
+aml: device power targets: 1 recorded, 0 refused
+power: pre-suspend device quiesce: 1 controller(s) stopped, admission retained
+power: \_SB_.PWR0 _PS3 applied: 1 region field write(s) verified (1 journaled)
+power: device power transition _PS3: 1 transitioned, 0 refused
+power: pre-suspend device power transition: 1 device(s) in firmware low power
+power: requesting ACPI S3 via PM1a 0x604, control 0x2401
+power: resumed from S3 with tag 0x534c33524553554d; kernel RAM state preserved
+power: \_SB_.PWR0 _PS0 applied: 1 region field write(s) verified (1 journaled)
+power: device power transition _PS0: 1 transitioned, 0 refused
+power: post-resume device power transition: 1 device(s) returned to D0, 0 refused
+power: post-resume device restore: 1 restored, 0 not restored
+power: post-resume virtio-blk handle=0 read sector 0: signature=0x550xaa ok=true
+PASS: power-s3-pc;  QMP SUSPEND + WAKEUP, control 0x2401, resume tag verified,
+      PM re-entered at 0x1, 1 device suspended/restored/verified, powered off
+PASS: power-s3-q35; (same chain on the ICH9 board profile)
+```
+
+The negative fixture, where the field is outside every window:
+
+```
+power: \_SB_.PWR0 _PS3 refused: Read(Unsupported(23424))
+power: device power transition _PS3: 0 transitioned, 1 refused
+power: S3 refused: 1 device power transition(s) refused
+PASS: power-s3-pc; unauthorized power-transition field refused before any access,
+      sleep refused, no SUSPEND event
+```
+
+`scripts/check-power-s3.py --dstate` asserts the positive chain and that `_PS0` precedes the
+driver restore; `--dstate-refused` asserts the refusal, the absent S3 request and that QMP saw no
+`SUSPEND`; both also assert the empty-plan wording on a boot whose firmware declares nothing. The
+`hal-power-dstate-test` fixture in `scripts/check-aml.py` runs the same transition pair without a
+sleep on both machines.
+
+**Checks on this revision.** 918 host tests (`cargo test --lib --bins`, of which 120 are
+`nolx-power-core`), 15/15 AML fixtures including the new `dstate` mode on PC and Q35, all three
+S3 modes (`--dstate`, `--dstate-refused`, `--with-devices --dstate`) on both machines,
+`check-absent-devices.py` in both modes, `make bootcheck`, `cargo fmt --all --check`,
+`cargo clippy --all-targets -D warnings`, clippy for the kernel target with its `RUSTFLAGS`, the
+unsafe audit (300 blocks, 0 missing SAFETY comments) and the conformance database at 450
+assertions with 0 problems.
+
+**CI.** Run [39919799716](https://github.com/NeXuS4Dev/NOLX/actions/runs/39919799716) on
+`0c541a8` passed **all 19 jobs**. The AML job now builds `hal-power-dstate-test` and runs the
+`dstate` fixture on PC and Q35; the power job runs `check-power-s3.py --dstate` and
+`--dstate-refused` after the no-device and device-backed profiles. PWR-041..PWR-045 are
+`tested-T2`, PWR-040 is `tested-T1`, and the database holds 450 assertions with 0 problems.
+
+**Still open.** Multi-CPU resume is not closable in M9 and is not claimed: `kernel/src/hal/apic.rs`
+only ever selects the BSP's local APIC and no AP is ever started, so there is no AP state to
+restore — AP startup is the M10 item named in `ROADMAP.md`. `_PS3` methods that toggle a device's
+PCI power-management register are refused, because the kernel has no PCI-*configuration*
+operation-region provider; that refusal is reported per device rather than hidden. There is no
+driver-to-namespace-node binding yet, so a device whose `_PS0` is refused has that refusal
+reported but still has its driver restarted, and the driver's own bring-up plus the sector
+readback remain the proof for that controller. M9 remains **in progress**.

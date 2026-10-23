@@ -214,6 +214,150 @@ impl core::fmt::Write for FirmwareDevice {
         Ok(())
     }
 }
+/// How many namespace nodes can be remembered as device power targets.
+///
+/// A board profile declares a handful (`_PS3` is only meaningful for a device whose power is
+/// firmware-controlled); the bound exists so a hostile or broken table cannot grow a catalog
+/// the kernel has no room for, and exceeding it is reported rather than truncated silently.
+pub const MAX_POWER_TARGETS: usize = 16;
+const POWER_TARGET_NAME: usize = 64;
+
+/// One evaluated namespace node that declares a device power method (`_PS0`/`_PS3`/`_PSC`/`_PRW`).
+///
+/// The record is what firmware *declares*, captured once at boot. A transition does not trust it
+/// for the method bodies: it re-loads the tables and re-evaluates the method, so a node that has
+/// since changed cannot be transitioned on the strength of a stale plan.
+#[derive(Clone, Copy)]
+pub struct FirmwarePowerTarget {
+    name: [u8; POWER_TARGET_NAME],
+    length: usize,
+    /// Which device power methods the node declares. Presence only: no method was invoked to
+    /// learn this.
+    pub methods: power::power_state::PowerMethods,
+    /// The state `_PSC` reported at boot, when the node declares one and it evaluated.
+    pub current: Option<power::power_state::DState>,
+    /// The wake source `_PRW` declared at boot, when the node declares one and it evaluated.
+    pub wake: Option<power::power_state::WakeSource>,
+    /// `true` when the node declares `_PSC`/`_PRW` and that evaluation was refused, so the
+    /// absent value above means "unknown", not "declared absent".
+    pub refused: bool,
+}
+impl FirmwarePowerTarget {
+    /// Absolute AML namespace path.
+    pub fn name(&self) -> &str {
+        core::str::from_utf8(&self.name[..self.length]).unwrap_or("invalid")
+    }
+}
+impl core::fmt::Write for FirmwarePowerTarget {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        let end = self
+            .length
+            .checked_add(text.len())
+            .ok_or(core::fmt::Error)?;
+        let dst = self
+            .name
+            .get_mut(self.length..end)
+            .ok_or(core::fmt::Error)?;
+        dst.copy_from_slice(text.as_bytes());
+        self.length = end;
+        Ok(())
+    }
+}
+static POWER_TARGETS: crate::sync::IrqMutex<[Option<FirmwarePowerTarget>; MAX_POWER_TARGETS]> =
+    crate::sync::IrqMutex::new([None; MAX_POWER_TARGETS]);
+static POWER_TARGET_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+/// `true` when every node's power methods were recorded without a refusal or a capacity loss.
+static POWER_TARGETS_COMPLETE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+/// The operation-region windows the boot evaluation authorized, plus the embedded controller
+/// when one was, so a later device power transition reads and writes the same firmware fields
+/// through the same provider instead of trusting a second authorization.
+static POWER_REGIONS: crate::sync::IrqMutex<Option<super::aml_region::FirmwareRegions>> =
+    crate::sync::IrqMutex::new(None);
+
+/// How many device power targets the boot evaluation recorded.
+pub fn power_target_count() -> usize {
+    POWER_TARGET_TOTAL.load(core::sync::atomic::Ordering::Acquire)
+}
+/// One recorded power target, or `None` past the recorded count.
+pub fn power_target(index: usize) -> Option<FirmwarePowerTarget> {
+    POWER_TARGETS.lock().get(index).copied().flatten()
+}
+/// Whether every declared device power method was recorded and evaluated without refusal.
+/// Even `true` only means the boot namespace was consistent, not that a transition will run.
+pub fn power_targets_complete() -> bool {
+    POWER_TARGETS_COMPLETE.load(core::sync::atomic::Ordering::Acquire)
+}
+/// The operation-region provider the boot evaluation authorized, when tables authorized any.
+pub fn power_regions() -> Option<super::aml_region::FirmwareRegions> {
+    *POWER_REGIONS.lock()
+}
+
+/// Why the firmware tables could not be re-loaded for a device power transition.
+#[derive(Debug)]
+pub enum PowerNamespaceError {
+    /// No ACPI platform, or no FADT/RSDP among the platform tables.
+    Platform,
+    /// The boot evaluation authorized no operation-region window to read through.
+    Regions,
+    /// The DSDT was unreadable, or carried the wrong signature.
+    Dsdt,
+    /// The DSDT did not load atomically.
+    Load(power::aml::Error),
+}
+
+/// Reload the validated firmware namespace for a device power transition.
+///
+/// The tables are re-read and re-checked by [`read_sdt_at`] on every call, so a transition runs
+/// against firmware this boot actually validated rather than a retained parse. The evaluator is
+/// given the boot-time operation-region windows as its *reader*; the caller gets the same windows
+/// as a writer, because applying a transition's journaled field writes is the caller's job, not
+/// the interpreter's. Nothing here is authorized by a device name: a field outside a window
+/// validated from a parsed table is refused by the provider.
+pub fn with_power_namespace<R>(
+    body: impl FnOnce(&mut power::aml::Namespace<'_>, &mut super::aml_region::FirmwareRegions) -> R,
+) -> Result<R, PowerNamespaceError> {
+    let regions = power_regions().ok_or(PowerNamespaceError::Regions)?;
+    let platform = discover().ok_or(PowerNamespaceError::Platform)?;
+    let dsdt = platform
+        .fadt
+        .and_then(|f| read_sdt_at(f.dsdt))
+        .filter(|s| s.signature() == *b"DSDT")
+        .ok_or(PowerNamespaceError::Dsdt)?;
+    let snapshot = super::pci_intx::Snapshot::capture();
+    // The reader is a copy of the same windows the writer applies through: the evaluator reads
+    // firmware fields, the caller writes them, and neither can widen what boot authorized.
+    let reader = regions;
+    let mut namespace = power::aml::Namespace::with_dsdt_revision(dsdt.bytes()[8]);
+    namespace.set_field_reader(&snapshot);
+    namespace.set_region_reader(&reader);
+    namespace
+        .load(&dsdt.bytes()[36..])
+        .map_err(PowerNamespaceError::Load)?;
+    if let Some(rsdp) = find_rsdp() {
+        let address = if platform.used_xsdt {
+            rsdp.xsdt_address
+        } else {
+            u64::from(rsdp.rsdt_address)
+        };
+        if let Some(root) = read_sdt_at(address) {
+            if let Ok(entries) = root.root_entries() {
+                for address in entries {
+                    let Some(ssdt) = read_sdt_at(address) else {
+                        continue;
+                    };
+                    if ssdt.signature() == *b"SSDT" {
+                        let _ = namespace.load(&ssdt.bytes()[36..]);
+                    }
+                }
+            }
+        }
+    }
+    let mut regions = regions;
+    Ok(body(&mut namespace, &mut regions))
+}
+
 const MAX_FIRMWARE_DEVICES: usize = 128;
 static FIRMWARE_DEVICES: crate::sync::IrqMutex<[Option<FirmwareDevice>; MAX_FIRMWARE_DEVICES]> =
     crate::sync::IrqMutex::new([None; MAX_FIRMWARE_DEVICES]);
@@ -261,6 +405,10 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
     super::pci_intx::revoke();
     *ROOT_RESOURCES.lock() = RootResourceState::Absent;
     FIRMWARE_CATALOG_COMPLETE.store(false, core::sync::atomic::Ordering::Release);
+    POWER_TARGETS.lock().fill(None);
+    POWER_TARGET_TOTAL.store(0, core::sync::atomic::Ordering::Release);
+    POWER_TARGETS_COMPLETE.store(false, core::sync::atomic::Ordering::Release);
+    *POWER_REGIONS.lock() = None;
     let mut table_refusals = 0;
     let Some(platform) = discover() else {
         if RSDP_ADVERTISED.load(core::sync::atomic::Ordering::Acquire) {
@@ -291,8 +439,10 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
     super::pci_intx::disable_links_for_test(console);
     let snapshot = super::pci_intx::Snapshot::capture();
     // Operation-region reads are authorized only for blocks another validated table named.
+    // Writes are journaled intents until a writer is installed; then they are applied to
+    // authorized hardware with exact permission and a verified readback.
     let regions = {
-        let mut regions = super::aml_region::RegionWindows::empty();
+        let mut regions = super::aml_region::FirmwareRegions::empty();
         if let Some(hpet) = &platform.hpet {
             if hpet.base.address_space_id != 0 {
                 let _ = writeln!(
@@ -334,6 +484,7 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
     let mut namespace = Namespace::with_dsdt_revision(dsdt.bytes()[8]);
     namespace.set_field_reader(&snapshot);
     namespace.set_region_reader(&regions);
+    namespace.set_region_writer(&regions);
     match namespace.load(&dsdt.bytes()[36..]) {
         Ok(()) => {
             loaded += 1;
@@ -550,6 +701,95 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
         FIRMWARE_DEVICES.lock()[retained] = Some(device);
         retained += 1;
     }
+    // Device power methods come from the same namespace. Presence is a static question; `_PSC`
+    // and `_PRW` are evaluated because they are data, not transitions, and a refused declaration
+    // is recorded as refused rather than folded into "absent".
+    let mut power_refused = 0usize;
+    let mut power_retained = 0usize;
+    for path in namespace.devices() {
+        let methods = power::power_state::power_methods(&namespace, path);
+        if !methods.any() {
+            continue;
+        }
+        if power_retained == MAX_POWER_TARGETS {
+            power_refused += 1;
+            let _ = writeln!(
+                console,
+                "aml: device power target capacity refused; no silent truncation"
+            );
+            break;
+        }
+        let current = match power::power_state::current_state(&namespace, path) {
+            Ok(state) => state,
+            Err(error) => {
+                power_refused += 1;
+                let _ = writeln!(console, "aml: {path} _PSC refused: {error:?}");
+                None
+            }
+        };
+        let wake = match power::power_state::wake_source(&namespace, path) {
+            Ok(source) => source,
+            Err(error) => {
+                power_refused += 1;
+                let _ = writeln!(console, "aml: {path} _PRW refused: {error:?}");
+                None
+            }
+        };
+        let _ = write!(
+            console,
+            "aml: {path} power: _PS0={} _PS3={} _PSC={} _PRW={} current=",
+            u8::from(methods.ps0),
+            u8::from(methods.ps3),
+            u8::from(methods.psc),
+            u8::from(methods.prw)
+        );
+        match current {
+            Some(state) => {
+                let _ = write!(console, "{}", state.name());
+            }
+            None => {
+                let _ = write!(console, "absent");
+            }
+        }
+        let _ = write!(console, " wake=");
+        match wake {
+            Some(source) => {
+                let _ = writeln!(console, "gpe{}@S{}", source.gpe, source.lowest_sleep_state);
+            }
+            None => {
+                let _ = writeln!(console, "absent");
+            }
+        }
+        let mut target = FirmwarePowerTarget {
+            name: [0; POWER_TARGET_NAME],
+            length: 0,
+            methods,
+            current,
+            wake,
+            refused: false,
+        };
+        if write!(&mut target, "{path}").is_err() {
+            power_refused += 1;
+            continue;
+        }
+        // Declared-but-not-evaluated, rather than declared-absent: `_PSC` and `_PRW` are data,
+        // so a node that declares one and has no value here had that evaluation refused.
+        target.refused = (methods.psc && current.is_none()) || (methods.prw && wake.is_none());
+        POWER_TARGETS.lock()[power_retained] = Some(target);
+        power_retained += 1;
+    }
+    POWER_TARGET_TOTAL.store(power_retained, core::sync::atomic::Ordering::Release);
+    POWER_TARGETS_COMPLETE.store(power_refused == 0, core::sync::atomic::Ordering::Release);
+    if power_retained > 0 || power_refused > 0 {
+        let _ = writeln!(
+            console,
+            "aml: device power targets: {power_retained} recorded, {power_refused} refused"
+        );
+    }
+    // Retain the windows the methods just read through, so a device power transition applies its
+    // journaled writes through the same authorization rather than a second, unproven one.
+    *POWER_REGIONS.lock() = Some(regions);
+
     FIRMWARE_CATALOG_COMPLETE.store(
         loaded > 0 && refused == 0,
         core::sync::atomic::Ordering::Release,
@@ -601,5 +841,116 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
             .resources
             .is_none());
         let _ = writeln!(console, "aml: firmware method selftest: computed status, decoded resources, disabled-device gating, unsupported/loop/recursion refusal verified");
+        region_write_selftest(console);
     }
+}
+
+/// Exercise the operation-region **write** backend against real hardware and real refusals.
+///
+/// The journal that produces region-write intents is host-tested, and no method in this board
+/// profile writes a region field, so without this the kernel's applying half would never run.
+/// The target is the PCI configuration **address** port (0xcf8): it latches a 32-bit value and
+/// reads it back, so writing the value it already holds is a real port store whose postcondition
+/// is verifiable, and it changes nothing about the configuration transaction in flight. The
+/// fixture drives the same transaction the evaluator feeds: exact permission, read-before-write,
+/// hardware write, verified readback. It also proves the refusals that keep the backend honest:
+/// a value the caller did not permit is never written, a field outside every authorized window
+/// never reaches hardware, and an embedded-controller field is refused rather than guessed
+/// because no ECDT or EC device authorized a port pair.
+#[cfg(feature = "hal-aml-test")]
+fn region_write_selftest(console: &mut dyn nolx_hal_core::console::HalConsole) {
+    use nolx_power_core::aml::{
+        apply_region_field_writes, Error as AmlError, MethodEffects, RegionField,
+        RegionFieldReader, RegionFieldWrite, RegionFieldWriteBackend, RegionFieldWritePermission,
+        RegionSpace, RegionWriteTransactionError,
+    };
+    const CONFIG_ADDRESS: u64 = 0x0cf8;
+    let mut regions = super::aml_region::FirmwareRegions::empty();
+    assert!(
+        regions.authorize_io(CONFIG_ADDRESS, 4),
+        "the fixture port window was refused"
+    );
+    let field = RegionField {
+        space: RegionSpace::SystemIo,
+        address: CONFIG_ADDRESS,
+        bits: 32,
+        shift: 0,
+        access: 4,
+    };
+    // The value written is the value the port already holds, so the transaction is a real store
+    // with a real readback and cannot disturb the address the transport latched.
+    let current = RegionFieldReader::read(&regions, RegionSpace::SystemIo, CONFIG_ADDRESS, 4)
+        .expect("the configuration address port did not answer");
+    let effects = MethodEffects {
+        result: None,
+        reads: alloc::vec::Vec::new(),
+        writes: alloc::vec::Vec::new(),
+        region_reads: alloc::vec::Vec::new(),
+        region_writes: alloc::vec![RegionFieldWrite {
+            field,
+            value: current
+        }],
+    };
+    let permission =
+        RegionFieldWritePermission::from_values(field, &[current]).expect("permission");
+    assert_eq!(
+        apply_region_field_writes(&effects, &[permission], &mut regions),
+        Ok(())
+    );
+    let readback = RegionFieldReader::read(&regions, RegionSpace::SystemIo, CONFIG_ADDRESS, 4)
+        .expect("readback refused");
+    assert_eq!(
+        readback, current,
+        "the region write did not survive readback"
+    );
+
+    // A value the caller did not permit is refused before any hardware access.
+    let denied = RegionFieldWritePermission::from_values(field, &[!current & 0xffff_ffff])
+        .expect("permission");
+    assert_eq!(
+        apply_region_field_writes(&effects, &[denied], &mut regions),
+        Err(RegionWriteTransactionError::PermissionDenied)
+    );
+
+    // A field outside every authorized window never reaches the port.
+    let outside = RegionField {
+        address: CONFIG_ADDRESS + 0x10,
+        ..field
+    };
+    let outside_effects = MethodEffects {
+        region_writes: alloc::vec![RegionFieldWrite {
+            field: outside,
+            value: current
+        }],
+        ..effects.clone()
+    };
+    let outside_permission =
+        RegionFieldWritePermission::from_values(outside, &[current]).expect("permission");
+    // The transaction reads before it writes, so the refusal surfaces at the read.
+    assert_eq!(
+        apply_region_field_writes(&outside_effects, &[outside_permission], &mut regions),
+        Err(RegionWriteTransactionError::Read(AmlError::Unsupported(
+            0x5b80
+        )))
+    );
+
+    // No embedded controller is authorized, so an EC field is refused rather than defaulted.
+    let ec_field = RegionField {
+        space: RegionSpace::EmbeddedControl,
+        address: 0x00,
+        ..field
+    };
+    let mut ec = super::aml_region::FirmwareRegions::empty();
+    assert_eq!(
+        RegionFieldReader::read(&ec, RegionSpace::EmbeddedControl, 0, 1),
+        Err(AmlError::Unsupported(0x5b82))
+    );
+    assert_eq!(
+        RegionFieldWriteBackend::write_field(&mut ec, ec_field, 1),
+        Err(AmlError::Unsupported(0x5b82))
+    );
+    let _ = writeln!(
+        console,
+        "aml: region-write selftest: authorized port write applied and read back ({current:#010x}), unpermitted value denied without a write, outside-window write refused, unauthorized embedded controller refused"
+    );
 }
