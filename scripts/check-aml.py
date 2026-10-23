@@ -58,6 +58,27 @@ def fixture():
     return table(package([0x10], b'\\_SB_' + body))
 
 
+def dstate_fixture():
+    """One device node that declares every device power method.
+
+    `_PS3` and `_PS0` read the HPET general-configuration register -- inside the window the
+    kernel authorizes from the parsed HPET table -- and store the value back. The store is a real
+    memory-mapped write, its readback verifies exactly because the value is the one the register
+    already holds, and the value is firmware's choice, which is exactly the case an exact-value
+    permission cannot serve. `_PSC` reports D0 and `_PRW` names GPE 11 waking from S3.
+    """
+    region = (bytes([0x5b, 0x80]) + b'HPWR' + bytes([0x00, 0x0c])
+              + struct.pack('<I', 0xfed00010) + bytes([0x0a, 0x08]))
+    # Field (HPWR, DWordAcc, NoLock, Preserve) { HPCF, 32 }
+    field = package([0x5b, 0x81], b'HPWR' + bytes([0x03]) + b'HPCF' + bytes([32]))
+    # Store (HPCF, Local0); Store (Local0, HPCF)
+    body = bytes([0x70]) + b'HPCF' + bytes([0x60]) + bytes([0x70, 0x60]) + b'HPCF'
+    body = region + field + method(b'_PS3', body) + method(b'_PS0', body)
+    body += bytes([0x08]) + b'_PSC' + bytes([0x00])
+    body += bytes([0x08]) + b'_PRW' + package([0x12], bytes([2, 0x0a, 11, 0x0a, 3]))
+    return table(package([0x10], b'\\_SB_' + device(b'PWR0', body)))
+
+
 def boot(qemu, kernel, machine, mode):
     name = f'aml-{machine}-{mode}'
     log = ROOT / 'build' / f'{name}.log'
@@ -68,10 +89,12 @@ def boot(qemu, kernel, machine, mode):
         platform += ',max-ram-below-4g=3G'
     command = [qemu, '-machine', platform, '-kernel', str(kernel), '-m', '3072M' if mode == 'unmapped-tables' else '512M',
                '-nographic', '-no-reboot', '-net', 'none']
-    if mode in ['methods', 'bad-table', 'bad-segment', 'multiple-roots', 'catalog-full']:
+    if mode in ['methods', 'dstate', 'bad-table', 'bad-segment', 'multiple-roots', 'catalog-full']:
         aml = ROOT / 'build' / f'{name}.aml'
         if mode == 'methods':
             payload = fixture()
+        elif mode == 'dstate':
+            payload = dstate_fixture()
         elif mode == 'bad-table':
             # A late unsupported opcode must roll back the earlier device.
             payload = table(package([0x10], b'\\_SB_' + device(b'TMP0', method(b'_STA', bytes([0xa4, 1])))) + bytes([0xfe]))
@@ -90,7 +113,11 @@ def boot(qemu, kernel, machine, mode):
             deadline = time.monotonic() + 90
             while time.monotonic() < deadline:
                 text = log.read_text(errors='replace')
-                if 'NOLX: address space selftest:' in text or re.search(r'PANIC|BUGCHECK|CPU exception', text) or process.poll() is not None:
+                # The dstate fixture's own marker is the later one: the transition runs from the
+                # main loop after the memory selftest has already printed.
+                done = ('power: dstate selftest:' in text if mode == 'dstate'
+                        else 'NOLX: address space selftest:' in text)
+                if done or re.search(r'PANIC|BUGCHECK|CPU exception', text) or process.poll() is not None:
                     break
                 time.sleep(.1)
         finally:
@@ -138,6 +165,19 @@ def boot(qemu, kernel, machine, mode):
             assert 'NLX1 _CRS skipped: device status is not usable' in text, text
         else:
             assert 'NLX0' not in text, text
+        if mode == 'dstate':
+            # The catalog is recorded statically, then the fixture's own methods are evaluated
+            # and their journal is applied with a verified readback in both directions.
+            assert ('aml: \\_SB_.PWR0 power: _PS0=1 _PS3=1 _PSC=1 _PRW=1 current=D0 '
+                    'wake=gpe11@S3') in text, text
+            assert 'aml: device power targets: 1 recorded, 0 refused' in text, text
+            assert re.search(r'power: \\_SB_\.PWR0 _PS3 applied: 1 region field write\(s\) '
+                             r'verified \(1 journaled\)', text), text
+            assert re.search(r'power: \\_SB_\.PWR0 _PS0 applied: 1 region field write\(s\) '
+                             r'verified', text), text
+            assert 'power: device power transition _PS3: 1 transitioned, 0 refused' in text, text
+            assert 'power: device power transition _PS0: 1 transitioned, 0 refused' in text, text
+            assert 'power: dstate selftest: 1 firmware power target(s), _PSC=D0, _PRW=11@S3' in text, text
         if mode == 'bad-table':
             assert 'aml: SSDT refused atomically: Unsupported(254)' in text, text
             assert 'TMP0 _STA=' not in text, text
@@ -161,10 +201,13 @@ def main():
     parser.add_argument('--qemu', default=os.environ.get('QEMU', 'qemu-system-x86_64'))
     parser.add_argument('--kernel', type=Path, default=ROOT / 'build' / 'nolx.elf')
     parser.add_argument('--test-kernel', type=Path, default=ROOT / 'build' / 'nolx-aml.elf')
+    parser.add_argument('--power-kernel', type=Path,
+                        default=ROOT / 'build' / 'nolx-dstate.elf')
     args = parser.parse_args()
     (ROOT / 'build').mkdir(exist_ok=True)
     for machine in ['pc', 'q35']:
         boot(args.qemu, args.test_kernel.resolve(), machine, 'methods')
+        boot(args.qemu, args.power_kernel.resolve(), machine, 'dstate')
         boot(args.qemu, args.kernel.resolve(), machine, 'absent')
         for mode in ['bad-table','bad-segment','multiple-roots']:
             boot(args.qemu, args.kernel.resolve(), machine, mode)

@@ -3,6 +3,12 @@
 //! resume path can be observed; this is still not a full resume implementation.
 
 use nolx_hal_core::console::HalConsole;
+#[cfg(any(
+    feature = "hal-power-test-s3",
+    feature = "hal-power-s3-device-test",
+    feature = "hal-power-dstate-test"
+))]
+use nolx_power_core::aml::{apply_region_field_writes_authorized, Path};
 use nolx_power_core::{pm1_sleep_control, Fadt};
 
 /// Why no power-state request could be issued.
@@ -16,6 +22,8 @@ pub enum Error {
     AcpiMode,
     /// Flush, controller stop, retained DMA or PCI bus-master readback refused shutdown.
     Devices,
+    /// A firmware device power transition (`_PS3`/`_PS0`) was refused.
+    PowerState,
 }
 
 unsafe fn read_control(port: u16) -> u16 {
@@ -238,6 +246,36 @@ pub extern "C" fn s3_resume_rust() -> ! {
     assert_eq!(tag, S3_RESUME_TAG, "the S3 resume tag did not survive");
     match resume_platform(&mut console) {
         Ok(()) => {
+            // Firmware's `_PS0` is what tells a device the system is awake again; it runs after
+            // the platform re-take (the PM block must answer) and before any driver is restarted,
+            // so no driver programmes a controller firmware still considers asleep. A refusal is
+            // reported per device and does not stop the restore: the driver's own bring-up and
+            // the sector readback below are what prove the controller, not the absence of `_PS0`.
+            #[cfg(any(
+                feature = "hal-power-test-s3",
+                feature = "hal-power-s3-device-test",
+                feature = "hal-power-dstate-test"
+            ))]
+            {
+                match return_devices_to_d0(&mut console) {
+                    Ok((transitioned, refused)) => {
+                        if transitioned > 0 || refused > 0 {
+                            let _ = writeln!(
+                                console,
+                                "power: post-resume device power transition: {transitioned} device(s) returned to D0, {refused} refused"
+                            );
+                            console.flush();
+                        }
+                    }
+                    Err(error) => {
+                        let _ = writeln!(
+                            console,
+                            "power: post-resume device power transition failed: {error:?}"
+                        );
+                        console.flush();
+                    }
+                }
+            }
             // Re-take device, driver and interrupt state the wake reset cleared: re-enable
             // bus mastering/INTx per device and re-run each driver's bring-up (IOAPIC route,
             // MSI/MSI-X, MMIO windows, xHCI root-port enumeration).
@@ -505,6 +543,210 @@ fn restore_devices_after_wake(console: &mut dyn HalConsole) -> Result<(usize, us
     );
     console.flush();
     Ok((restored, not_restored))
+}
+
+/// Put every device whose namespace node declares `_PS3` into the low-power state firmware
+/// defines for it.
+///
+/// The transition is firmware's, not the driver's: `_PS3` is an ordinary AML method, so it is
+/// evaluated by the bounded interpreter, its field writes are journaled, and the journal is
+/// applied by [`apply_region_field_writes_authorized`] through the same operation-region windows
+/// the boot evaluation authorized -- read before write, verified readback, reverse rollback on a
+/// refused write, and a refusal for any field outside an authorized window. The value the method
+/// stores is firmware's choice and is never predicted by the kernel, which is why this path uses
+/// the scoped authority instead of an exact-value permission.
+///
+/// Returns `(transitioned, refused)`. A refused transition is reported per device and makes the
+/// caller refuse the sleep: a device firmware would not power down can still be a bus master.
+#[cfg(any(
+    feature = "hal-power-test-s3",
+    feature = "hal-power-s3-device-test",
+    feature = "hal-power-dstate-test"
+))]
+pub fn enter_device_low_power(console: &mut dyn HalConsole) -> Result<(usize, usize), Error> {
+    transition_devices(console, *b"_PS3")
+}
+
+/// Return every device that declares `_PS0` to D0 after a wake.
+///
+/// The wake reset leaves each device in a firmware-defined state; `_PS0` is what tells it the
+/// system is awake. This runs after the platform re-take (the PM block must answer again) and
+/// before any driver is re-started, so a driver never programs a controller firmware still
+/// considers asleep.
+#[cfg(any(
+    feature = "hal-power-test-s3",
+    feature = "hal-power-s3-device-test",
+    feature = "hal-power-dstate-test"
+))]
+pub fn return_devices_to_d0(console: &mut dyn HalConsole) -> Result<(usize, usize), Error> {
+    transition_devices(console, *b"_PS0")
+}
+
+/// Evaluate one firmware power method per recorded target and apply its journal.
+#[cfg(any(
+    feature = "hal-power-test-s3",
+    feature = "hal-power-s3-device-test",
+    feature = "hal-power-dstate-test"
+))]
+fn transition_devices(
+    console: &mut dyn HalConsole,
+    member: [u8; 4],
+) -> Result<(usize, usize), Error> {
+    let total = super::acpi::power_target_count();
+    if total == 0 {
+        let _ = writeln!(
+            console,
+            "power: device power transition {}: no firmware device declares it",
+            core::str::from_utf8(&member).unwrap_or("?")
+        );
+        console.flush();
+        return Ok((0, 0));
+    }
+    // The interpreter is rebuilt from the checked tables; only the calls happen here, where the
+    // console and the region journal are both reachable.
+    let outcome = super::acpi::with_power_namespace(|namespace, regions| {
+        let mut transitioned = 0usize;
+        let mut refused = 0usize;
+        for index in 0..total {
+            let Some(target) = super::acpi::power_target(index) else {
+                continue;
+            };
+            let name = target.name();
+            let Ok(path) = Path::parse(name) else {
+                refused += 1;
+                let _ = writeln!(
+                    console,
+                    "power: {name} transition refused: the recorded namespace path does not parse"
+                );
+                continue;
+            };
+            match namespace.plan_device_method_authorized(&path, member, &[]) {
+                Ok(None) => {
+                    // Recorded because it declares another power method; this one is absent, so
+                    // there is nothing to transition. Not a refusal.
+                    let _ = writeln!(
+                        console,
+                        "power: {name} declares no {member_str}",
+                        member_str = core::str::from_utf8(&member).unwrap_or("?")
+                    );
+                }
+                Ok(Some(effects)) => {
+                    let writes = effects.region_writes.len();
+                    match apply_region_field_writes_authorized(&effects, regions) {
+                        Ok(applied) => {
+                            transitioned += 1;
+                            let _ = writeln!(
+                                console,
+                                "power: {name} {} applied: {} region field write(s) verified ({} journaled)",
+                                core::str::from_utf8(&member).unwrap_or("?"),
+                                applied.len(),
+                                writes
+                            );
+                        }
+                        Err(error) => {
+                            refused += 1;
+                            let _ = writeln!(
+                                console,
+                                "power: {name} {} refused: {error:?}",
+                                core::str::from_utf8(&member).unwrap_or("?")
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    refused += 1;
+                    let _ = writeln!(
+                        console,
+                        "power: {name} {} refused: {error:?}",
+                        core::str::from_utf8(&member).unwrap_or("?")
+                    );
+                }
+            }
+        }
+        (transitioned, refused)
+    });
+    let (transitioned, refused) = match outcome {
+        Ok(counts) => counts,
+        Err(error) => {
+            let _ = writeln!(
+                console,
+                "power: device power transition {}: firmware namespace unavailable: {error:?}",
+                core::str::from_utf8(&member).unwrap_or("?")
+            );
+            console.flush();
+            return Err(Error::Firmware);
+        }
+    };
+    let _ = writeln!(
+        console,
+        "power: device power transition {}: {transitioned} transitioned, {refused} refused",
+        core::str::from_utf8(&member).unwrap_or("?")
+    );
+    console.flush();
+    Ok((transitioned, refused))
+}
+
+/// Exercise the device power-state path without sleeping: the fixture's `_PS3` and `_PS0` are
+/// real methods writing a real register inside a window the boot evaluation authorized.
+///
+/// The selftest is deliberately about the *applied* transaction, not a marker: it requires the
+/// target to be recorded with all four methods, requires `_PS3` to journal and verify at least
+/// one field write, and requires `_PS0` to do the same on the way back. A device whose method is
+/// refused is a failure here, not a warning: that is the difference between "the path exists" and
+/// "the path ran".
+#[cfg(feature = "hal-power-dstate-test")]
+pub fn dstate_selftest(console: &mut dyn HalConsole) {
+    use nolx_power_core::power_state::DState;
+    let total = super::acpi::power_target_count();
+    assert!(
+        total > 0,
+        "the fixture device did not record a firmware power target"
+    );
+    assert!(
+        super::acpi::power_targets_complete(),
+        "a firmware power method was refused during the boot evaluation"
+    );
+    let mut found = None;
+    for index in 0..total {
+        if let Some(target) = super::acpi::power_target(index) {
+            if target.name() == "\\_SB_.PWR0" {
+                found = Some(target);
+            }
+        }
+    }
+    let target = found.expect("the fixture device is missing from the power target catalog");
+    assert!(
+        target.methods.ps3 && target.methods.ps0,
+        "the fixture declares _PS3 and _PS0"
+    );
+    assert!(
+        target.methods.psc && target.methods.prw,
+        "the fixture declares _PSC and _PRW"
+    );
+    assert_eq!(
+        target.current,
+        Some(DState::D0),
+        "the fixture _PSC did not report D0"
+    );
+    let wake = target.wake.expect("the fixture _PRW was refused");
+    assert_eq!(
+        (wake.gpe, wake.lowest_sleep_state),
+        (11, 3),
+        "the fixture _PRW decoded to the wrong source"
+    );
+    assert!(wake.wakes_from(3) && !wake.wakes_from(4));
+    let (entered, refused) = enter_device_low_power(console).expect("the transition namespace");
+    assert_eq!(refused, 0, "a firmware power transition was refused");
+    assert_eq!(entered, 1, "exactly the fixture device should transition");
+    let (returned, refused) = return_devices_to_d0(console).expect("the transition namespace");
+    assert_eq!(refused, 0, "a firmware D0 return was refused");
+    assert_eq!(returned, 1, "exactly the fixture device should return");
+    let _ = writeln!(
+        console,
+        "power: dstate selftest: {total} firmware power target(s), _PSC=D0, _PRW={}@S{}, _PS3 applied with a verified readback, _PS0 returned to D0",
+        wake.gpe, wake.lowest_sleep_state
+    );
+    console.flush();
 }
 
 /// Which sleep state to request from the firmware.

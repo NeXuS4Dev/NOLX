@@ -983,6 +983,8 @@ jobs:
         run: |
           make kernel KERNEL_FEATURES=hal-aml-test 2>&1 | tee /tmp/job.log
           cp build/nolx.elf build/nolx-aml.elf
+          make kernel KERNEL_FEATURES=hal-power-dstate-test 2>&1 | tee -a /tmp/job.log
+          cp build/nolx.elf build/nolx-dstate.elf
           make kernel 2>&1 | tee -a /tmp/job.log
       - name: Evaluate SeaBIOS DSDT and SSDT methods, malformed tables and no-ACPI fallback
         run: python3 scripts/check-aml.py 2>&1 | tee -a /tmp/job.log
@@ -1021,6 +1023,10 @@ jobs:
         run: make kernel KERNEL_FEATURES=hal-power-s3-device-test 2>&1 | tee -a /tmp/job.log
       - name: Suspend a real device, restore and verify it after the wake
         run: python3 scripts/check-power-s3.py --with-devices 2>&1 | tee -a /tmp/job.log
+      - name: Apply firmware _PS3 before the sleep and _PS0 after the wake
+        run: python3 scripts/check-power-s3.py --dstate 2>&1 | tee -a /tmp/job.log
+      - name: Refuse a power transition outside every authorized window, and the sleep
+        run: python3 scripts/check-power-s3.py --dstate-refused 2>&1 | tee -a /tmp/job.log
       - name: Build independent filesystem reader
         run: cargo build -p nolxfs-dump 2>&1 | tee -a /tmp/job.log
       - name: Verify six-driver quiescence and flush, stop and foreign-DMA refusals

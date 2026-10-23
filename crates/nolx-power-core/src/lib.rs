@@ -19,6 +19,7 @@
 #![deny(missing_docs)]
 
 pub mod aml;
+pub mod power_state;
 pub mod root;
 pub mod routing;
 

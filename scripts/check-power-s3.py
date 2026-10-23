@@ -22,13 +22,68 @@ import os
 from pathlib import Path
 import re
 import socket
+import struct
 import subprocess
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def boot(qemu, kernel, machine, devices=False):
+def package(op, body):
+    size = len(body) + 1
+    if size < 64:
+        length = bytes([size])
+    else:
+        size = len(body) + 2
+        assert size < 4096
+        length = bytes([0x40 | (size & 15), size >> 4])
+    return bytes(op) + length + body
+
+
+def method(name, body, args=0):
+    return package([0x14], name + bytes([args]) + body)
+
+
+def device(name, body):
+    return package([0x5b, 0x82], name + body)
+
+
+def table(aml):
+    header = bytearray(struct.pack('<4sIBB6s8sI4sI', b'SSDT', 36 + len(aml), 2, 0,
+                                   b'NOLX  ', b'PWRSTATE', 1, b'NLXP', 1))
+    header[9] = (-sum(header + aml)) & 255
+    return header + aml
+
+
+def dstate_fixture(outside=False):
+    """A device that declares every device power method, writing a real authorized register.
+
+    `_PS3` and `_PS0` read the HPET general-configuration register -- inside the window the
+    kernel authorizes from the parsed HPET table -- and store the value back, so the journal is
+    applied as a real memory-mapped write with an exact readback and a value the kernel never
+    chose. `_PSC` reports D0 and `_PRW` names GPE 11 waking from S3.
+    """
+    # The refused variant names a SystemMemory address no validated table authorized, so the
+    # same method must be refused before any byte is touched -- and the sleep with it.
+    address = 0x0000_2000 if outside else 0xfed0_0010
+    region = (bytes([0x5b, 0x80]) + b'HPWR' + bytes([0x00, 0x0c])
+              + struct.pack('<I', address) + bytes([0x0a, 0x08]))
+    field = package([0x5b, 0x81], b'HPWR' + bytes([0x03]) + b'HPCF' + bytes([32]))
+    if outside:
+        # A write with no preceding read: the journal is built, and the applying transaction is
+        # what refuses it, at its own read-before-write, before any byte is stored.
+        body = bytes([0x70, 0x0a, 0x2a]) + b'HPCF'
+    else:
+        # Store (HPCF, Local0); Store (Local0, HPCF): a real read-modify-write whose value the
+        # kernel never chose and whose readback verifies exactly.
+        body = bytes([0x70]) + b'HPCF' + bytes([0x60]) + bytes([0x70, 0x60]) + b'HPCF'
+    body = region + field + method(b'_PS3', body) + method(b'_PS0', body)
+    body += bytes([0x08]) + b'_PSC' + bytes([0x00])
+    body += bytes([0x08]) + b'_PRW' + package([0x12], bytes([2, 0x0a, 11, 0x0a, 3]))
+    return table(package([0x10], b'\\_SB_' + device(b'PWR0', body)))
+
+
+def boot(qemu, kernel, machine, devices=False, dstate=False, dstate_refused=False):
     name = f'power-s3-{machine}'
     log = ROOT / 'build' / f'{name}.log'
     qmp = ROOT / 'build' / f'{name}.sock'
@@ -49,6 +104,13 @@ def boot(qemu, kernel, machine, devices=False):
                        cwd=ROOT, check=True, stdout=subprocess.DEVNULL)
         command += ['-drive', f'file={disk},if=none,id=s3disk,format=raw',
                     '-device', 'virtio-blk-pci,drive=s3disk']
+    if dstate or dstate_refused:
+        # An injected SSDT declaring one device with `_PS0`/`_PS3`/`_PSC`/`_PRW`. QEMU's own
+        # DSDT declares no device power methods, so without this the transition path would have
+        # nothing to act on and the fixture would only prove the empty case.
+        aml = ROOT / 'build' / f'{name}.aml'
+        aml.write_bytes(dstate_fixture(outside=dstate_refused))
+        command += ['-acpitable', f'file={aml}']
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     events = []
     pending = b''
@@ -96,6 +158,12 @@ def boot(qemu, kernel, machine, devices=False):
                     # RUN_STATE_SUSPENDED or the request is refused.
                     connection.sendall(b'{"execute":"system_wakeup"}\r\n')
                     woke_at = time.monotonic()
+                if dstate_refused and ('power: S3 refused: 1 device power transition(s) '
+                                       'refused' in text):
+                    # The fixture never sleeps, so it halts in the ordinary boot loop; the
+                    # refusal has been printed and recorded.
+                    process.terminate()
+                    break
                 if 'power: resumed from S3 with tag' in text:
                     # The resumed kernel powers the machine off by itself; sending `quit` here
                     # would hide whether the post-resume PM path actually works.
@@ -122,6 +190,21 @@ def boot(qemu, kernel, machine, devices=False):
             if disk is not None:
                 disk.unlink(missing_ok=True)
     text = log.read_text(errors='replace')
+    if dstate_refused:
+        # The field is outside every authorized window: the journal is refused at the read that
+        # precedes the write, and the sleep is refused with it, because a device firmware would
+        # not power down can still be a bus master.
+        assert 'power: requesting ACPI S3' not in text, text
+        assert 'power: resumed from S3' not in text, text
+        assert not any(e['event'] == 'SUSPEND' for e in events), events
+        assert re.search(r'power: \\_SB_\.PWR0 _PS3 refused: Read\(Unsupported\(23424\)\)',
+                         text), text
+        assert 'power: device power transition _PS3: 0 transitioned, 1 refused' in text, text
+        assert 'power: S3 refused: 1 device power transition(s) refused' in text, text
+        assert 'NOLX: address space selftest:' in text, text
+        print(f'PASS: {name}; unauthorized power-transition field refused before any access, '
+              f'sleep refused, no SUSPEND event')
+        return
     assert code == 0, (code, text)
     assert 'NOLX: address space selftest:' in text, text
     assert 'in use 0 -> 0 bytes, integrity ok' in text, text
@@ -144,6 +227,29 @@ def boot(qemu, kernel, machine, devices=False):
     assert order == ['SUSPEND', 'WAKEUP', 'SHUTDOWN'], events
     post = re.search(r'power: post-resume PM1a 0x[0-9a-f]+ control (0x[0-9a-f]+)', resumed)
     assert post and int(post.group(1), 16) & 1, text
+    if dstate:
+        # Firmware's own device power transition, in both directions, across a real sleep.
+        before = text.split('power: requesting ACPI S3', 1)[0]
+        assert re.search(r'power: \\_SB_\.PWR0 _PS3 applied: 1 region field write\(s\) '
+                         r'verified \(1 journaled\)', before), text
+        assert ('power: device power transition _PS3: 1 transitioned, 0 refused'
+                in before), text
+        assert ('power: pre-suspend device power transition: 1 device(s) in firmware low power'
+                in before), text
+        assert re.search(r'power: \\_SB_\.PWR0 _PS0 applied: 1 region field write\(s\) '
+                         r'verified', resumed), text
+        assert ('power: post-resume device power transition: 1 device(s) returned to D0, '
+                '0 refused' in resumed), text
+        # `_PS0` must run before any driver is restarted: a driver must never programme a
+        # controller firmware still considers asleep.
+        assert resumed.index('device(s) returned to D0') < resumed.index('post-resume device restore:'), text
+    if not dstate and not dstate_refused:
+        # The absent case, on real firmware: neither SeaBIOS DSDT declares a device power method,
+        # so the policy reports the empty plan in both directions rather than inventing a target.
+        assert ('power: device power transition _PS3: no firmware device declares it'
+                in text), text
+        assert ('power: device power transition _PS0: no firmware device declares it'
+                in resumed), text
     if devices:
         # The device tree is suspended before the sleep, re-taken after the wake, proven
         # usable by a real sector read, and quiesced again before the S5 write.
@@ -170,11 +276,18 @@ def main():
     parser.add_argument('--with-devices', action='store_true',
                         help='boot hal-power-s3-device-test: one virtio-blk suspended, restored '
                              'and verified across the wake')
+    parser.add_argument('--dstate', action='store_true',
+                        help='inject an SSDT declaring _PS0/_PS3/_PSC/_PRW and require the '
+                             'firmware transition in both directions across the wake')
+    parser.add_argument('--dstate-refused', action='store_true',
+                        help='inject the same device with a field outside every authorized '
+                             'window: the transition must be refused and the sleep with it')
     parser.add_argument('--machine', choices=['pc', 'q35'], action='append')
     args = parser.parse_args()
     qemu = os.environ.get('QEMU', 'qemu-system-x86_64')
     for machine in args.machine or ['pc', 'q35']:
-        boot(qemu, args.kernel.resolve(), machine, devices=args.with_devices)
+        boot(qemu, args.kernel.resolve(), machine, devices=args.with_devices,
+             dstate=args.dstate, dstate_refused=args.dstate_refused)
 
 
 if __name__ == '__main__':
