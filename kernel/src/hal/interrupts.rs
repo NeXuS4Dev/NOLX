@@ -32,6 +32,14 @@ extern "C" fn nolx_interrupt_dispatch(frame_pointer: *mut InterruptFrame) -> *mu
         return frame_pointer;
     }
 
+    // An application processor runs none of this: it has no device, no console and no clock,
+    // and the only interrupts it may receive are the two inter-processor vectors the startup
+    // path sends it. Handing it the bootstrap processor's dispatch would let it take a device
+    // interrupt it cannot service -- and print through a console it does not own.
+    if cpu::current_cpu_id() != 0 {
+        return super::smp::on_ap_interrupt(frame_pointer, vector);
+    }
+
     if vector == 33 || vector == 44 {
         if apic::is_enabled() {
             return device_completion(frame_pointer, super::ps2::on_interrupt);

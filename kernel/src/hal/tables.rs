@@ -40,6 +40,7 @@ const IST_STACK_SIZE: usize = 16 * 1024;
 
 /// Long-mode TSS layout, as required by the processor.
 #[repr(C, packed)]
+#[derive(Clone, Copy)]
 struct TaskStateSegment {
     reserved0: u32,
     rsp0: u64,
@@ -90,6 +91,7 @@ const _: () = assert!(size_of::<TaskStateSegment>() == 104);
 /// the trampoline's table -- one definition of the code and data selectors, checked against
 /// the linked image by `scripts/verify-multiboot.py` -- and the two TSS slots are filled here.
 #[repr(C, align(16))]
+#[derive(Clone, Copy)]
 struct AlignedGdt([u64; GDT_ENTRIES]);
 
 /// Descriptors in the GDT: null, kernel code, kernel data, user data, user code, TSS low,
@@ -99,10 +101,12 @@ const GDT_ENTRIES: usize = 7;
 
 /// An aligned TSS wrapper. The processor writes its busy bit into the GDT, not this body.
 #[repr(C, align(16))]
+#[derive(Clone, Copy)]
 struct AlignedTss(TaskStateSegment);
 
 /// A writable IST stack with a 16-byte-aligned top.
 #[repr(C, align(16))]
+#[derive(Clone, Copy)]
 struct IstStack([u8; IST_STACK_SIZE]);
 
 impl IstStack {
@@ -130,6 +134,22 @@ static IDT: SyncCell<AlignedIdt> = SyncCell::new(AlignedIdt([IdtGate::MISSING; I
 static IST_NMI: SyncCell<IstStack> = SyncCell::new(IstStack::empty());
 static IST_DOUBLE_FAULT: SyncCell<IstStack> = SyncCell::new(IstStack::empty());
 static IST_MACHINE_CHECK: SyncCell<IstStack> = SyncCell::new(IstStack::empty());
+
+// An application processor needs its own descriptor tables for exactly one reason: the TSS
+// descriptor names one TSS, and the TSS carries that processor's RSP0 and IST stacks. Sharing
+// the bootstrap processor's would make two processors push an NMI onto one stack. The code and
+// data descriptors are identical to the kernel's, so they are copied from it rather than
+// defined a second time, and the IDT is shared because every processor runs the same stubs.
+static AP_GDT: SyncCell<[AlignedGdt; crate::hal::cpu::MAX_CPUS]> =
+    SyncCell::new([AlignedGdt([0; GDT_ENTRIES]); crate::hal::cpu::MAX_CPUS]);
+static AP_TSS: SyncCell<[AlignedTss; crate::hal::cpu::MAX_CPUS]> =
+    SyncCell::new([AlignedTss(TaskStateSegment::empty()); crate::hal::cpu::MAX_CPUS]);
+static AP_IST_NMI: SyncCell<[IstStack; crate::hal::cpu::MAX_CPUS]> =
+    SyncCell::new([IstStack::empty(); crate::hal::cpu::MAX_CPUS]);
+static AP_IST_DOUBLE_FAULT: SyncCell<[IstStack; crate::hal::cpu::MAX_CPUS]> =
+    SyncCell::new([IstStack::empty(); crate::hal::cpu::MAX_CPUS]);
+static AP_IST_MACHINE_CHECK: SyncCell<[IstStack; crate::hal::cpu::MAX_CPUS]> =
+    SyncCell::new([IstStack::empty(); crate::hal::cpu::MAX_CPUS]);
 
 extern "C" {
     /// Start of the trampoline's GDT in `boot/boot.S`, at its low (link-time) address.
@@ -266,18 +286,98 @@ fn init_idt() {
         unsafe { idt.add(vector).write(gate) };
     }
 
+    load_idt();
+}
+
+/// Load the shared IDT on the processor that calls this.
+///
+/// Every processor dispatches through the same 256 stubs, so the table itself is shared; only
+/// the register that points at it is per-processor.
+pub fn load_idt() {
+    // SAFETY: the IDT is fully populated before the first call, and it remains live for the
+    // lifetime of the kernel. LIDT reads the packed 10-byte pseudo-descriptor.
+    let idt = unsafe { ptr::addr_of_mut!((*IDT.get()).0).cast::<IdtGate>() };
     let descriptor = DescriptorTablePointer {
         limit: (size_of::<AlignedIdt>() - 1) as u16,
         base: idt as u64,
     };
-
-    // SAFETY: descriptor points to the fully populated IDT and remains live for the
-    // lifetime of the kernel. LIDT reads the packed 10-byte pseudo-descriptor.
+    // SAFETY: as above; the descriptor is a live stack local for the duration of the
+    // instruction, which copies the base and limit out of it.
     unsafe {
         asm!(
             "lidt [{}]",
             in(reg) &descriptor,
             options(nostack, preserves_flags),
         );
+    }
+}
+
+/// Install descriptor tables for application processor `index`.
+///
+/// The processor must be running on the kernel's page tables with interrupts disabled. Its own
+/// GDT carries the same code and data descriptors as the bootstrap processor's plus a TSS
+/// descriptor for its own TSS; the IDT is the kernel's, loaded by register. `stack_top` is the
+/// processor's kernel stack top, stored as `RSP0` even though this kernel never enters ring 0
+/// *from* ring 3 on an application processor -- an interrupt taken in ring 0 uses the current
+/// stack, and a stack that is not there at all is a fault waiting for the first `_PS0`.
+pub fn init_ap(index: usize, stack_top: u64) {
+    assert!(
+        index < crate::hal::cpu::MAX_CPUS,
+        "descriptor table index out of range"
+    );
+    // SAFETY: `index` was checked, the tables are static, and this processor is the only
+    // reader or writer of its own entries while it initializes them.
+    unsafe {
+        let gdt = ptr::addr_of_mut!((*AP_GDT.get())[index].0).cast::<u64>();
+        let kernel = ptr::addr_of!((*GDT.get()).0).cast::<u64>();
+        for descriptor in 0..5 {
+            ptr::write_volatile(
+                gdt.add(descriptor),
+                ptr::read_volatile(kernel.add(descriptor)),
+            );
+        }
+        let tss = ptr::addr_of_mut!((*AP_TSS.get())[index].0);
+        ptr::addr_of_mut!((*tss).rsp0).write_unaligned(stack_top);
+        ptr::addr_of_mut!((*tss).ist1).write_unaligned(ap_stack_top(&AP_IST_NMI, index));
+        ptr::addr_of_mut!((*tss).ist2).write_unaligned(ap_stack_top(&AP_IST_DOUBLE_FAULT, index));
+        ptr::addr_of_mut!((*tss).ist3).write_unaligned(ap_stack_top(&AP_IST_MACHINE_CHECK, index));
+        ptr::addr_of_mut!((*tss).iomap_base).write_unaligned(size_of::<TaskStateSegment>() as u16);
+        let base = (*AP_TSS.get()).as_ptr().add(index) as u64;
+        let [low, high] = tss_descriptor(base, (size_of::<TaskStateSegment>() - 1) as u32);
+        ptr::write_volatile(gdt.add(5), low);
+        ptr::write_volatile(gdt.add(6), high);
+
+        let descriptor = DescriptorTablePointer {
+            limit: (GDT_ENTRIES * size_of::<u64>() - 1) as u16,
+            base: gdt as u64,
+        };
+        asm!("lgdt [{}]", in(reg) &descriptor, options(nostack, preserves_flags));
+        asm!("ltr ax", in("ax") TSS_SELECTOR, options(nostack, preserves_flags));
+        // This processor entered long mode through the trampoline's *own* descriptor table, so
+        // `%cs` still holds a selector that the table just loaded may not describe the same way
+        // -- and the first interrupt return would reload it and fault. The selector is re-taken
+        // from the kernel table now, while nothing can interrupt the processor.
+        asm!(
+            "push {selector}",
+            "lea {target}, [rip + 2f]",
+            "push {target}",
+            "retfq",
+            "2:",
+            selector = const KERNEL_CODE_SELECTOR,
+            target = out(reg) _,
+        );
+    }
+    load_idt();
+}
+
+fn ap_stack_top(stacks: &SyncCell<[IstStack; crate::hal::cpu::MAX_CPUS]>, index: usize) -> u64 {
+    // SAFETY: the caller checked the index; each IST region belongs to exactly one processor.
+    unsafe {
+        stacks
+            .get()
+            .cast::<IstStack>()
+            .add(index)
+            .cast::<u8>()
+            .add(size_of::<IstStack>()) as u64
     }
 }

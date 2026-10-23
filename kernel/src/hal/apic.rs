@@ -6,8 +6,9 @@ use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 use nolx_hal_core::acpi::{LocalApicNmi, Madt};
 use nolx_hal_core::apic::{
-    calibrated_frequency_hz, periodic_initial_count, priority_class, timer_divide_encoding,
-    x2apic_msr, IA32_APIC_BASE, IA32_TSC_DEADLINE, LAPIC_TIMER_VECTOR,
+    calibrated_frequency_hz, icr_command, periodic_initial_count, priority_class,
+    timer_divide_encoding, x2apic_msr, IpiDelivery, IA32_APIC_BASE, IA32_TSC_DEADLINE,
+    ICR_DELIVERY_PENDING, LAPIC_TIMER_VECTOR, REG_ICR, REG_ICR_HIGH,
 };
 use nolx_hal_core::ipl::Ipl;
 
@@ -28,6 +29,9 @@ const IMCR_SELECT_PORT: u16 = 0x22;
 const IMCR_DATA_PORT: u16 = 0x23;
 const IMCR_APIC_MODE_REGISTER: u8 = 0x70;
 const TIMER_RATE_HZ: u64 = 100;
+/// Bounded wait for an interrupt command to retire: a delivery that never completes is a
+/// platform fault, and spinning forever inside the startup path would hide it.
+const IPI_WAIT: u32 = 1_000_000;
 const TIMER_DIVISOR: u16 = 16;
 const MODE_DISABLED: u8 = 0;
 const MODE_XAPIC: u8 = 1;
@@ -45,6 +49,9 @@ static TSC_FREQUENCY_HZ: AtomicU64 = AtomicU64::new(0);
 static TIMER_MODE: AtomicU8 = AtomicU8::new(TIMER_NOT_CALIBRATED);
 static TSC_DEADLINE_SUPPORTED: AtomicU8 = AtomicU8::new(0);
 static NEXT_TSC_DEADLINE: AtomicU64 = AtomicU64::new(0);
+/// The two local-interrupt-input values the boot path resolved from the MADT, packed as
+/// `LINT0 | LINT1 << 32`, so a wake reset can restore them without re-parsing firmware.
+static LINT_VALUES: AtomicU64 = AtomicU64::new(0);
 
 /// Failure while discovering or initializing the local APIC.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,6 +161,10 @@ pub fn init(madt: &Madt, features: CpuFeatures) -> Result<(), ApicError> {
     write_register(nolx_hal_core::apic::reg::LVT_ERROR, APIC_LVT_MASKED);
     write_register(nolx_hal_core::apic::reg::LVT_LINT0, lint_values[0]);
     write_register(nolx_hal_core::apic::reg::LVT_LINT1, lint_values[1]);
+    LINT_VALUES.store(
+        u64::from(lint_values[0]) | (u64::from(lint_values[1]) << 32),
+        Ordering::Release,
+    );
     write_register(
         nolx_hal_core::apic::reg::SVR,
         APIC_SVR_ENABLE | u32::from(nolx_hal_core::apic::APIC_SPURIOUS_VECTOR),
@@ -164,6 +175,140 @@ pub fn init(madt: &Madt, features: CpuFeatures) -> Result<(), ApicError> {
         switch_imcr_to_apic();
     }
     Ok(())
+}
+
+/// Enable this processor's local APIC in the mode the bootstrap processor selected.
+///
+/// Every register here is per-processor, so an application processor repeats what [`init`]
+/// did for the bootstrap processor *except* the I/O APIC programming and the legacy-PIC
+/// switch: those are system-wide and already done. The mode, base and vector assignments are
+/// read from the bootstrap processor's discovery instead of being re-derived, because a second
+/// processor must not disagree with the first about where its registers are.
+///
+/// The interrupt inputs and the timer are left masked. An application processor in this kernel
+/// takes no device interrupt and keeps no time; it answers inter-processor interrupts and
+/// otherwise halts, so anything else arriving on it is a bug that the dispatcher counts rather
+/// than a source to arm.
+pub fn init_ap() -> Result<(), ApicError> {
+    let mode = MODE.load(Ordering::Acquire);
+    if mode == MODE_DISABLED {
+        return Err(ApicError::Unsupported);
+    }
+    let base = LOCAL_APIC_BASE.load(Ordering::Acquire);
+    // SAFETY: CPUID verified local-APIC support on the bootstrap processor; IA32_APIC_BASE is
+    // architectural, and this processor has its own copy of it.
+    let previous = unsafe { rdmsr(IA32_APIC_BASE) };
+    let mut value = (previous & !APIC_BASE_ADDRESS_MASK) | base | APIC_BASE_ENABLE;
+    if mode == MODE_X2APIC {
+        value |= APIC_BASE_X2APIC;
+    } else {
+        value &= !APIC_BASE_X2APIC;
+    }
+    // SAFETY: as above; the base and mode were validated for the bootstrap processor and are
+    // properties of the platform, not of one processor.
+    unsafe { wrmsr(IA32_APIC_BASE, value) };
+
+    write_register(nolx_hal_core::apic::reg::TPR, 0);
+    write_register(
+        nolx_hal_core::apic::reg::LVT_TIMER,
+        APIC_LVT_MASKED | u32::from(LAPIC_TIMER_VECTOR),
+    );
+    write_register(nolx_hal_core::apic::reg::LVT_PERFORMANCE, APIC_LVT_MASKED);
+    write_register(nolx_hal_core::apic::reg::LVT_ERROR, APIC_LVT_MASKED);
+    write_register(nolx_hal_core::apic::reg::LVT_LINT0, APIC_LVT_MASKED);
+    write_register(nolx_hal_core::apic::reg::LVT_LINT1, APIC_LVT_MASKED);
+    write_register(
+        nolx_hal_core::apic::reg::SVR,
+        APIC_SVR_ENABLE | u32::from(nolx_hal_core::apic::APIC_SPURIOUS_VECTOR),
+    );
+    Ok(())
+}
+
+/// Re-enable the bootstrap processor's local APIC after a wake reset.
+///
+/// A platform wake returns every processor to its power-on state: IA32_APIC_BASE loses the
+/// global-enable bit (and any x2APIC selection), the software-enable bit in the spurious-vector
+/// register is clear, the task priority, the local-interrupt inputs and the timer are reset.
+/// The kernel's own view of the controller survived in RAM, so this restores exactly what the
+/// boot path validated -- the base and mode it selected, the LINT values it resolved from the
+/// MADT and the calibrated timer -- and programmes nothing new. The I/O APIC is deliberately
+/// untouched: its redirection entries belong to the per-device restore that follows, and
+/// masking them here would take away routes that restore is about to re-establish.
+pub fn resume() -> Result<(), ApicError> {
+    if !is_enabled() {
+        return Err(ApicError::Unsupported);
+    }
+    let base = LOCAL_APIC_BASE.load(Ordering::Acquire);
+    // SAFETY: CPUID verified local-APIC support before the first `init`; IA32_APIC_BASE is
+    // architectural and this processor has its own copy of it.
+    let previous = unsafe { rdmsr(IA32_APIC_BASE) };
+    let mut value = (previous & !APIC_BASE_ADDRESS_MASK) | base | APIC_BASE_ENABLE;
+    if is_x2apic() {
+        value |= APIC_BASE_X2APIC;
+    } else {
+        value &= !APIC_BASE_X2APIC;
+    }
+    // SAFETY: the base and mode are the ones `init` validated for this platform; a wake does
+    // not move the controller.
+    unsafe { wrmsr(IA32_APIC_BASE, value) };
+
+    // In x2APIC mode the register writes below are MSR accesses, which only work once the mode
+    // bit above is set again -- hence the order.
+    write_register(nolx_hal_core::apic::reg::TPR, 0);
+    write_register(nolx_hal_core::apic::reg::LVT_PERFORMANCE, APIC_LVT_MASKED);
+    write_register(nolx_hal_core::apic::reg::LVT_ERROR, APIC_LVT_MASKED);
+    let lint = LINT_VALUES.load(Ordering::Acquire);
+    write_register(nolx_hal_core::apic::reg::LVT_LINT0, lint as u32);
+    write_register(nolx_hal_core::apic::reg::LVT_LINT1, (lint >> 32) as u32);
+    write_register(
+        nolx_hal_core::apic::reg::SVR,
+        APIC_SVR_ENABLE | u32::from(nolx_hal_core::apic::APIC_SPURIOUS_VECTOR),
+    );
+    // The rate was calibrated against the HPET at boot and is a property of the platform, not
+    // of the sleep, so the timer is re-armed from it rather than calibrated again.
+    let _ = start_local_timer();
+    Ok(())
+}
+
+/// Why an inter-processor interrupt could not be issued.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IpiError {
+    /// No local-APIC interface is active, or the destination is not addressable.
+    Unsupported,
+    /// The previous delivery did not retire within the bounded wait.
+    Busy,
+}
+
+/// Send an inter-processor interrupt to one local APIC.
+///
+/// xAPIC splits the command across two MMIO registers and takes the destination in bits 24-31
+/// of the high half; x2APIC carries the same command in one MSR with the destination in the
+/// upper 32 bits. Both wait for the delivery-status bit to clear, because a second command
+/// written while one is in flight is dropped by the hardware, which would turn a processor
+/// that came up slowly into one that never came up at all.
+pub fn send_ipi(destination: u32, delivery: IpiDelivery, vector: u8) -> Result<(), IpiError> {
+    if !is_enabled() || destination > 0xff {
+        return Err(IpiError::Unsupported);
+    }
+    let command = icr_command(delivery, vector);
+    if is_x2apic() {
+        let Some(msr) = x2apic_msr(REG_ICR) else {
+            return Err(IpiError::Unsupported);
+        };
+        // SAFETY: x2APIC mode is active, so the interrupt-command MSR is the architectural
+        // interface for this processor's ICR.
+        unsafe { wrmsr(msr, (u64::from(destination) << 32) | u64::from(command)) };
+    } else {
+        write_register(REG_ICR_HIGH, destination << 24);
+        write_register(REG_ICR, command);
+    }
+    for _ in 0..IPI_WAIT {
+        if read_register(REG_ICR) & ICR_DELIVERY_PENDING == 0 {
+            return Ok(());
+        }
+        core::hint::spin_loop();
+    }
+    Err(IpiError::Busy)
 }
 
 /// Whether local APIC programming succeeded and the BSP controller is active.
@@ -334,6 +479,23 @@ pub fn start_local_timer() -> bool {
     write_register(nolx_hal_core::apic::reg::TIMER_INITIAL_COUNT, count);
     TIMER_MODE.store(TIMER_LAPIC_PERIODIC, Ordering::Release);
     true
+}
+
+/// The calibrated timestamp-counter rate, or `None` before calibration.
+#[must_use]
+pub fn timestamp_frequency_hz() -> Option<u64> {
+    let frequency = TSC_FREQUENCY_HZ.load(Ordering::Acquire);
+    (frequency != 0).then_some(frequency)
+}
+
+/// Read the timestamp counter, when the boot path calibrated it.
+///
+/// This is the one clock a wake reset does not stop: the counter is per-processor and keeps
+/// running across the sleep, unlike the HPET's, whose enable bit the platform clears. Delays
+/// and bounded waits that must survive a resume are measured against it.
+#[must_use]
+pub fn timestamp() -> Option<u64> {
+    timestamp_frequency_hz().map(|_| read_tsc())
 }
 
 /// Whether the configured local timer requires a new TSC deadline after each tick.

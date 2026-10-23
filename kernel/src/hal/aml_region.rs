@@ -16,8 +16,10 @@
 //! journaled only.
 
 use crate::mm::mmio;
+use nolx_pci_core::{Bdf, ConfigSpace as _};
 use nolx_power_core::aml::{
-    Error, RegionField, RegionFieldReader, RegionFieldWriteBackend, RegionSpace,
+    Error, FieldReader, PciField, PciFieldWriteBackend, RegionField, RegionFieldReader,
+    RegionFieldWriteBackend, RegionSpace,
 };
 
 /// How many firmware windows this provider will answer for.
@@ -513,5 +515,179 @@ impl RegionFieldWriteBackend for FirmwareRegions {
             RegionSpace::EmbeddedControl => self.ec.write_field(field, value),
             _ => self.windows.write_field(field, value),
         }
+    }
+}
+
+/// How many PCI functions one device power transition may program.
+pub const MAX_PCI_SCOPES: usize = 1;
+
+/// PCI **configuration** operation regions, for the one function a transition belongs to.
+///
+/// A `PCI_Config` region names a configuration-space offset in its own base, and every field
+/// inside it is a register of whatever device declared it. The evaluator resolves the address
+/// from the declaring device's `_ADR` under a segment-zero, bus-zero root bridge and requires
+/// the region base and the field to stay inside the 256-byte header, so this provider only has
+/// to answer "which function" and "which byte". It answers exactly the addresses it was
+/// authorized with: a field naming any other function is refused, not clamped.
+///
+/// Reads are the declared access width (1, 2 or 4 bytes) so a 16-bit `PMCS` read returns 16
+/// bits; writes are one byte, because that is the granularity a transaction verifies and rolls
+/// back. The transport is the kernel's audited configuration access, so a transition uses the
+/// same ECAM or `0xCF8`/`0xCFC` path as every other configuration user instead of a second,
+/// unaudited register interface.
+#[derive(Clone, Copy)]
+pub struct PciConfigRegions {
+    /// `_ADR` device/function tokens (`device << 16 | function`) this provider answers for.
+    addresses: [Option<u32>; MAX_PCI_SCOPES],
+    count: usize,
+}
+
+impl PciConfigRegions {
+    /// No function authorized: every configuration access is refused.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            addresses: [None; MAX_PCI_SCOPES],
+            count: 0,
+        }
+    }
+
+    /// Authorize one device/function token, refusing a malformed `_ADR` rather than masking it.
+    pub fn authorize(&mut self, address: u32) -> bool {
+        if address & !0x1f_0007 != 0 || self.count == MAX_PCI_SCOPES {
+            return false;
+        }
+        self.addresses[self.count] = Some(address);
+        self.count += 1;
+        true
+    }
+
+    /// Whether this provider answers for `address`.
+    #[must_use]
+    pub fn authorized(&self, address: u32) -> bool {
+        self.addresses[..self.count].contains(&Some(address))
+    }
+
+    /// Whether any function is authorized.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    fn bdf(address: u32) -> Result<Bdf, Error> {
+        let device = u8::try_from(address >> 16).map_err(|_| Error::Unsupported(0x5b83))?;
+        let function = u8::try_from(address & 7).map_err(|_| Error::Unsupported(0x5b83))?;
+        Bdf::new(0, device, function).map_err(|_| Error::Unsupported(0x5b83))
+    }
+
+    fn check(&self, field: PciField) -> Result<Bdf, Error> {
+        if !self.authorized(field.address) || !field.bytes.is_power_of_two() {
+            return Err(Error::Unsupported(0x5b83));
+        }
+        let bytes = u32::from(field.bytes);
+        if bytes > 4
+            || u32::from(field.offset) % bytes != 0
+            || u32::from(field.offset) + bytes > 256
+        {
+            return Err(Error::Unsupported(0x5b83));
+        }
+        Self::bdf(field.address)
+    }
+
+    fn read_bytes(&self, field: PciField) -> Result<u64, Error> {
+        let bdf = self.check(field)?;
+        let mut value = 0u64;
+        for index in 0..field.bytes {
+            let offset = field.offset + u16::from(index);
+            let dword = super::pci::ConfigAccess.read_u32(bdf, (offset & !3) as u8);
+            let byte = (dword >> ((offset & 3) * 8)) as u8;
+            value |= u64::from(byte) << (index * 8);
+        }
+        Ok(value)
+    }
+
+    fn write_byte_now(&self, field: PciField, value: u8) -> Result<(), Error> {
+        let bdf = self.check(PciField { bytes: 1, ..field })?;
+        let offset = field.offset;
+        let shift = (offset & 3) * 8;
+        let old = super::pci::ConfigAccess.read_u32(bdf, (offset & !3) as u8);
+        let value = (old & !(0xff << shift)) | (u32::from(value) << shift);
+        super::pci::ConfigAccess.write_u32(bdf, (offset & !3) as u8, value);
+        Ok(())
+    }
+}
+
+impl FieldReader for PciConfigRegions {
+    fn read(&self, field: PciField) -> Result<u64, Error> {
+        self.read_bytes(field)
+    }
+}
+
+impl PciFieldWriteBackend for PciConfigRegions {
+    type Error = Error;
+
+    fn read_byte(&mut self, field: PciField) -> Result<u8, Error> {
+        self.read_bytes(PciField { bytes: 1, ..field })
+            .map(|value| value as u8)
+    }
+
+    fn write_byte(&mut self, field: PciField, value: u8) -> Result<(), Error> {
+        self.write_byte_now(field, value)
+    }
+}
+
+/// The reader a device power transition evaluates through: the authorized configuration
+/// functions first, then the boot-time PIRQ snapshot.
+///
+/// Splitting by address, rather than trying one provider and falling back on error, keeps a
+/// genuine transport failure visible instead of turning it into "not a PIRQ byte".
+pub struct PowerFieldReader<'a> {
+    /// Configuration space of the recorded power targets.
+    pub pci: &'a PciConfigRegions,
+    /// The read-only PIRQ snapshot `_SRS` planning uses.
+    pub snapshot: &'a super::pci_intx::Snapshot,
+}
+
+impl FieldReader for PowerFieldReader<'_> {
+    fn read(&self, field: PciField) -> Result<u64, Error> {
+        if self.pci.authorized(field.address) {
+            self.pci.read(field)
+        } else {
+            self.snapshot.read(field)
+        }
+    }
+}
+
+/// The writer a device power transition applies through: operation regions and configuration
+/// space under one error type, so a mixed journal rolls back as one transaction.
+#[derive(Clone, Copy)]
+pub struct DevicePowerProvider {
+    /// Memory-mapped, port and embedded-controller regions.
+    pub regions: FirmwareRegions,
+    /// The transitioning device's own configuration function.
+    pub pci: PciConfigRegions,
+}
+
+impl RegionFieldWriteBackend for DevicePowerProvider {
+    type Error = Error;
+
+    fn read_field(&mut self, field: RegionField) -> Result<u64, Error> {
+        self.regions.read_field(field)
+    }
+
+    fn write_field(&mut self, field: RegionField, value: u64) -> Result<(), Error> {
+        self.regions.write_field(field, value)
+    }
+}
+
+impl PciFieldWriteBackend for DevicePowerProvider {
+    type Error = Error;
+
+    fn read_byte(&mut self, field: PciField) -> Result<u8, Error> {
+        self.pci.read_byte(field)
+    }
+
+    fn write_byte(&mut self, field: PciField, value: u8) -> Result<(), Error> {
+        self.pci.write_byte(field, value)
     }
 }

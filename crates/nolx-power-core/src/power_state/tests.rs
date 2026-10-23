@@ -283,6 +283,7 @@ fn effects(values: &[u64]) -> MethodEffects {
         reads: Vec::new(),
         writes: Vec::new(),
         region_reads: Vec::new(),
+        device_writes: Vec::new(),
         region_writes: values
             .iter()
             .map(|&value| crate::aml::RegionFieldWrite {

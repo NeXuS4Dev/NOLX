@@ -39,6 +39,53 @@ pub mod reg {
     pub const TIMER_DIVIDE: u16 = 0x3E0;
 }
 
+/// Interrupt-command register (low half in xAPIC mode).
+pub const REG_ICR: u16 = 0x300;
+/// Interrupt-command register (destination half in xAPIC mode).
+pub const REG_ICR_HIGH: u16 = 0x310;
+
+/// Bit 12 of the interrupt-command register: a delivery is still in progress.
+pub const ICR_DELIVERY_PENDING: u32 = 1 << 12;
+/// Bit 14: assert the level for a level-triggered delivery such as `INIT`.
+pub const ICR_LEVEL_ASSERT: u32 = 1 << 14;
+
+/// How an inter-processor interrupt is delivered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IpiDelivery {
+    /// Deliver the vector as an ordinary interrupt.
+    Fixed,
+    /// Reset the target processor, which then waits for a startup IPI.
+    Init,
+    /// Start the target processor at `vector << 12`.
+    Startup,
+}
+
+impl IpiDelivery {
+    /// The delivery-mode field an ICR takes.
+    #[must_use]
+    pub const fn code(self) -> u32 {
+        match self {
+            Self::Fixed => 0,
+            Self::Init => 5,
+            Self::Startup => 6,
+        }
+    }
+}
+
+/// The interrupt-command value for `vector`, without a destination.
+///
+/// `INIT` is level-asserted: it is delivered as an edge only after the level is asserted, and
+/// the architecture requires the assert bit for the delivery to take effect. A startup IPI
+/// carries its target address in the vector field and is never asserted this way.
+#[must_use]
+pub const fn icr_command(delivery: IpiDelivery, vector: u8) -> u32 {
+    let mut value = (delivery.code() << 8) | vector as u32;
+    if matches!(delivery, IpiDelivery::Init) {
+        value |= ICR_LEVEL_ASSERT;
+    }
+    value
+}
+
 /// Convert an aligned xAPIC register offset to its x2APIC MSR number.
 #[must_use]
 pub const fn x2apic_msr(register_offset: u16) -> Option<u32> {
@@ -176,5 +223,27 @@ mod tests {
         );
         assert_eq!(calibrated_frequency_hz(0, 1, 1), None);
         assert_eq!(calibrated_frequency_hz(1, 0, 1), None);
+    }
+
+    #[test]
+    fn an_init_ipi_is_level_asserted_and_a_startup_ipi_names_its_page() {
+        // INIT: delivery mode 5, no vector, assert bit 14 -- the encoding every x86 firmware
+        // expects before the startup IPI that follows it.
+        assert_eq!(icr_command(IpiDelivery::Init, 0), 0x4500);
+        // Startup vector 0x0f starts the target at 0x0f000.
+        assert_eq!(icr_command(IpiDelivery::Startup, 0x0f), 0x060f);
+        // A fixed IPI is just the vector.
+        assert_eq!(icr_command(IpiDelivery::Fixed, 0xf0), 0xf0);
+        assert_eq!(IpiDelivery::Init.code(), 5);
+        assert_eq!(IpiDelivery::Startup.code(), 6);
+        assert_eq!(IpiDelivery::Fixed.code(), 0);
+    }
+
+    #[test]
+    fn the_icr_is_addressable_in_both_register_models() {
+        assert_eq!(x2apic_msr(REG_ICR), Some(0x830));
+        // The destination half has no x2APIC counterpart: x2APIC carries the destination in
+        // the upper 32 bits of the one register.
+        assert_eq!(REG_ICR_HIGH, 0x310);
     }
 }

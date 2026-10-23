@@ -316,7 +316,11 @@ pub enum PowerNamespaceError {
 /// the interpreter's. Nothing here is authorized by a device name: a field outside a window
 /// validated from a parsed table is refused by the provider.
 pub fn with_power_namespace<R>(
-    body: impl FnOnce(&mut power::aml::Namespace<'_>, &mut super::aml_region::FirmwareRegions) -> R,
+    body: impl FnOnce(
+        &mut power::aml::Namespace<'_>,
+        &mut super::aml_region::FirmwareRegions,
+        &super::aml_region::PciConfigRegions,
+    ) -> R,
 ) -> Result<R, PowerNamespaceError> {
     let regions = power_regions().ok_or(PowerNamespaceError::Regions)?;
     let platform = discover().ok_or(PowerNamespaceError::Platform)?;
@@ -354,8 +358,30 @@ pub fn with_power_namespace<R>(
             }
         }
     }
+    // Configuration-space reads are answered here, before the closure runs, because which
+    // functions are readable is firmware metadata: each recorded power target whose `_ADR`
+    // names a valid function on the root bus is authorized, and nothing else is. The reader is
+    // installed after the load (loading never evaluates a field) so `pci_function` can read
+    // `_ADR`/`_HID`/`_SEG`/`_BBN` from the loaded namespace.
+    let mut pci = super::aml_region::PciConfigRegions::empty();
+    for index in 0..power_target_count() {
+        let Some(target) = power_target(index) else {
+            continue;
+        };
+        let Ok(path) = power::aml::Path::parse(target.name()) else {
+            continue;
+        };
+        if let Ok(Some(scope)) = namespace.device_pci_scope(&path) {
+            let _ = pci.authorize(scope.address);
+        }
+    }
+    let power_reader = super::aml_region::PowerFieldReader {
+        pci: &pci,
+        snapshot: &snapshot,
+    };
+    namespace.set_field_reader(&power_reader);
     let mut regions = regions;
-    Ok(body(&mut namespace, &mut regions))
+    Ok(body(&mut namespace, &mut regions, &pci))
 }
 
 const MAX_FIRMWARE_DEVICES: usize = 128;
@@ -890,6 +916,8 @@ fn region_write_selftest(console: &mut dyn nolx_hal_core::console::HalConsole) {
             field,
             value: current
         }],
+        // This fixture drives the region transaction directly, so there is no ordered journal.
+        device_writes: alloc::vec::Vec::new(),
     };
     let permission =
         RegionFieldWritePermission::from_values(field, &[current]).expect("permission");
