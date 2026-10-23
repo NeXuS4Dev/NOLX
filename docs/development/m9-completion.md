@@ -2461,8 +2461,8 @@ so a refused configuration byte restores the region write that preceded it.
 * Host tests: 928 tests across `cargo test --lib --bins` and `cargo test --tests`, 128 in
   `nolx-power-core --lib`, 6 of the 44 in `nolx-hal-core --lib apic`, all passing;
   `cargo fmt --all -- --check` and `cargo clippy --all-targets -- -D warnings` are clean.
-* The conformance database holds 454 assertions with 0 problems (PWR-046 `tested-T1`,
-  PWR-047..PWR-049 `pending-T2` until a CI run records them).
+* The conformance database holds 454 assertions with 0 problems; PWR-046 is `tested-T1` and
+  PWR-047..PWR-049 are `tested-T2`, citing CI run [39966209704](https://github.com/NeXuS4Dev/NOLX/actions/runs/39966209704) on `c2b2289`.
 * The S5 profiles — including the negative one, which needs an adapter the kernel actually
   started — pass on this host too. That case used to be the one piece of the power suite that
   could not run here: this sandbox's QEMU is built without libslirp, so `-netdev user` is
@@ -2473,6 +2473,11 @@ so a refused configuration byte restores the region write that preceded it.
   the same three S5 profiles and the six `check-virtio-net.py` captures, with the byte-level
   assertions unchanged (the peer speaks as slirp's gateway does), and both scripts can be run
   with `--netdev socket` in CI to keep that path exercised.
+
+**CI.** Run [39966209704](https://github.com/NeXuS4Dev/NOLX/actions/runs/39966209704) on `c2b2289` passed **all 19 jobs**. The power job now also runs
+`--dstate-pci`, `--dstate-pci --dstate-foreign`, `--smp 2` and `--smp 4 --machine q35`; the S5
+job re-runs its three profiles against the ARP peer, and the network job re-runs its six captures
+the same way, so neither depends on the host QEMU having slirp.
 
 **What this does not claim.** The kernel is still a single-scheduling-domain kernel: application
 processors hold no device, no runnable thread and no timer, and are used to prove that per-processor

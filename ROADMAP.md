@@ -881,9 +881,12 @@ Firmware device power states (`_PSC`/`_PRW`, `_PS3` before the sleep and `_PS0` 
 PCI configuration-space operation regions landed after that run (PWR-040..PWR-047): a `_PS3` that
 programs its own function's PCI power-management register now executes with a verified readback,
 and one that names another function is refused before any access. Application processors are
-started from a real-mode trampoline, prove themselves with an inter-processor interrupt, park
-before the sleep and restart after the wake (PWR-048), and the HPET counter and local APIC the wake
-reset stops are re-taken and observed (PWR-049). **M9 remains in progress:** the kernel is still a
+started from a real-mode trampoline, prove themselves with an inter-processor interrupt, are
+parked and held in INIT across the sleep and restarted after the wake (PWR-048), and the HPET
+counter and local APIC the wake reset stops are re-taken and observed (PWR-049). CI run
+[39966209704](https://github.com/NeXuS4Dev/NOLX/actions/runs/39966209704) on `c2b2289` passed all
+19 jobs with those fixtures; PWR-046 is `tested-T1` and PWR-047..PWR-049 are `tested-T2`.
+**M9 remains in progress:** the kernel is still a
 single scheduling domain — an application processor owns no device, thread or timer — the
 higher-layer cache/user-task orchestration around S3 is not implemented, no part of the sleep path
 ran on physical hardware, and the EC handshake has no machine to run on.
