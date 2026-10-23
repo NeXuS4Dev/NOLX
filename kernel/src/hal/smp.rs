@@ -575,8 +575,8 @@ fn write_trampoline() {
     // SAFETY: as `write_slot64`; the blob is copied into the mapped page and every slot lies
     // inside it.
     unsafe {
-        let start = core::ptr::addr_of!(ap_boot_start) as *const u8;
-        let end = core::ptr::addr_of!(ap_boot_end) as *const u8;
+        let start = core::ptr::addr_of!(ap_boot_start);
+        let end = core::ptr::addr_of!(ap_boot_end);
         let length = end as usize - start as usize;
         assert!(length <= 0x200, "the startup trampoline outgrew its page");
         let low = crate::mm::phys::direct(TRAMPOLINE) as *mut u8;
