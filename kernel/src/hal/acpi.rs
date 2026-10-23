@@ -772,7 +772,9 @@ pub fn evaluate_devices(console: &mut dyn nolx_hal_core::console::HalConsole) {
             power_refused += 1;
             continue;
         }
-        target.refused = power_refused > 0 && (current.is_none() || wake.is_none());
+        // Declared-but-not-evaluated, rather than declared-absent: `_PSC` and `_PRW` are data,
+        // so a node that declares one and has no value here had that evaluation refused.
+        target.refused = (methods.psc && current.is_none()) || (methods.prw && wake.is_none());
         POWER_TARGETS.lock()[power_retained] = Some(target);
         power_retained += 1;
     }
