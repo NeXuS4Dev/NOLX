@@ -2379,6 +2379,16 @@ application processor to resume because none was ever started, and a `_PS3` that
 device's PCI power-management register was refused because no configuration-space operation-region
 provider existed. Both are now exercised by real PC and Q35 fixtures.
 
+**Holding them out of the restore.** Parking a processor halts it, and a halt is not a
+guarantee: a platform wake may return a halted processor to the firmware entry point, where
+several of them would run bring-up -- or re-enter the S3 hand-off -- alongside the processor
+restoring the machine, with no lock in this kernel able to arbitrate. Every processor is
+therefore put in `INIT` (wait-for-startup) after it acknowledges the park and again immediately
+after the wake, before the platform is touched; the second one is why the local APIC is
+re-enabled before the PCI re-take rather than after it. CI found this: the four-processor Q35
+fixture stalled in the post-wake resource assignment while the same fixture passed locally and
+the two-processor one passed in CI.
+
 **Starting a processor the firmware described.** `kernel/src/hal/smp.rs` copies a 16-bit
 trampoline into the first megabyte (`0x000f_0000`, startup vector `0x0f`): the processor enters in
 real mode with `%cs = 0x0f00`, the blob loads a private GDT, sets `CR4.PAE`, `CR3` and `EFER.NXE`,

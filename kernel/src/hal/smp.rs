@@ -344,13 +344,48 @@ pub fn park(console: &mut dyn HalConsole) -> Result<usize, usize> {
             console,
             "smp: parked {parked_count} application processor(s) for the sleep, {refused} refused"
         );
+    }
+    if refused != 0 {
         console.flush();
+        return Err(refused);
     }
-    if refused == 0 {
-        Ok(parked_count)
-    } else {
-        Err(refused)
+    // A parked processor is halted, not held: a wake that resets the platform can return it to
+    // the firmware entry point, and several processors running firmware bring-up -- or the S3
+    // hand-off itself -- alongside the processor that is restoring the machine is a race no
+    // lock in this kernel can arbitrate. `INIT` puts each one in the wait-for-startup state,
+    // which is the state ACPI requires a non-booting processor to be in for a sleep, and it
+    // takes no cooperation from the processor to work.
+    let held = hold(console);
+    let _ = writeln!(
+        console,
+        "smp: {held} application processor(s) held in INIT for the sleep"
+    );
+    console.flush();
+    Ok(parked_count)
+}
+
+/// Put every processor this kernel started into the wait-for-startup state.
+///
+/// Returns how many accepted the interrupt. This is not a request the processor can refuse or
+/// ignore: `INIT` is delivered to the local APIC, and the processor stops executing whatever it
+/// was running. It is safe to repeat -- before a sleep, immediately after a wake, and again
+/// before each startup IPI.
+pub fn hold(console: &mut dyn HalConsole) -> usize {
+    let recorded = RECORDED.load(Ordering::Acquire) as usize;
+    let mut held = 0usize;
+    for index in 1..=recorded {
+        let slot = &pages()[index];
+        let id = slot.apic_id.load(Ordering::Acquire);
+        if id == 0 {
+            continue;
+        }
+        slot.state.store(OFFLINE, Ordering::Release);
+        if super::apic::send_ipi(id, IpiDelivery::Init, 0).is_ok() {
+            held += 1;
+        }
     }
+    let _ = console;
+    held
 }
 
 /// Restart every processor that was parked, and prove each one is taking interrupts again.

@@ -259,9 +259,16 @@ def boot(qemu, kernel, machine, devices=False, dstate=False, dstate_refused=Fals
         if 'power: requesting ACPI S3' in text:
             assert (f'smp: parked {smp - 1} application processor(s) for the sleep, 0 refused'
                     in text), text
+            # Parking is a halt, and a wake may return a halted processor to the firmware
+            # entry point; the processors are put in the wait-for-startup state as well, which
+            # is what keeps them out of the platform restore.
+            assert (f'smp: {smp - 1} application processor(s) held in INIT for the sleep'
+                    in text), text
             note += ', parked for the sleep'
         if 'power: resumed from S3' in text:
             resumed = text.split('power: resumed from S3', 1)[1]
+            assert (f'smp: {smp - 1} application processor(s) held in INIT after the wake'
+                    in resumed), text
             assert (f'smp: resumed {smp - 1} of {smp - 1} application processor(s) after the '
                     f'wake, {smp - 1} answered an inter-processor interrupt') in resumed, text
             assert (f'power: post-resume processor restart: {smp - 1} application processor(s) '

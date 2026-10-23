@@ -244,6 +244,44 @@ pub extern "C" fn s3_resume_rust() -> ! {
     );
     console.flush();
     assert_eq!(tag, S3_RESUME_TAG, "the S3 resume tag did not survive");
+    // The two clocks a wake reset stops come back first: the HPET counter, because every
+    // bounded wait below measures against it, and this processor's local APIC, because the hold
+    // below is an inter-processor interrupt. An application processor a wake left outside the
+    // wait-for-startup state has to be stopped before the platform is touched at all -- a
+    // processor executing firmware bring-up, or re-entering the S3 hand-off, races the restore
+    // with nothing in this kernel able to arbitrate it.
+    let hpet_running = super::hpet::resume();
+    let _ = writeln!(
+        console,
+        "power: post-resume HPET main counter {}",
+        if hpet_running {
+            "running"
+        } else {
+            "not running"
+        }
+    );
+    console.flush();
+    if super::apic::resume().is_ok() {
+        let _ = writeln!(
+            console,
+            "power: post-resume local APIC re-enabled ({}), timer re-armed",
+            super::apic::mode_name()
+        );
+    } else {
+        let _ = writeln!(
+            console,
+            "power: post-resume local APIC could not be re-enabled; application processors stay offline"
+        );
+    }
+    console.flush();
+    let held = super::smp::hold(&mut console);
+    if held > 0 {
+        let _ = writeln!(
+            console,
+            "smp: {held} application processor(s) held in INIT after the wake"
+        );
+        console.flush();
+    }
     match resume_platform(&mut console) {
         Ok(()) => {
             // The wake reset left every application processor in its reset state. Restarting
@@ -349,20 +387,6 @@ fn resume_platform(console: &mut dyn HalConsole) -> Result<(), Error> {
     let tables = super::acpi::discover().ok_or(Error::Firmware)?;
     let fadt = tables.fadt.ok_or(Error::Firmware)?;
     super::pci::refresh_transport(console);
-    // The wake reset clears the HPET's enable bit, so the kernel's monotonic clock stops even
-    // though its mapping and measured frequency survived. Everything below -- the PCI delays,
-    // the per-device restore and the processor restarts -- measures time, so the counter is
-    // restarted first and its motion is what is reported.
-    let hpet_running = super::hpet::resume();
-    let _ = writeln!(
-        console,
-        "power: post-resume HPET main counter {}",
-        if hpet_running {
-            "running"
-        } else {
-            "not running"
-        }
-    );
     // The wake reset also returns every function's BARs to their power-on value, which on this
     // board profile means the addresses the kernel planned at boot are gone -- a driver that
     // maps its BAR afterwards reads a zero base and refuses (observed as `BarNotMemory(4)`).
@@ -376,16 +400,6 @@ fn resume_platform(console: &mut dyn HalConsole) -> Result<(), Error> {
         console,
         "power: post-resume PM1a {:#x} control {current:#x} (readback {readback:#x}), ACPI mode re-entered",
         fadt.pm1a_control
-    );
-    console.flush();
-    // The wake reset also returns this processor's local APIC to its power-on state: software
-    // disabled, timer stopped, interrupt inputs cleared. No processor can be restarted and no
-    // inter-processor interrupt delivered until it is enabled again.
-    super::apic::resume().map_err(|_| Error::Unsupported)?;
-    let _ = writeln!(
-        console,
-        "power: post-resume local APIC re-enabled ({}), timer re-armed",
-        super::apic::mode_name()
     );
     console.flush();
     Ok(())
