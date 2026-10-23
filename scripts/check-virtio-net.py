@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
-"""Exercise native virtio-net RX/TX and MSI-X, validating actual captured wire bytes."""
+"""Exercise native virtio-net RX/TX and MSI-X, validating actual captured wire bytes.
+
+The driver resolves the gateway over ARP before it reports the adapter started, so the fixture
+needs a host-side peer. `user` (QEMU's slirp, the default) is what CI uses; `socket` serves the
+same exchange from this script with `net_peer.ArpPeer`, for a QEMU build without libslirp.
+Either way the captured bytes are the same, because the peer answers as slirp's gateway does.
+"""
+import argparse
 import os
 from pathlib import Path
 import re
 import struct
 import subprocess
 import time
+
+from net_peer import ArpPeer
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / 'build'
@@ -29,7 +38,7 @@ def packets(path):
     return frames
 
 
-def boot(machine, modern, present=True, apic=True):
+def boot(machine, modern, present=True, apic=True, netdev='user'):
     name = f'virtio-net-{machine}-{"modern" if modern else "transitional"}'
     if not present:
         name += '-absent'
@@ -39,8 +48,14 @@ def boot(machine, modern, present=True, apic=True):
     capture = BUILD / f'{name}.pcap'
     command = [QEMU, '-machine', machine, '-kernel', str(BUILD / 'nolx.elf'),
                '-m', '512M', '-nographic', '-no-reboot']
+    peer = None
     if present:
-        command += ['-netdev', 'user,id=net0,ipv6=off', '-device',
+        if netdev == 'socket':
+            peer = ArpPeer().start()
+            backend = f'socket,id=net0,connect=127.0.0.1:{peer.port}'
+        else:
+            backend = 'user,id=net0,ipv6=off'
+        command += ['-netdev', backend, '-device',
                     f'virtio-net-pci,netdev=net0,mac=02:00:00:00:00:11,disable-legacy={"on" if modern else "off"}',
                     '-object', f'filter-dump,id=capture,netdev=net0,file={capture}']
     else:
@@ -62,6 +77,8 @@ def boot(machine, modern, present=True, apic=True):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+    if peer is not None:
+        peer.close()
     text = log.read_text(errors='replace')
     assert not re.search(r'PANIC|BUGCHECK|CPU exception', text), text
     assert 'NOLX: init sequence complete' in text, text
@@ -91,12 +108,18 @@ def boot(machine, modern, present=True, apic=True):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--netdev', choices=['user', 'socket'],
+                        default=os.environ.get('NOLX_NETDEV', 'user'),
+                        help='host-side network backend for the bound cases')
+    parser.add_argument('--machine', choices=['pc', 'q35'], action='append')
+    args = parser.parse_args()
     BUILD.mkdir(exist_ok=True)
-    for machine in ['pc', 'q35']:
+    for machine in args.machine or ['pc', 'q35']:
         for modern in [False, True]:
-            boot(machine, modern)
-    boot('pc', True, present=False)
-    boot('pc', True, apic=False)
+            boot(machine, modern, netdev=args.netdev)
+    boot('pc', True, present=False, netdev=args.netdev)
+    boot('pc', True, apic=False, netdev=args.netdev)
 
 
 if __name__ == '__main__':

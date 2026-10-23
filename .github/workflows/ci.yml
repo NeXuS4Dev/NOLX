@@ -1015,6 +1015,8 @@ jobs:
         run: make kernel KERNEL_FEATURES=hal-power-test-s5 2>&1 | tee /tmp/job.log
       - name: Observe guest shutdown through QMP
         run: python3 scripts/check-power-s5.py 2>&1 | tee -a /tmp/job.log
+      - name: Repeat the S5 profiles with the ARP peer instead of slirp
+        run: python3 scripts/check-power-s5.py --netdev socket 2>&1 | tee -a /tmp/job.log
       - name: Build explicit S3 suspend test
         run: make kernel KERNEL_FEATURES=hal-power-test-s3 2>&1 | tee -a /tmp/job.log
       - name: Observe S3 suspend and platform wake through QMP
@@ -1027,6 +1029,14 @@ jobs:
         run: python3 scripts/check-power-s3.py --dstate 2>&1 | tee -a /tmp/job.log
       - name: Refuse a power transition outside every authorized window, and the sleep
         run: python3 scripts/check-power-s3.py --dstate-refused 2>&1 | tee -a /tmp/job.log
+      - name: Program a device's own PCI configuration space from _PS3 and _PS0
+        run: python3 scripts/check-power-s3.py --dstate-pci 2>&1 | tee -a /tmp/job.log
+      - name: Refuse a power method that names another function's configuration space
+        run: python3 scripts/check-power-s3.py --dstate-pci --dstate-foreign 2>&1 | tee -a /tmp/job.log
+      - name: Start every application processor and restart them across the wake
+        run: python3 scripts/check-power-s3.py --smp 2 2>&1 | tee -a /tmp/job.log
+      - name: Restart more processors than the boot processor over Q35
+        run: python3 scripts/check-power-s3.py --smp 4 --machine q35 2>&1 | tee -a /tmp/job.log
       - name: Build independent filesystem reader
         run: cargo build -p nolxfs-dump 2>&1 | tee -a /tmp/job.log
       - name: Verify six-driver quiescence and flush, stop and foreign-DMA refusals
@@ -1064,6 +1074,8 @@ jobs:
         run: make kernel 2>&1 | tee /tmp/job.log
       - name: Native receive and transmit match captured Ethernet bytes
         run: python3 scripts/check-virtio-net.py 2>&1 | tee -a /tmp/job.log
+      - name: Same capture assertions with the ARP peer instead of slirp
+        run: python3 scripts/check-virtio-net.py --netdev socket 2>&1 | tee -a /tmp/job.log
       - name: Annotate serial logs on failure
         if: failure()
         run: |

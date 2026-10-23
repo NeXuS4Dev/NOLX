@@ -34,6 +34,7 @@ pub mod pic;
 pub mod power;
 pub mod ps2;
 pub mod rtc;
+pub mod smp;
 pub mod storage_volume;
 pub mod syscall;
 pub mod tables;

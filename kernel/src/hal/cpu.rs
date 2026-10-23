@@ -1,9 +1,16 @@
-//! CPU feature discovery and the bootstrap processor's GS-based local area.
+//! CPU feature discovery and every processor's GS-based local area.
 
 use core::arch::asm;
 
 use crate::sync::SyncCell;
 use nolx_hal_core::ipl::Ipl;
+
+/// How many logical processors this kernel can bring up.
+///
+/// The bound is what the per-processor arrays are sized for: one `PerCpuData` block, one
+/// kernel stack and one set of IST stacks each. A machine describing more is reported, not
+/// silently truncated -- the extra processors stay offline.
+pub const MAX_CPUS: usize = 4;
 
 use super::{wrmsr, CpuFeatures};
 
@@ -67,12 +74,13 @@ extern "C" {
     static BOOT_STACK_TOP: u8;
 }
 
-static BOOT_CPU: SyncCell<PerCpuData> = SyncCell::new(PerCpuData::empty());
+static PER_CPU: SyncCell<[PerCpuData; MAX_CPUS]> =
+    SyncCell::new([const { PerCpuData::empty() }; MAX_CPUS]);
 
 /// Detect features and initialize the bootstrap processor's GS base.
 ///
-/// NOLX is still single-processor here. AP startup will allocate and initialise one
-/// `PerCpuData` block per processor before enabling that processor's interrupts.
+/// The bootstrap processor is logical processor 0. Application processors come up later
+/// through [`init_ap`], each with the block whose index the startup path assigned it.
 pub fn init() -> CpuFeatures {
     // SAFETY: CPUID is supported because the 32-bit boot trampoline verified the ID flag,
     // and CPUID is side-effect free with a valid stack.
@@ -80,16 +88,7 @@ pub fn init() -> CpuFeatures {
 
     // SAFETY: this is the one-time write to the bootstrap block, before another CPU or
     // interrupt can observe it. The raw pointer is also the address installed in GS_BASE.
-    let base = unsafe {
-        let local = BOOT_CPU.get();
-        (*local).self_pointer = local as u64;
-        (*local).cpu_id = 0;
-        (*local).interrupt_depth = 0;
-        (*local).kernel_stack_top = core::ptr::addr_of!(BOOT_STACK_TOP) as u64;
-        (*local).current_ipl = Ipl::PASSIVE.value();
-        (*local).features = features;
-        local as u64
-    };
+    let base = unsafe { initialize_block(0, features, core::ptr::addr_of!(BOOT_STACK_TOP) as u64) };
 
     // SAFETY: both MSRs are architecturally defined on x86-64; `features` was detected
     // during boot and `base` points to the aligned, static local block above.
@@ -99,6 +98,53 @@ pub fn init() -> CpuFeatures {
     }
 
     features
+}
+
+/// Fill one per-processor block and return the address a GS base must hold.
+///
+/// # Safety
+/// `index` must be below [`MAX_CPUS`], and the caller must be the processor that owns the
+/// block for the whole time it is live -- the block is written without synchronization
+/// because only that processor reads or writes it.
+unsafe fn initialize_block(index: usize, features: CpuFeatures, stack_top: u64) -> u64 {
+    // SAFETY: the caller guarantees the index is in range, and the array is a static with
+    // `MAX_CPUS` aligned blocks, each owned by exactly one processor.
+    unsafe {
+        let local = core::ptr::addr_of_mut!((*PER_CPU.get())[index]);
+        (*local).self_pointer = local as u64;
+        (*local).cpu_id = index as u32;
+        (*local).interrupt_depth = 0;
+        (*local).kernel_stack_top = stack_top;
+        (*local).current_ipl = Ipl::PASSIVE.value();
+        (*local).features = features;
+        local as u64
+    }
+}
+
+/// Install the GS-based local block for an application processor.
+///
+/// Called from the processor's own startup path after the trampoline entered long mode, with
+/// interrupts still disabled: the block must be complete before the first interrupt handler
+/// runs, because every interrupt path reads the current IPL through it.
+///
+/// # Safety
+/// `index` must be the index the startup path assigned this processor, must be below
+/// [`MAX_CPUS`], and must be unique among the processors that are running.
+pub unsafe fn init_ap(index: usize, features: CpuFeatures, stack_top: u64) {
+    let base = unsafe { initialize_block(index, features, stack_top) };
+    // SAFETY: both MSRs are architecturally defined on x86-64 and the base is the address of
+    // this processor's aligned static block, which stays live for the kernel's lifetime.
+    unsafe {
+        wrmsr(IA32_GS_BASE, base);
+        wrmsr(IA32_KERNEL_GS_BASE, 0);
+    }
+}
+
+/// The features the bootstrap processor detected, for the processors that follow it.
+#[must_use]
+pub fn features() -> CpuFeatures {
+    // SAFETY: the bootstrap block is written once in `init` before any other reader exists.
+    unsafe { (*PER_CPU.get())[0].features }
 }
 
 /// Read the current logical processor number through the GS-relative local block.

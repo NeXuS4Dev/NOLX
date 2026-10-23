@@ -370,7 +370,13 @@ fn link_srs_planning_executes_only_authorized_field_writes_without_hardware_acce
     assert_eq!(plan.reads.len(), 1);
     assert_eq!(plan.reads[0].field, field);
     assert_eq!(plan.reads[0].value, 0x11);
-    assert_eq!(plan.writes, vec![PciFieldWrite { field, value: 0x20 }]);
+    assert_eq!(
+        plan.writes,
+        vec![PciFieldWrite {
+            field,
+            value: 0x20u64
+        }]
+    );
 
     // Ordinary evaluation remains read-only and refuses the same field target.
     let method = Path::parse("\\PCI0.LNK0._SRS").unwrap();
@@ -416,7 +422,13 @@ fn link_srs_planning_accepts_void_firmware_methods() {
     let permission = PciFieldWritePermission::from_values(field, &[0x20]).unwrap();
     let plan = plan_link_srs(&namespace, &link, &selection, &[permission]).unwrap();
     assert_eq!(plan.result, None);
-    assert_eq!(plan.writes, vec![PciFieldWrite { field, value: 0x20 }]);
+    assert_eq!(
+        plan.writes,
+        vec![PciFieldWrite {
+            field,
+            value: 0x20u64
+        }]
+    );
 }
 
 #[test]

@@ -146,6 +146,11 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
             panic!("mmio: window init failed: {error:?}");
         }
         mm::mmio::selfcheck(&mut console);
+        // Every other processor firmware describes is started here: the kernel's own tables,
+        // local APIC and page tables are live, and the memory manager can map the startup
+        // trampoline. A processor that does not answer is reported and stays offline; nothing
+        // later depends on how many are running.
+        let _ = hal::smp::start(&mut console);
         hal::acpi::evaluate_devices(&mut console);
         hal::pci::select_transport(&mut console);
         hal::pci::prepare_resources(&mut console);
@@ -512,6 +517,13 @@ extern "C" fn nolx_kernel_main(mb_info_physical: u64, magic: u32) -> ! {
                     // The refusal was reported above; the sleep word is not stored.
                 } else if hal::power::test_vm_has_active_busmaster() {
                     let _ = writeln!(console, "power: S3 refused: active PCI bus master");
+                } else if let Err(refused) = hal::smp::park(&mut console) {
+                    // A processor that did not park is still executing against the memory the
+                    // sleep would freeze: the sleep word is not stored.
+                    let _ = writeln!(
+                        console,
+                        "power: S3 refused: {refused} application processor(s) did not park"
+                    );
                 } else {
                     hal::power::prepare_s3_resume(&mut console)
                         .expect("power: S3 hand-off installation failed");

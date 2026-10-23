@@ -165,8 +165,45 @@ pub struct PciField {
     pub address: u32,
     /// Byte offset within legacy configuration space.
     pub offset: u16,
-    /// Number of bytes requested (the supported snapshot subset is byte access).
+    /// Access width in bytes: 1, 2 or 4.
+    ///
+    /// A `Field` whose width matches its access flags is one [`PciField`] of that width for
+    /// reads. Write intents are always split to one byte each, because a configuration-space
+    /// store has byte enables and a transaction can then verify and roll back exactly the bytes
+    /// it attempted.
     pub bytes: u8,
+}
+
+/// The one PCI function a device power method may write.
+///
+/// `_PS0`/`_PS3` are firmware's own device power transitions, and the register they program
+/// (`PMCSR`, or a chipset-specific power register) lives in the calling device's configuration
+/// space. The evaluator therefore scopes PCI-configuration writes to the function the device's
+/// own `_ADR` names -- never to the rest of the bus -- and the applying backend checks the same
+/// function again. `address` is encoded exactly like [`PciField::address`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PciConfigScope {
+    /// PCI device address encoded as device << 16 | function, on root bus zero.
+    pub address: u32,
+}
+
+impl PciConfigScope {
+    /// The scope a device's `_ADR` value names, or `None` for an encoding no PCI function has.
+    #[must_use]
+    pub const fn from_adr(adr: u64) -> Option<Self> {
+        if adr & !0x1f0007 != 0 || adr > u32::MAX as u64 {
+            return None;
+        }
+        Some(Self {
+            address: adr as u32,
+        })
+    }
+
+    /// Whether a field is inside this function's configuration space.
+    #[must_use]
+    pub const fn covers(&self, field: PciField) -> bool {
+        field.address == self.address
+    }
 }
 /// Read-only, explicitly authorized PCI field snapshots. Other operation regions stay opaque.
 pub trait FieldReader {
@@ -234,16 +271,16 @@ pub struct RegionFieldRead {
 pub struct PciFieldRead {
     /// Exact field read from the caller's snapshot.
     pub field: PciField,
-    /// The byte value observed during planning.
-    pub value: u8,
+    /// The value observed during planning, masked to the field's width.
+    pub value: u64,
 }
 /// One whitelisted byte write produced by bounded method planning; never applied by the AML evaluator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PciFieldWrite {
-    /// Exact root-bus-zero PCI configuration byte.
+    /// Exact root-bus-zero PCI configuration field.
     pub field: PciField,
-    /// Value to write to that byte, after AML field-width truncation.
-    pub value: u8,
+    /// Value to write, after AML field-width truncation and masking.
+    pub value: u64,
 }
 /// Caller-declared allowed byte values for one exact PCI configuration field.
 ///
@@ -267,11 +304,27 @@ impl PciFieldWritePermission {
         }
         Ok(Self { field, values })
     }
-    fn allows(self, value: u8) -> bool {
-        let value = usize::from(value);
+    fn allows(self, value: u64) -> bool {
+        // Byte fields only: a permission is a byte value, and `valid` refuses a wider field.
+        let Ok(value) = usize::try_from(value & 0xff) else {
+            return false;
+        };
         self.values[value / 64] & (1u64 << (value % 64)) != 0
     }
 }
+/// One write a device power transition performed, in the order the method performed it.
+///
+/// `_PSx` methods mix memory-mapped register writes and PCI configuration writes, and their
+/// order is the firmware's program order. Keeping one ordered journal is what lets the applying
+/// transaction replay exactly what the method did instead of grouping by space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceWrite {
+    /// A write to a field of an authorized operation-region window.
+    Region(RegionFieldWrite),
+    /// A write to a PCI configuration field inside the transitioning device's own function.
+    Pci(PciFieldWrite),
+}
+
 /// Result of software-only AML method execution with authorized PCI field effects journaled.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MethodEffects {
@@ -289,6 +342,12 @@ pub struct MethodEffects {
     pub region_reads: Vec<RegionFieldRead>,
     /// Ordered region field-write intents, exactly like `writes` but for operation regions.
     pub region_writes: Vec<RegionFieldWrite>,
+    /// Every write intent in the order the method performed it, across both address spaces.
+    ///
+    /// A device power transition applies this journal, not the two per-space lists, so a method
+    /// that writes a memory-mapped register, then its PCI power register, then the register
+    /// again is replayed in that order. [`DeviceWrite`] names the space each entry belongs to.
+    pub device_writes: Vec<DeviceWrite>,
 }
 const MAX_FIELD_WRITE_PERMISSIONS: usize = 32;
 const MAX_FIELD_READS: usize = 64;
@@ -349,8 +408,10 @@ fn rollback_field_writes<B: PciFieldWriteBackend>(
 ) -> bool {
     let mut restored = true;
     for write in previous.iter().rev() {
-        let _ = backend.write_byte(write.field, write.value);
-        if !matches!(backend.read_byte(write.field), Ok(value) if value == write.value) {
+        let value = u8::try_from(write.value).unwrap_or(0);
+        let _ = backend.write_byte(write.field, value);
+        if !matches!(backend.read_byte(write.field), Ok(readback) if u64::from(readback) == write.value)
+        {
             restored = false;
         }
     }
@@ -420,7 +481,7 @@ where
         let value = backend
             .read_byte(read.field)
             .map_err(PciFieldWriteTransactionError::SnapshotRead)?;
-        if value != read.value {
+        if u64::from(value) != read.value {
             return Err(PciFieldWriteTransactionError::StaleSnapshot);
         }
     }
@@ -448,7 +509,7 @@ where
                     .find(|read| read.field == write.field)
                     .map(|read| read.value)
             });
-        if expected.is_some_and(|expected| expected != before) {
+        if expected.is_some_and(|expected| expected != u64::from(before)) {
             if !rollback_field_writes(backend, &previous) {
                 return Err(PciFieldWriteTransactionError::RollbackFailed);
             }
@@ -458,9 +519,9 @@ where
         // accepted the byte, so rollback must include the uncertain operation itself.
         previous.push(PciFieldWrite {
             field: write.field,
-            value: before,
+            value: u64::from(before),
         });
-        if let Err(error) = backend.write_byte(write.field, write.value) {
+        if let Err(error) = backend.write_byte(write.field, write.value as u8) {
             if !rollback_field_writes(backend, &previous) {
                 return Err(PciFieldWriteTransactionError::RollbackFailed);
             }
@@ -475,7 +536,7 @@ where
                 return Err(PciFieldWriteTransactionError::Readback(error));
             }
         };
-        if readback != write.value {
+        if u64::from(readback) != write.value {
             if !rollback_field_writes(backend, &previous) {
                 return Err(PciFieldWriteTransactionError::RollbackFailed);
             }
@@ -721,6 +782,39 @@ pub enum RegionWriteTransactionError<BackendError> {
     RollbackFailed,
 }
 
+/// The mask of a configuration field's declared access width.
+#[must_use]
+pub const fn field_mask(bytes: u8) -> u64 {
+    if bytes >= 8 {
+        u64::MAX
+    } else {
+        (1u64 << (bytes as u32 * 8)) - 1
+    }
+}
+
+/// Whether a configuration field is a well-formed access to one function.
+///
+/// `address` is the device/function token an `_ADR` gives, so only the device and function
+/// fields may be set; the access is one to four bytes, aligned, and inside the 256-byte header
+/// the configuration space of one function is.
+#[must_use]
+pub const fn valid_pci_field(field: PciField) -> bool {
+    matches!(field.bytes, 1 | 2 | 4)
+        && field.address & !0x1f0007 == 0
+        && (field.offset as u32).is_multiple_of(field.bytes as u32)
+        && field.offset as u32 + field.bytes as u32 <= 256
+}
+
+/// Whether a configuration field is one byte, the granularity a write transaction verifies.
+///
+/// The evaluator splits a wide `Field` into one byte per intent, because a configuration store
+/// has byte enables; a journal entry that is still wide never came from the evaluator and is
+/// refused rather than guessed at.
+#[must_use]
+pub const fn byte_pci_field(field: PciField) -> bool {
+    field.bytes == 1 && valid_pci_field(field)
+}
+
 fn valid_region_field(field: RegionField) -> bool {
     matches!(field.access, 1 | 2 | 4 | 8)
         && field.bits > 0
@@ -898,6 +992,198 @@ pub fn apply_region_field_writes<B: RegionFieldWriteBackend>(
                     return Err(RegionWriteTransactionError::RollbackFailed);
                 }
                 return Err(RegionWriteTransactionError::ReadbackMismatch);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Failure while applying a device power transition's ordered journal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DevicePowerWriteError<E> {
+    /// The journal exceeded the bounded transaction capacity.
+    Limit,
+    /// A field is not self-consistent, or is not byte-granular inside root bus zero.
+    InvalidField,
+    /// The same byte or field appears twice, so a rollback would not be well defined.
+    DuplicateField,
+    /// A configuration write lies outside the function the transition belongs to.
+    OutOfScope,
+    /// A field could not be read before it was written.
+    Read(E),
+    /// A readback did not return the value just written; prior writes were restored.
+    ReadbackMismatch,
+    /// A write was attempted and could not be undone. The device must be quarantined.
+    RollbackFailed,
+}
+
+/// One write that was attempted and can be undone.
+#[derive(Clone, Copy)]
+enum AttemptedWrite {
+    Region(RegionFieldWrite),
+    Pci(PciFieldWrite),
+}
+
+fn restore_device_writes<B, E>(backend: &mut B, previous: &[AttemptedWrite]) -> bool
+where
+    B: RegionFieldWriteBackend<Error = E> + PciFieldWriteBackend<Error = E>,
+{
+    let mut restored = true;
+    for write in previous.iter().rev() {
+        match *write {
+            AttemptedWrite::Region(write) => {
+                let _ = backend.write_field(write.field, write.value);
+                if !matches!(backend.read_field(write.field), Ok(value) if value == write.value) {
+                    restored = false;
+                }
+            }
+            AttemptedWrite::Pci(write) => {
+                let _ = backend.write_byte(write.field, write.value as u8);
+                if !matches!(backend.read_byte(write.field), Ok(value) if u64::from(value) == write.value)
+                {
+                    restored = false;
+                }
+            }
+        }
+    }
+    restored
+}
+
+/// Apply a device power transition's journal in the order the method performed it.
+///
+/// This is the transition counterpart of [`apply_region_field_writes_authorized`]. It differs
+/// in one way that matters: `_PSx` methods write configuration space as well as memory-mapped
+/// registers, and the two must be replayed **in program order** -- a method that arms a register
+/// before setting its power state is not the same hardware sequence as one that does it after.
+/// `effects.device_writes` carries that order.
+///
+/// The safety rules are the same in both spaces: every field is validated before the first
+/// access, no field or byte may appear twice, each write is preceded by a read, its readback is
+/// verified, every attempted write is restored in reverse order on any failure, and a
+/// configuration write must lie inside `scope` -- the transitioning device's own PCI function,
+/// re-checked here rather than only where the journal was built. A journal that predates the
+/// ordered list (built by hand in a test) is applied region writes first, then configuration
+/// writes.
+pub fn apply_device_power_writes<B, E>(
+    effects: &MethodEffects,
+    scope: Option<PciConfigScope>,
+    backend: &mut B,
+) -> Result<(), DevicePowerWriteError<E>>
+where
+    B: RegionFieldWriteBackend<Error = E> + PciFieldWriteBackend<Error = E>,
+{
+    if effects.device_writes.len() > MAX_FIELD_WRITES
+        || effects.region_writes.len() > MAX_FIELD_WRITES
+        || effects.writes.len() > MAX_FIELD_WRITES
+    {
+        return Err(DevicePowerWriteError::Limit);
+    }
+    // A method may only write configuration space through its own function. A journal built
+    // by the evaluator already obeys this; the check is repeated because applying is a
+    // separate authority from planning and the backend cannot see the device.
+    let order: Vec<DeviceWrite> = if effects.device_writes.is_empty() {
+        let mut order = Vec::with_capacity(effects.region_writes.len() + effects.writes.len());
+        order.extend(
+            effects
+                .region_writes
+                .iter()
+                .map(|write| DeviceWrite::Region(*write)),
+        );
+        order.extend(effects.writes.iter().map(|write| DeviceWrite::Pci(*write)));
+        order
+    } else {
+        effects.device_writes.clone()
+    };
+    for (index, write) in order.iter().enumerate() {
+        match *write {
+            DeviceWrite::Region(write) => {
+                if !valid_region_field(write.field) {
+                    return Err(DevicePowerWriteError::InvalidField);
+                }
+                if order[..index].iter().any(|previous| {
+                    matches!(previous, DeviceWrite::Region(previous) if previous.field == write.field)
+                }) {
+                    return Err(DevicePowerWriteError::DuplicateField);
+                }
+            }
+            DeviceWrite::Pci(write) => {
+                if !byte_pci_field(write.field) {
+                    return Err(DevicePowerWriteError::InvalidField);
+                }
+                if !scope.is_some_and(|scope| scope.covers(write.field)) {
+                    return Err(DevicePowerWriteError::OutOfScope);
+                }
+                if order[..index].iter().any(|previous| {
+                    matches!(previous, DeviceWrite::Pci(previous) if previous.field == write.field)
+                }) {
+                    return Err(DevicePowerWriteError::DuplicateField);
+                }
+            }
+        }
+    }
+    let mut previous: Vec<AttemptedWrite> = Vec::with_capacity(order.len());
+    for write in &order {
+        match *write {
+            DeviceWrite::Region(write) => {
+                let before = match backend.read_field(write.field) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        if !restore_device_writes(backend, &previous) {
+                            return Err(DevicePowerWriteError::RollbackFailed);
+                        }
+                        return Err(DevicePowerWriteError::Read(error));
+                    }
+                };
+                previous.push(AttemptedWrite::Region(RegionFieldWrite {
+                    field: write.field,
+                    value: before,
+                }));
+                if let Err(error) = backend.write_field(write.field, write.value) {
+                    if !restore_device_writes(backend, &previous) {
+                        return Err(DevicePowerWriteError::RollbackFailed);
+                    }
+                    return Err(DevicePowerWriteError::Read(error));
+                }
+                match backend.read_field(write.field) {
+                    Ok(value) if value == write.value => {}
+                    Ok(_) | Err(_) => {
+                        if !restore_device_writes(backend, &previous) {
+                            return Err(DevicePowerWriteError::RollbackFailed);
+                        }
+                        return Err(DevicePowerWriteError::ReadbackMismatch);
+                    }
+                }
+            }
+            DeviceWrite::Pci(write) => {
+                let value = write.value as u8;
+                let before = match backend.read_byte(write.field) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        if !restore_device_writes(backend, &previous) {
+                            return Err(DevicePowerWriteError::RollbackFailed);
+                        }
+                        return Err(DevicePowerWriteError::Read(error));
+                    }
+                };
+                previous.push(AttemptedWrite::Pci(PciFieldWrite {
+                    field: write.field,
+                    value: u64::from(before),
+                }));
+                if let Err(error) = backend.write_byte(write.field, value) {
+                    if !restore_device_writes(backend, &previous) {
+                        return Err(DevicePowerWriteError::RollbackFailed);
+                    }
+                    return Err(DevicePowerWriteError::Read(error));
+                }
+                match backend.read_byte(write.field) {
+                    Ok(readback) if u64::from(readback) == write.value => {}
+                    Ok(_) | Err(_) => {
+                        if !restore_device_writes(backend, &previous) {
+                            return Err(DevicePowerWriteError::RollbackFailed);
+                        }
+                        return Err(DevicePowerWriteError::ReadbackMismatch);
+                    }
+                }
             }
         }
     }
@@ -1503,9 +1789,12 @@ impl<'a> Namespace<'a> {
             return Err(Error::Type);
         }
         validate_arguments(args)?;
+        let scope = self
+            .pci_function(path, 0)?
+            .and_then(|adr| PciConfigScope::from_adr(u64::from(adr)));
         let mut steps = MAX_STEPS;
         step(&mut steps)?;
-        let mut effects = EvaluationEffects::authorized_regions();
+        let mut effects = EvaluationEffects::authorized_device_power(scope);
         let result = self.run_method(index, args, 0, &mut steps, &mut effects)?;
         Ok(Some(MethodEffects {
             result,
@@ -1513,7 +1802,20 @@ impl<'a> Namespace<'a> {
             writes: effects.writes,
             region_reads: effects.region_reads,
             region_writes: effects.region_writes,
+            device_writes: effects.device_writes,
         }))
+    }
+
+    /// The PCI function a device node names through `_ADR`, when it names one.
+    ///
+    /// A device power transition needs this twice: to plan `_PSx` (the evaluator scopes
+    /// configuration writes to it) and to apply the resulting journal (the backend re-checks
+    /// that every configuration write is inside it). `None` means the node is not a PCI
+    /// function, so a method that writes configuration space cannot be applied at all.
+    pub fn device_pci_scope(&self, path: &Path) -> Result<Option<PciConfigScope>, Error> {
+        Ok(self
+            .pci_function(path, 0)?
+            .and_then(|adr| PciConfigScope::from_adr(u64::from(adr))))
     }
 
     /// As [`Namespace::plan_device_method`], and additionally authorize exact region writes.
@@ -1573,6 +1875,7 @@ impl<'a> Namespace<'a> {
             writes: effects.writes,
             region_reads: effects.region_reads,
             region_writes: effects.region_writes,
+            device_writes: effects.device_writes,
         })
     }
     /// Evaluate a device member, distinguishing an absent member from failure inside one.
@@ -1694,7 +1997,10 @@ impl<'a> Namespace<'a> {
         if *space != 2 {
             return Self::region_field(*space, base, length, bit, bits, flags);
         }
-        if bits != 8 || !bit.is_multiple_of(8) || flags != 1 {
+        // A PCI configuration field. The region's own base is zero for this space (the offset
+        // is into the function's configuration space), but the table may still declare a
+        // non-zero one, so it is honoured and bounded exactly like the offset it adds to.
+        if !bit.is_multiple_of(8) {
             return Err(Error::Unsupported(0x5b81));
         }
         let offset = bit / 8;
@@ -1702,19 +2008,47 @@ impl<'a> Namespace<'a> {
             return Err(Error::Limit);
         }
         let offset = base.checked_add(offset).ok_or(Error::Limit)?;
-        if offset >= 256 {
+        // One, two or four bytes: the widths a configuration transaction has byte enables for.
+        // The access flags must agree with the declared width, because a `WordAcc` field is how
+        // firmware tells the platform its register is one 16-bit access, not two byte accesses.
+        // Only the three plain access rules are accepted, exactly as for the byte-only subset
+        // this replaces: `AnyAcc` and the lock rule leave the transaction width to the platform,
+        // and a configuration store's width is what its byte enables are.
+        let access = match (flags, bits) {
+            (1, 8) => 1u8,
+            (2, 16) => 2,
+            (3, 32) => 4,
+            _ => return Err(Error::Unsupported(0x5b81)),
+        };
+        let end = offset.checked_add(u64::from(access)).ok_or(Error::Limit)?;
+        if end > 256 || !offset.is_multiple_of(u64::from(access)) {
             return Err(Error::Limit);
         }
         let owner = object.path.parent();
-        let address = self
-            .field_metadata(&owner, *b"_ADR", depth)?
-            .ok_or(Error::Missing)?
-            .integer()?;
-        if address & !0x1f0007 != 0 {
+        let address = self.pci_function(&owner, depth)?.ok_or(Error::Missing)?;
+        Ok(FieldLocation::Pci(PciField {
+            address,
+            offset: offset as u16,
+            bytes: access,
+        }))
+    }
+
+    /// The PCI function a device node names through `_ADR`, if it names one.
+    ///
+    /// Only a device immediately under a segment-zero, bus-zero root bridge whose `_HID` is a
+    /// PCI host bridge is supported: a nonzero `_SEG`/`_BBN` would need a transport this kernel
+    /// has not validated, and guessing would address the wrong function. `Ok(None)` means the
+    /// node declares no `_ADR` at all -- a device that is not a PCI function -- while a
+    /// malformed declaration is an error rather than a silently ignored one.
+    fn pci_function(&self, device: &Path, depth: usize) -> Result<Option<u32>, Error> {
+        let Some(address) = self.field_metadata(device, *b"_ADR", depth)? else {
+            return Ok(None);
+        };
+        let address = address.integer()?;
+        if address & !0x1f0007 != 0 || address > u32::MAX as u64 {
             return Err(Error::Type);
         }
-        // Only a device immediately under a segment-zero/base-bus-zero root is supported.
-        let root = owner.parent();
+        let root = device.parent();
         let id = self
             .field_metadata(&root, *b"_HID", depth)?
             .ok_or(Error::Missing)?;
@@ -1730,11 +2064,7 @@ impl<'a> Namespace<'a> {
                 }
             }
         }
-        Ok(FieldLocation::Pci(PciField {
-            address: address as u32,
-            offset: offset as u16,
-            bytes: 1,
-        }))
+        Ok(Some(address as u32))
     }
 
     /// Resolve a field in a SystemMemory, SystemIo or EmbeddedControl region.
@@ -1873,10 +2203,15 @@ impl<'a> Namespace<'a> {
             .rev()
             .find(|write| write.field == field)
         {
-            return Ok(Value::Integer(u64::from(write.value)));
+            return Ok(Value::Integer(write.value));
         }
         let reader = self.reader.ok_or(Error::Unsupported(0x5b81))?;
-        let value = (reader.read(field)? & 255) as u8;
+        // A provider answers the access width the field declared; a value with bits outside it
+        // is a provider bug, not a number to truncate.
+        let value = reader.read(field)? & field_mask(field.bytes);
+        if field.bytes < 8 && value >> (u32::from(field.bytes) * 8) != 0 {
+            return Err(Error::Type);
+        }
         if effects.planning() {
             if let Some(previous) = effects.reads.iter().find(|read| read.field == field) {
                 if previous.value != value {
@@ -1889,7 +2224,7 @@ impl<'a> Namespace<'a> {
                 effects.reads.push(PciFieldRead { field, value });
             }
         }
-        Ok(Value::Integer(u64::from(value)))
+        Ok(Value::Integer(value))
     }
     fn object(
         &self,
@@ -2168,29 +2503,55 @@ impl<'a> Namespace<'a> {
                                     if !allowed {
                                         return Err(Error::WriteDenied);
                                     }
-                                    if effects.region_writes.len() >= MAX_FIELD_WRITES {
+                                    if effects.region_writes.len() >= MAX_FIELD_WRITES
+                                        || effects.device_writes.len() >= MAX_FIELD_WRITES
+                                    {
                                         return Err(Error::Limit);
                                     }
-                                    effects
-                                        .region_writes
-                                        .push(RegionFieldWrite { field, value });
+                                    let write = RegionFieldWrite { field, value };
+                                    effects.region_writes.push(write);
+                                    effects.device_writes.push(DeviceWrite::Region(write));
                                     return Ok(());
                                 }
                             };
-                            let value =
-                                u8::try_from(value.integer()? & 0xff).map_err(|_| Error::Type)?;
-                            let allowed = effects.permissions.is_some_and(|permissions| {
+                            if !valid_pci_field(field) {
+                                return Err(Error::Type);
+                            }
+                            let value = value.integer()? & field_mask(field.bytes);
+                            // Two independent authorities can authorize a configuration
+                            // write: an exact field-and-value permission (the audited `_SRS`
+                            // path), or the transitioning device's own function (a device
+                            // power transition). Anything else is refused.
+                            let scoped = effects.pci_scope.is_some_and(|scope| scope.covers(field));
+                            let permitted = effects.permissions.is_some_and(|permissions| {
                                 permissions.iter().any(|permission| {
                                     permission.field == field && permission.allows(value)
                                 })
                             });
-                            if !allowed {
+                            if !scoped && !permitted {
                                 return Err(Error::WriteDenied);
                             }
-                            if effects.writes.len() >= MAX_FIELD_WRITES {
+                            // A configuration write has byte enables, and the applying
+                            // transaction verifies and rolls back whole bytes. Split a wide
+                            // field into its bytes here, where the field's masking is known.
+                            let intents = usize::from(field.bytes);
+                            if effects.writes.len() + intents > MAX_FIELD_WRITES
+                                || effects.device_writes.len() + intents > MAX_FIELD_WRITES
+                            {
                                 return Err(Error::Limit);
                             }
-                            effects.writes.push(PciFieldWrite { field, value });
+                            for index in 0..intents {
+                                let write = PciFieldWrite {
+                                    field: PciField {
+                                        address: field.address,
+                                        offset: field.offset + index as u16,
+                                        bytes: 1,
+                                    },
+                                    value: (value >> (index * 8)) & 0xff,
+                                };
+                                effects.writes.push(write);
+                                effects.device_writes.push(DeviceWrite::Pci(write));
+                            }
                             return Ok(());
                         }
                         Kind::Opaque(0x5b81) => return Err(Error::Unsupported(0x5b81)),
@@ -2338,10 +2699,14 @@ struct EvaluationEffects<'a> {
     /// power transition: the backend still refuses every field outside a window the kernel
     /// authorized from validated firmware tables, and every write is journaled and read back.
     region_authorized: bool,
+    /// When set, configuration writes are allowed, but only inside the one PCI function a
+    /// device power transition belongs to. The backend checks the same function again.
+    pci_scope: Option<PciConfigScope>,
     reads: Vec<PciFieldRead>,
     writes: Vec<PciFieldWrite>,
     region_reads: Vec<RegionFieldRead>,
     region_writes: Vec<RegionFieldWrite>,
+    device_writes: Vec<DeviceWrite>,
 }
 impl<'a> EvaluationEffects<'a> {
     fn read_only() -> Self {
@@ -2349,17 +2714,21 @@ impl<'a> EvaluationEffects<'a> {
             permissions: None,
             region_permissions: None,
             region_authorized: false,
+            pci_scope: None,
             reads: Vec::new(),
             writes: Vec::new(),
             region_reads: Vec::new(),
             region_writes: Vec::new(),
+            device_writes: Vec::new(),
         }
     }
     /// Authority for a device power transition: region writes anywhere inside the windows the
-    /// caller authorized, with no PCI-config writes at all.
-    fn authorized_regions() -> Self {
+    /// caller authorized, and configuration writes inside the transitioning device's own
+    /// function when the device declares one.
+    fn authorized_device_power(scope: Option<PciConfigScope>) -> Self {
         Self {
             region_authorized: true,
+            pci_scope: scope,
             ..Self::read_only()
         }
     }
@@ -2371,16 +2740,21 @@ impl<'a> EvaluationEffects<'a> {
             permissions: Some(permissions),
             region_permissions: Some(regions),
             region_authorized: false,
+            pci_scope: None,
             reads: Vec::new(),
             writes: Vec::new(),
             region_reads: Vec::new(),
             region_writes: Vec::new(),
+            device_writes: Vec::new(),
         }
     }
 
     /// Whether any write intent is allowed to be produced at all.
     fn planning(&self) -> bool {
-        self.permissions.is_some() || self.region_permissions.is_some() || self.region_authorized
+        self.permissions.is_some()
+            || self.region_permissions.is_some()
+            || self.region_authorized
+            || self.pci_scope.is_some()
     }
 }
 struct Frame {

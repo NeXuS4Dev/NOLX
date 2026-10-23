@@ -875,9 +875,21 @@ an xHCI-present-but-empty mode for the same hardware path.
 
 CI run [39840435734](https://github.com/NeXuS4Dev/NOLX/actions/runs/39840435734) on `2ca9e5a`
 passed all 19 jobs with the device-backed S3 fixture, the SuperSpeed recovery fixture and the
-extended AML fixture; PWR-033..PWR-037, PWR-039 and USB-039 are `tested-T2`. **M9 remains in
-progress:** per-device D-states, multi-CPU resume and the higher-layer cache/user-task
-orchestration around S3 are not implemented, and the EC handshake has no machine to run on.
+extended AML fixture; PWR-033..PWR-037, PWR-039 and USB-039 are `tested-T2`.
+
+Firmware device power states (`_PSC`/`_PRW`, `_PS3` before the sleep and `_PS0` after it) and
+PCI configuration-space operation regions landed after that run (PWR-040..PWR-047): a `_PS3` that
+programs its own function's PCI power-management register now executes with a verified readback,
+and one that names another function is refused before any access. Application processors are
+started from a real-mode trampoline, prove themselves with an inter-processor interrupt, are
+parked and held in INIT across the sleep and restarted after the wake (PWR-048), and the HPET
+counter and local APIC the wake reset stops are re-taken and observed (PWR-049). CI run
+[39966209704](https://github.com/NeXuS4Dev/NOLX/actions/runs/39966209704) on `c2b2289` passed all
+19 jobs with those fixtures; PWR-046 is `tested-T1` and PWR-047..PWR-049 are `tested-T2`.
+**M9 remains in progress:** the kernel is still a
+single scheduling domain — an application processor owns no device, thread or timer — the
+higher-layer cache/user-task orchestration around S3 is not implemented, no part of the sleep path
+ran on physical hardware, and the EC handshake has no machine to run on.
 
 ## M10 — POSIX conformance waves
 

@@ -843,18 +843,19 @@ fn transaction_effects(reads: &[(PciField, u8)], writes: &[(PciField, u8)]) -> M
             .iter()
             .map(|(field, value)| PciFieldRead {
                 field: *field,
-                value: *value,
+                value: u64::from(*value),
             })
             .collect(),
         writes: writes
             .iter()
             .map(|(field, value)| PciFieldWrite {
                 field: *field,
-                value: *value,
+                value: u64::from(*value),
             })
             .collect(),
         region_reads: Vec::new(),
         region_writes: Vec::new(),
+        device_writes: Vec::new(),
     }
 }
 
@@ -1313,6 +1314,7 @@ fn a_region_write_transaction_applies_verifies_and_rolls_back() {
         writes: Vec::new(),
         region_reads: Vec::new(),
         region_writes: vec![RegionFieldWrite { field, value: 1 }],
+        device_writes: Vec::new(),
     };
     let mut register = Register {
         value: 0,
@@ -1363,4 +1365,460 @@ fn a_region_write_transaction_applies_verifies_and_rolls_back() {
         Err(RegionWriteTransactionError::DuplicateField)
     );
     assert_eq!(register.writes, 0);
+}
+
+// ---------------------------------------------------------------- PCI configuration regions
+//
+// `_PS0`/`_PS3` program a device's own power register, which lives in its PCI configuration
+// space. These tests are the portable half of that path: the field resolution, the width, the
+// scoping to the one function the device's `_ADR` names, and the ordered journal the kernel
+// applies to hardware.
+
+/// A PCI root bridge holding one function device, its `PCI_Config` region and field, and a
+/// pair of power methods built by `body`.
+fn power_function_fixture(adr: Option<u32>, flags: u8, width: u8, body: &[u8]) -> Vec<u8> {
+    // OperationRegion (PCFG, PCI_Config, 0, 0x100)
+    // PCI_Config region at configuration offset 0x40, 0x20 bytes long. The field's own offset
+    // is relative to the region base, which is how firmware spells "this device's PM register".
+    let region = [
+        vec![0x5b, 0x80],
+        b"PCFG".to_vec(),
+        vec![2, 0x0a, 0x40, 0x0a, 0x20],
+    ]
+    .concat();
+    let mut entries = b"PMCS".to_vec();
+    entries.push(width);
+    let field = pkg(
+        &[0x5b, 0x81],
+        [b"PCFG".to_vec(), vec![flags], entries].concat(),
+    );
+    let mut device = b"DEV0".to_vec();
+    if let Some(adr) = adr {
+        let mut adr_bytes = vec![8];
+        adr_bytes.extend(b"_ADR");
+        adr_bytes.push(0x0c);
+        adr_bytes.extend_from_slice(&adr.to_le_bytes());
+        device.extend(adr_bytes);
+    }
+    device.extend(region);
+    device.extend(field);
+    device.extend(method(b"_PS3", 0, body));
+    device.extend(method(b"_PS0", 0, body));
+    let child = pkg(&[0x5b, 0x82], device);
+    let mut root = b"PCI0".to_vec();
+    root.extend_from_slice(&[8]);
+    root.extend(b"_HID");
+    root.extend_from_slice(&[0x0d]);
+    root.extend_from_slice(b"PNP0A03\0");
+    root.extend(child);
+    pkg(&[0x5b, 0x82], root)
+}
+
+struct WideFieldReader;
+impl FieldReader for WideFieldReader {
+    fn read(&self, field: PciField) -> Result<u64, Error> {
+        match field {
+            PciField {
+                address: 0x0003_0000,
+                offset: 0x40,
+                bytes: 2,
+            } => Ok(0x8086),
+            PciField {
+                address: 0x0004_0000,
+                offset: 0x40,
+                bytes: 2,
+            } => Ok(0x1234),
+            _ => Err(Error::Unsupported(0x5b81)),
+        }
+    }
+}
+
+/// `Store (PMCS, Local0); Store (Local0, PMCS)`: a real read-modify-write of the field.
+const RMW_BODY: &[u8] = &[
+    0x70, b'P', b'M', b'C', b'S', 0x60, 0x70, 0x60, b'P', b'M', b'C', b'S',
+];
+
+#[test]
+fn a_wide_pci_configuration_field_is_read_whole_and_written_byte_by_byte() {
+    let fixture = power_function_fixture(Some(0x0003_0000), 2, 16, RMW_BODY);
+    let mut ns = Namespace::new();
+    ns.set_field_reader(&WideFieldReader);
+    ns.load(&fixture).unwrap();
+    let device = path("\\PCI0.DEV0");
+    assert_eq!(
+        ns.device_pci_scope(&device),
+        Ok(Some(PciConfigScope {
+            address: 0x0003_0000
+        }))
+    );
+    let effects = ns
+        .plan_device_method_authorized(&device, *b"_PS3", &[])
+        .unwrap()
+        .unwrap();
+    // The provider saw one 16-bit access, not two byte accesses.
+    assert_eq!(
+        effects.reads,
+        vec![PciFieldRead {
+            field: PciField {
+                address: 0x0003_0000,
+                offset: 0x40,
+                bytes: 2,
+            },
+            value: 0x8086,
+        }]
+    );
+    // The store is split into the two configuration bytes a transaction can verify.
+    assert_eq!(
+        effects.writes,
+        vec![
+            PciFieldWrite {
+                field: PciField {
+                    address: 0x0003_0000,
+                    offset: 0x40,
+                    bytes: 1,
+                },
+                value: 0x86,
+            },
+            PciFieldWrite {
+                field: PciField {
+                    address: 0x0003_0000,
+                    offset: 0x41,
+                    bytes: 1,
+                },
+                value: 0x80,
+            },
+        ]
+    );
+    assert_eq!(
+        effects.device_writes,
+        effects
+            .writes
+            .iter()
+            .map(|write| DeviceWrite::Pci(*write))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_power_method_may_not_write_another_functions_configuration_space() {
+    // SIB0 is a different function. DEV0's `_PS3` names SIB0's field by absolute path, which is
+    // exactly the shape a hostile or broken table would use to power down somebody else's
+    // device during a system sleep.
+    let mut device = b"DEV0".to_vec();
+    device.extend_from_slice(&[8]);
+    device.extend(b"_ADR");
+    device.push(0x0c);
+    device.extend_from_slice(&0x0003_0000u32.to_le_bytes());
+    device.extend_from_slice(&method(
+        b"_PS3",
+        0,
+        &[
+            // Store (3, \PCI0.SIB0.PMCS): root prefix, multi-name prefix, three segments.
+            0x70, 0x0a, 0x03, b'\\', 0x2f, 0x03, b'P', b'C', b'I', b'0', b'S', b'I', b'B', b'0',
+            b'P', b'M', b'C', b'S',
+        ],
+    ));
+    let mut sibling = b"SIB0".to_vec();
+    sibling.extend_from_slice(&[8]);
+    sibling.extend(b"_ADR");
+    sibling.push(0x0c);
+    sibling.extend_from_slice(&0x0004_0000u32.to_le_bytes());
+    sibling.extend_from_slice(
+        &[
+            vec![0x5b, 0x80],
+            b"PCFG".to_vec(),
+            vec![2, 0x0a, 0x40, 0x0a, 0x20],
+        ]
+        .concat(),
+    );
+    let mut entries = b"PMCS".to_vec();
+    entries.push(16);
+    sibling.extend(pkg(
+        &[0x5b, 0x81],
+        [b"PCFG".to_vec(), vec![2], entries].concat(),
+    ));
+    let mut root = b"PCI0".to_vec();
+    root.extend_from_slice(&[8]);
+    root.extend(b"_HID");
+    root.extend_from_slice(&[0x0d]);
+    root.extend_from_slice(b"PNP0A03\0");
+    root.extend(pkg(&[0x5b, 0x82], device));
+    root.extend(pkg(&[0x5b, 0x82], sibling));
+    let table = pkg(&[0x5b, 0x82], root);
+    let mut ns = Namespace::new();
+    ns.set_field_reader(&WideFieldReader);
+    ns.load(&table).unwrap();
+    assert_eq!(
+        ns.plan_device_method_authorized(&path("\\PCI0.DEV0"), *b"_PS3", &[]),
+        Err(Error::WriteDenied)
+    );
+}
+
+#[test]
+fn a_device_without_adr_has_no_configuration_scope_and_cannot_resolve_the_field() {
+    let fixture = power_function_fixture(None, 2, 16, RMW_BODY);
+    let mut ns = Namespace::new();
+    ns.set_field_reader(&WideFieldReader);
+    ns.load(&fixture).unwrap();
+    let device = path("\\PCI0.DEV0");
+    assert_eq!(ns.device_pci_scope(&device), Ok(None));
+    // The field's owner declares no `_ADR`, so the address is unknown rather than zero.
+    assert_eq!(
+        ns.plan_device_method_authorized(&device, *b"_PS3", &[]),
+        Err(Error::Missing)
+    );
+}
+
+#[test]
+fn a_configuration_field_wider_than_its_access_rule_is_refused() {
+    for (flags, width) in [(2u8, 8u8), (3, 16), (1, 16), (0, 8), (0x11, 8)] {
+        let fixture = power_function_fixture(Some(0x0003_0000), flags, width, RMW_BODY);
+        let mut ns = Namespace::new();
+        ns.set_field_reader(&WideFieldReader);
+        ns.load(&fixture).unwrap();
+        assert_eq!(
+            ns.plan_device_method_authorized(&path("\\PCI0.DEV0"), *b"_PS3", &[]),
+            Err(Error::Unsupported(0x5b81)),
+            "flags {flags:#x} width {width}"
+        );
+    }
+}
+
+/// A backend that answers both halves of a device power journal and records the order it saw.
+struct PowerBackend {
+    region: u64,
+    second_region: u64,
+    pci: [u8; 256],
+    log: Vec<&'static str>,
+    fail_pci_write: bool,
+    fail_pci_readback: bool,
+}
+
+impl PowerBackend {
+    fn new(region: u64, pci: [u8; 256]) -> Self {
+        Self {
+            region,
+            second_region: 0,
+            pci,
+            log: Vec::new(),
+            fail_pci_write: false,
+            fail_pci_readback: false,
+        }
+    }
+}
+
+impl RegionFieldWriteBackend for PowerBackend {
+    type Error = Error;
+    fn read_field(&mut self, field: RegionField) -> Result<u64, Error> {
+        self.log.push("region read");
+        if field.address == 0x30 {
+            Ok(self.region)
+        } else {
+            Ok(self.second_region)
+        }
+    }
+    fn write_field(&mut self, field: RegionField, value: u64) -> Result<(), Error> {
+        self.log.push("region write");
+        if field.address == 0x30 {
+            self.region = value;
+        } else {
+            self.second_region = value;
+        }
+        Ok(())
+    }
+}
+
+impl PciFieldWriteBackend for PowerBackend {
+    type Error = Error;
+    fn read_byte(&mut self, field: PciField) -> Result<u8, Error> {
+        self.log.push("pci read");
+        Ok(self.pci[usize::from(field.offset)])
+    }
+    fn write_byte(&mut self, field: PciField, value: u8) -> Result<(), Error> {
+        self.log.push("pci write");
+        if self.fail_pci_write {
+            return Err(Error::Unsupported(0x5b84));
+        }
+        if !self.fail_pci_readback {
+            self.pci[usize::from(field.offset)] = value;
+        }
+        Ok(())
+    }
+}
+
+fn power_region_write(address: u64, value: u64) -> DeviceWrite {
+    DeviceWrite::Region(RegionFieldWrite {
+        field: RegionField {
+            space: RegionSpace::SystemMemory,
+            address,
+            bits: 32,
+            shift: 0,
+            access: 4,
+        },
+        value,
+    })
+}
+
+fn power_pci_write(offset: u16, value: u64) -> DeviceWrite {
+    DeviceWrite::Pci(PciFieldWrite {
+        field: PciField {
+            address: 0x0003_0000,
+            offset,
+            bytes: 1,
+        },
+        value,
+    })
+}
+
+#[test]
+fn the_device_power_journal_replays_region_and_configuration_writes_in_program_order() {
+    let scope = PciConfigScope {
+        address: 0x0003_0000,
+    };
+    let effects = MethodEffects {
+        result: None,
+        reads: Vec::new(),
+        writes: Vec::new(),
+        region_reads: Vec::new(),
+        region_writes: Vec::new(),
+        device_writes: vec![
+            power_region_write(0x30, 0x1122_3344),
+            power_pci_write(0x40, 0x86),
+            power_pci_write(0x41, 0x80),
+            power_region_write(0x38, 0x5566_7788),
+        ],
+    };
+    let mut backend = PowerBackend::new(0, [0; 256]);
+    assert_eq!(
+        apply_device_power_writes(&effects, Some(scope), &mut backend),
+        Ok(())
+    );
+    // Each entry is read before it is written and read back after: the verification is what
+    // makes a resumed device provable rather than assumed.
+    assert_eq!(
+        backend.log,
+        vec![
+            "region read",
+            "region write",
+            "region read",
+            "pci read",
+            "pci write",
+            "pci read",
+            "pci read",
+            "pci write",
+            "pci read",
+            "region read",
+            "region write",
+            "region read",
+        ]
+    );
+    assert_eq!(backend.region, 0x1122_3344);
+    assert_eq!(backend.second_region, 0x5566_7788);
+    assert_eq!(backend.pci[0x40], 0x86);
+    assert_eq!(backend.pci[0x41], 0x80);
+}
+
+#[test]
+fn the_device_power_journal_refuses_out_of_scope_duplicate_and_malformed_writes() {
+    let scope = PciConfigScope {
+        address: 0x0003_0000,
+    };
+    let base = MethodEffects {
+        result: None,
+        reads: Vec::new(),
+        writes: Vec::new(),
+        region_reads: Vec::new(),
+        region_writes: Vec::new(),
+        device_writes: vec![power_pci_write(0x40, 0x86)],
+    };
+    let mut backend = PowerBackend::new(0, [0; 256]);
+    // The scope the caller applies with is not the one the journal was built for.
+    assert_eq!(
+        apply_device_power_writes(
+            &base,
+            Some(PciConfigScope { address: 0x40000 }),
+            &mut backend
+        ),
+        Err(DevicePowerWriteError::OutOfScope)
+    );
+    // No scope at all: a device that is not a PCI function cannot write configuration space.
+    assert_eq!(
+        apply_device_power_writes(&base, None, &mut backend),
+        Err(DevicePowerWriteError::OutOfScope)
+    );
+    let mut duplicate = base.clone();
+    duplicate.device_writes.push(power_pci_write(0x40, 0x00));
+    assert_eq!(
+        apply_device_power_writes(&duplicate, Some(scope), &mut backend),
+        Err(DevicePowerWriteError::DuplicateField)
+    );
+    let mut wide = base.clone();
+    wide.device_writes[0] = DeviceWrite::Pci(PciFieldWrite {
+        field: PciField {
+            address: 0x0003_0000,
+            offset: 0x40,
+            bytes: 2,
+        },
+        value: 0x8086,
+    });
+    assert_eq!(
+        apply_device_power_writes(&wide, Some(scope), &mut backend),
+        Err(DevicePowerWriteError::InvalidField)
+    );
+    // Nothing above reached the device.
+    assert_eq!(backend.log, Vec::<&'static str>::new());
+}
+
+#[test]
+fn a_refused_configuration_write_restores_the_region_write_before_it() {
+    let scope = PciConfigScope {
+        address: 0x0003_0000,
+    };
+    let effects = MethodEffects {
+        result: None,
+        reads: Vec::new(),
+        writes: Vec::new(),
+        region_reads: Vec::new(),
+        region_writes: Vec::new(),
+        device_writes: vec![
+            power_region_write(0x30, 0x1122_3344),
+            power_pci_write(0x40, 0x86),
+            power_pci_write(0x41, 0x80),
+        ],
+    };
+    let mut backend = PowerBackend::new(0xdead_beef, [0; 256]);
+    backend.fail_pci_readback = true;
+    assert_eq!(
+        apply_device_power_writes(&effects, Some(scope), &mut backend),
+        Err(DevicePowerWriteError::ReadbackMismatch)
+    );
+    // The region write was rolled back and the attempted bytes were restored in reverse order.
+    assert_eq!(backend.region, 0xdead_beef);
+    assert_eq!(backend.pci[0x40], 0);
+    assert_eq!(backend.pci[0x41], 0);
+    // Rollback is reverse program order, so the last operation is the verification of the
+    // restored memory-mapped register -- the first write the transaction attempted.
+    assert_eq!(backend.log.last().copied(), Some("region read"));
+}
+
+#[test]
+fn a_failed_configuration_write_is_reported_without_leaving_the_region_changed() {
+    let scope = PciConfigScope {
+        address: 0x0003_0000,
+    };
+    let effects = MethodEffects {
+        result: None,
+        reads: Vec::new(),
+        writes: Vec::new(),
+        region_reads: Vec::new(),
+        region_writes: Vec::new(),
+        device_writes: vec![power_region_write(0x30, 7), power_pci_write(0x40, 0x86)],
+    };
+    let mut backend = PowerBackend::new(1, [0; 256]);
+    backend.fail_pci_write = true;
+    assert_eq!(
+        apply_device_power_writes(&effects, Some(scope), &mut backend),
+        Err(DevicePowerWriteError::Read(Error::Unsupported(0x5b84)))
+    );
+    assert_eq!(backend.region, 1);
 }

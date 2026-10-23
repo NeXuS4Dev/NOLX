@@ -171,10 +171,10 @@ def boot(qemu, kernel, machine, mode):
             assert ('aml: \\_SB_.PWR0 power: _PS0=1 _PS3=1 _PSC=1 _PRW=1 current=D0 '
                     'wake=gpe11@S3') in text, text
             assert 'aml: device power targets: 1 recorded, 0 refused' in text, text
-            assert re.search(r'power: \\_SB_\.PWR0 _PS3 applied: 1 region field write\(s\) '
-                             r'verified \(1 journaled\)', text), text
-            assert re.search(r'power: \\_SB_\.PWR0 _PS0 applied: 1 region field write\(s\) '
-                             r'verified', text), text
+            assert ('PWR0 _PS3 applied: 1 region field write(s) and 0 PCI configuration '
+                    'write(s) verified (1 + 0 journaled)') in text, text
+            assert ('PWR0 _PS0 applied: 1 region field write(s) and 0 PCI configuration '
+                    'write(s) verified') in text, text
             assert 'power: device power transition _PS3: 1 transitioned, 0 refused' in text, text
             assert 'power: device power transition _PS0: 1 transitioned, 0 refused' in text, text
             assert 'power: dstate selftest: 1 firmware power target(s), _PSC=D0, _PRW=11@S3' in text, text

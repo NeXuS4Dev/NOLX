@@ -188,11 +188,11 @@ segment-zero board profile and the broader open M9 gates below remain incomplete
       PC/Q35 evidence; S3 suspend entry, the long-mode firmware waking vector, the post-wake
       platform re-take, the driver/device restore and firmware device power states (`_PSC`,
       `_PRW`, `_PS3` before the sleep and `_PS0` after it) all have PC/Q35 QMP evidence
-      (2026-10-22 and 2026-10-23 checkpoints). Still open: multi-CPU resume (the kernel is
-      BSP-only and never starts an AP, which is an M10 item), PCI-configuration operation
-      regions (a `_PS3` that toggles a device's PCI power-management register is reported as
-      refused, not executed), a driver-to-namespace-node binding, and higher-layer cache and
-      user-task orchestration around the sleep.
+      (2026-10-22 and 2026-10-23 checkpoints). Application processors are started, parked
+      before the sleep and restarted after the wake, and a `_PS3`/`_PS0` that programs its own
+      device's PCI configuration space executes and verifies instead of being refused
+      (2026-10-23 checkpoint). Still open: a driver-to-namespace-node binding and higher-layer
+      cache and user-task orchestration around the sleep.
 - [x] ACPI S5 entry with QMP observing actual guest shutdown and QEMU exit zero, not a
       printed hypothetical word. The unsafe primitive requires prior system quiescence;
       its test VM has no active DMA, and a negative test refuses an active bus master.
@@ -2360,11 +2360,127 @@ assertions with 0 problems.
 `--dstate-refused` after the no-device and device-backed profiles. PWR-041..PWR-045 are
 `tested-T2`, PWR-040 is `tested-T1`, and the database holds 450 assertions with 0 problems.
 
-**Still open.** Multi-CPU resume is not closable in M9 and is not claimed: `kernel/src/hal/apic.rs`
-only ever selects the BSP's local APIC and no AP is ever started, so there is no AP state to
-restore — AP startup is the M10 item named in `ROADMAP.md`. `_PS3` methods that toggle a device's
-PCI power-management register are refused, because the kernel has no PCI-*configuration*
-operation-region provider; that refusal is reported per device rather than hidden. There is no
-driver-to-namespace-node binding yet, so a device whose `_PS0` is refused has that refusal
-reported but still has its driver restarted, and the driver's own bring-up plus the sector
-readback remain the proof for that controller. M9 remains **in progress**.
+**Closed by the next checkpoint.** The two gaps named here — multi-CPU resume and PCI
+configuration-space operation regions — are no longer open: every application processor the
+MADT describes is started, parks before the sleep and restarts after the wake, and a
+`_PS3`/`_PS0` that programs its own device's PCI power-management register now executes with a
+verified readback instead of being refused (2026-10-23 checkpoint below).
+
+**Still open.** There is no driver-to-namespace-node binding yet, so a device whose `_PS0` is
+refused has that refusal reported but still has its driver restarted, and the driver's own
+bring-up plus the sector readback remain the proof for that controller. Higher-layer cache and
+user-task orchestration around the sleep is unwired, and none of this ran on physical hardware.
+M9 remains **in progress**.
+
+## Application processors and PCI configuration regions (2026-10-23)
+
+This checkpoint closes the two gaps the previous one named and did not claim: there was no
+application processor to resume because none was ever started, and a `_PS3` that toggled its own
+device's PCI power-management register was refused because no configuration-space operation-region
+provider existed. Both are now exercised by real PC and Q35 fixtures.
+
+**Holding them out of the restore.** Parking a processor halts it, and a halt is not a
+guarantee: a platform wake may return a halted processor to the firmware entry point, where
+several of them would run bring-up -- or re-enter the S3 hand-off -- alongside the processor
+restoring the machine, with no lock in this kernel able to arbitrate. Every processor is
+therefore put in `INIT` (wait-for-startup) after it acknowledges the park and again immediately
+after the wake, before the platform is touched; the second one is why the local APIC is
+re-enabled before the PCI re-take rather than after it. CI found this: the four-processor Q35
+fixture stalled in the post-wake resource assignment while the same fixture passed locally and
+the two-processor one passed in CI.
+
+**Starting a processor the firmware described.** `kernel/src/hal/smp.rs` copies a 16-bit
+trampoline into the first megabyte (`0x000f_0000`, startup vector `0x0f`): the processor enters in
+real mode with `%cs = 0x0f00`, the blob loads a private GDT, sets `CR4.PAE`, `CR3` and `EFER.NXE`,
+switches `CR0.PG` and enters long mode at the same low address, then jumps to `ap_entry` through a
+slot the boot processor filled. `ap_entry` installs this processor's own state before it allows an
+interrupt: `cpu::init_ap` points `IA32_GS_BASE` at its own block, `tables::init_ap` copies the
+kernel's code and data descriptors into a per-processor GDT, fills a per-processor TSS (RSP0 plus
+three IST stacks) and loads the shared IDT, and `apic::init_ap` enables its local APIC in the mode
+and at the base the boot processor discovered. Only then does it publish itself online and halt
+with interrupts enabled.
+
+An application processor never runs the boot processor's device dispatch
+(`kernel/src/hal/interrupts.rs` hands anything arriving there to `smp::on_ap_interrupt`): it has no
+device, no console and no clock, and a stray delivery is counted rather than serviced. The boot
+processor proves each one with a fixed inter-processor interrupt whose acknowledgement it waits
+for; a processor that does not answer inside the bounded wait is reported as refused and stays
+offline, and nothing later depends on how many came up.
+
+**Three defects the fixtures found.** Each one is the kind that only a real wake exposes:
+
+* *The segment selector the trampoline left behind.* The first AP booted, answered a ping and then
+  took a `#GP` on every interrupt return: `iretq` reloaded `%cs = 0x18`, which is the trampoline's
+  private 64-bit code descriptor, not the kernel's `0x08`. `tables::init_ap` now re-takes the code
+  selector from the kernel GDT with a `retfq` after `lgdt`, while interrupts are still disabled.
+* *The local APIC the wake reset disables.* A wake returns `IA32_APIC_BASE` to its power-on value
+  and clears the software-enable bit in the spurious-vector register, so the resumed kernel could
+  not deliver an inter-processor interrupt at all. `apic::resume` restores the base, mode,
+  priority, local-interrupt inputs and calibrated timer from the state the boot path validated,
+  and `power::resume_platform` reports the mode it came back in.
+* *The HPET counter that stops.* The same reset clears the enable bit in the HPET general
+  configuration, and the kernel's mapping and measured frequency survive, so the counter looked
+  initialised while frozen. Every bounded wait was a spin count, so one 10 ms architectural delay
+  became a multi-second spin that outlived the fixture's guard — the restart appeared to hang. The
+  counter is now re-enabled by `hpet::resume` and only reported as restored when it is measured to
+  be advancing, and the startup and resume waits are measured on the timestamp counter (which the
+  wake does not stop), then the HPET, then a capped spin.
+
+**PCI configuration space as an operation region.** `_PS3`/`_PS0` methods that touch a device's
+power-management register appear in firmware AML as a `PCI_Config` operation region with a
+`Field` over it. The interpreter now decodes that space (`crates/nolx-power-core/src/aml.rs`),
+refuses a field that is unaligned or wider than its access rule, and resolves whose configuration
+space it is from the owning node's `_ADR` plus a `PNP0A03`/`PNP0A08` root with no segment or bus
+override. The kernel authorizes a window only for the functions its recorded power targets name
+(`kernel/src/hal/aml_region.rs` `PciConfigRegions`), answers a 16-bit read as one access and
+applies the write as a dword read-modify-write through `pci::ConfigAccess` with a verified
+readback. A method that names a sibling function is refused with `WriteDenied` before any byte is
+touched, and the sleep with it. Region and configuration writes from one method are one journal,
+so a refused configuration byte restores the region write that preceded it.
+
+**Evidence.** On this revision, locally:
+
+* `scripts/check-power-s3.py` passed nineteen configurations: plain, `--with-devices`, `--dstate`,
+  `--dstate-refused`, `--dstate-pci` and `--dstate-pci --dstate-foreign` on PC and Q35;
+  `--smp 2` on PC and Q35; `--smp 4 --machine q35`; and `--smp 2` combined with
+  `--with-devices`, `--dstate`, `--dstate-pci` and `--dstate-pci --dstate-foreign`.
+* `scripts/check-power-s3.py --smp 2` passed on PC and Q35, printing `smp: parked 1 application
+  processor(s) for the sleep, 0 refused`, then after the wake `smp: resumed 1 of 1 application
+  processor(s) after the wake, 1 answered an inter-processor interrupt` and `power: post-resume
+  processor restart: 1 application processor(s) online, 0 refused`; `--smp 4 --machine q35`
+  produced the same three lines for three processors, run three times to rule out a timing fluke.
+* The same `--smp 2` run combined with `--with-devices`, `--dstate`, `--dstate-pci` and
+  `--dstate-pci --dstate-foreign` passed, so starting processors did not disturb the driver,
+  device-power or refusal paths.
+* Every resuming mode also asserts `power: post-resume HPET main counter running` and
+  `power: post-resume local APIC re-enabled (xAPIC), timer re-armed`.
+* `scripts/check-aml.py` passed all fifteen fixtures (PC and Q35) with the ordinary kernel, the
+  fixture-asserting kernel and the dstate kernel.
+* The ordinary kernel boots to `init sequence complete` on PC and Q35 with one and four logical
+  processors, reporting `smp: 3 of 3 application processor(s) online` in the four-processor case.
+* Host tests: 928 tests across `cargo test --lib --bins` and `cargo test --tests`, 128 in
+  `nolx-power-core --lib`, 6 of the 44 in `nolx-hal-core --lib apic`, all passing;
+  `cargo fmt --all -- --check` and `cargo clippy --all-targets -- -D warnings` are clean.
+* The conformance database holds 454 assertions with 0 problems; PWR-046 is `tested-T1` and
+  PWR-047..PWR-049 are `tested-T2`, citing CI run [39966209704](https://github.com/NeXuS4Dev/NOLX/actions/runs/39966209704) on `c2b2289`.
+* The S5 profiles — including the negative one, which needs an adapter the kernel actually
+  started — pass on this host too. That case used to be the one piece of the power suite that
+  could not run here: this sandbox's QEMU is built without libslirp, so `-netdev user` is
+  refused, and an unconnected `socket` netdev leaves the virtio-net driver waiting for the ARP
+  reply that decides whether the adapter comes up. `scripts/net_peer.py` now answers that
+  exchange from inside the test process over QEMU's raw-Ethernet socket backend, so the fixture
+  can distinguish a frozen adapter from a dead network instead of failing to launch. It runs
+  the same three S5 profiles and the six `check-virtio-net.py` captures, with the byte-level
+  assertions unchanged (the peer speaks as slirp's gateway does), and both scripts can be run
+  with `--netdev socket` in CI to keep that path exercised.
+
+**CI.** Run [39966209704](https://github.com/NeXuS4Dev/NOLX/actions/runs/39966209704) on `c2b2289` passed **all 19 jobs**. The power job now also runs
+`--dstate-pci`, `--dstate-pci --dstate-foreign`, `--smp 2` and `--smp 4 --machine q35`; the S5
+job re-runs its three profiles against the ARP peer, and the network job re-runs its six captures
+the same way, so neither depends on the host QEMU having slirp.
+
+**What this does not claim.** The kernel is still a single-scheduling-domain kernel: application
+processors hold no device, no runnable thread and no timer, and are used to prove that per-processor
+architectural state is installed, parked and restored, not to run work. No part of this ran on
+physical hardware. A driver-to-namespace-node binding and the higher-layer cache and user-task
+orchestration around the sleep remain open, and M9 remains **in progress**.

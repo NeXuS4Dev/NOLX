@@ -8,7 +8,7 @@ use nolx_hal_core::console::HalConsole;
     feature = "hal-power-s3-device-test",
     feature = "hal-power-dstate-test"
 ))]
-use nolx_power_core::aml::{apply_region_field_writes_authorized, Path};
+use nolx_power_core::aml::{apply_device_power_writes, Path};
 use nolx_power_core::{pm1_sleep_control, Fadt};
 
 /// Why no power-state request could be issued.
@@ -244,8 +244,58 @@ pub extern "C" fn s3_resume_rust() -> ! {
     );
     console.flush();
     assert_eq!(tag, S3_RESUME_TAG, "the S3 resume tag did not survive");
+    // The two clocks a wake reset stops come back first: the HPET counter, because every
+    // bounded wait below measures against it, and this processor's local APIC, because the hold
+    // below is an inter-processor interrupt. An application processor a wake left outside the
+    // wait-for-startup state has to be stopped before the platform is touched at all -- a
+    // processor executing firmware bring-up, or re-entering the S3 hand-off, races the restore
+    // with nothing in this kernel able to arbitrate it.
+    let hpet_running = super::hpet::resume();
+    let _ = writeln!(
+        console,
+        "power: post-resume HPET main counter {}",
+        if hpet_running {
+            "running"
+        } else {
+            "not running"
+        }
+    );
+    console.flush();
+    if super::apic::resume().is_ok() {
+        let _ = writeln!(
+            console,
+            "power: post-resume local APIC re-enabled ({}), timer re-armed",
+            super::apic::mode_name()
+        );
+    } else {
+        let _ = writeln!(
+            console,
+            "power: post-resume local APIC could not be re-enabled; application processors stay offline"
+        );
+    }
+    console.flush();
+    let held = super::smp::hold(&mut console);
+    if held > 0 {
+        let _ = writeln!(
+            console,
+            "smp: {held} application processor(s) held in INIT after the wake"
+        );
+        console.flush();
+    }
     match resume_platform(&mut console) {
         Ok(()) => {
+            // The wake reset left every application processor in its reset state. Restarting
+            // them is the operating system's job after an S3 wake: each one re-installs its own
+            // per-processor block, descriptor tables and local APIC, then answers an
+            // inter-processor interrupt before the resume is allowed to call itself complete.
+            let (restarted, refused) = super::smp::resume(&mut console);
+            if restarted > 0 || refused > 0 {
+                let _ = writeln!(
+                    console,
+                    "power: post-resume processor restart: {restarted} application processor(s) online, {refused} refused"
+                );
+                console.flush();
+            }
             // Firmware's `_PS0` is what tells a device the system is awake again; it runs after
             // the platform re-take (the PM block must answer) and before any driver is restarted,
             // so no driver programmes a controller firmware still considers asleep. A refusal is
@@ -605,7 +655,7 @@ fn transition_devices(
     }
     // The interpreter is rebuilt from the checked tables; only the calls happen here, where the
     // console and the region journal are both reachable.
-    let outcome = super::acpi::with_power_namespace(|namespace, regions| {
+    let outcome = super::acpi::with_power_namespace(|namespace, regions, _pci| {
         let mut transitioned = 0usize;
         let mut refused = 0usize;
         for index in 0..total {
@@ -621,21 +671,44 @@ fn transition_devices(
                 );
                 continue;
             };
-            match namespace.plan_device_method_authorized(&path, member, &[]) {
-                Ok(None) => {
+            let scope = namespace.device_pci_scope(&path);
+            match (
+                scope,
+                namespace.plan_device_method_authorized(&path, member, &[]),
+            ) {
+                (_, Ok(None)) => {
                     // Recorded because it declares another power method; this one is absent, so
                     // there is nothing to transition. Not a refusal.
                     let _ = writeln!(console, "power: {name} declares no {member_name}");
                 }
-                Ok(Some(effects)) => {
-                    let writes = effects.region_writes.len();
-                    match apply_region_field_writes_authorized(&effects, regions) {
-                        Ok(applied) => {
+                (Ok(scope), Ok(Some(effects))) => {
+                    let regions_journaled = effects.region_writes.len();
+                    let pci_journaled = effects.writes.len();
+                    // The journal is applied in the order the method performed it, across both
+                    // address spaces, as one transaction: a refused configuration write restores
+                    // the memory-mapped register written before it. The backend is authorized for
+                    // the transitioning device's own function only, so even a journal that somehow
+                    // named another function could not reach it.
+                    let mut backend = super::aml_region::DevicePowerProvider {
+                        regions: *regions,
+                        pci: {
+                            let mut pci = super::aml_region::PciConfigRegions::empty();
+                            // The `_ADR` that scoped the reads authorizes the writes here, so
+                            // the reader and the writer cannot disagree about the function.
+                            if let Some(scope) = scope {
+                                let _ = pci.authorize(scope.address);
+                            }
+                            pci
+                        },
+                    };
+                    match apply_device_power_writes(&effects, scope, &mut backend) {
+                        Ok(()) => {
                             transitioned += 1;
                             let _ = writeln!(
                                 console,
-                                "power: {name} {member_name} applied: {} region field write(s) verified ({writes} journaled)",
-                                applied.len()
+                                "power: {name} {member_name} applied: {} region field write(s) and {} PCI configuration write(s) verified ({regions_journaled} + {pci_journaled} journaled)",
+                                effects.region_writes.len(),
+                                effects.writes.len()
                             );
                         }
                         Err(error) => {
@@ -645,7 +718,7 @@ fn transition_devices(
                         }
                     }
                 }
-                Err(error) => {
+                (Err(error), _) | (_, Err(error)) => {
                     refused += 1;
                     let _ = writeln!(console, "power: {name} {member_name} refused: {error:?}");
                 }

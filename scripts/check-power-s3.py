@@ -83,7 +83,58 @@ def dstate_fixture(outside=False):
     return table(package([0x10], b'\\_SB_' + device(b'PWR0', body)))
 
 
-def boot(qemu, kernel, machine, devices=False, dstate=False, dstate_refused=False):
+def pci_region():
+    """`OperationRegion(PCFG, PCI_Config, 0, 0x100)`."""
+    return (bytes([0x5b, 0x80]) + b'PCFG' + bytes([0x02, 0x0a, 0x00])
+            + bytes([0x0b, 0x00, 0x01]))
+
+
+def pci_field():
+    """`Field(PCFG, WordAcc, NoLock, Preserve) { VEND, 16 }`: the Vendor ID of the function."""
+    return package([0x5b, 0x81], b'PCFG' + bytes([0x02]) + b'VEND' + bytes([16]))
+
+
+def absolute(*segments):
+    """A root-prefixed, multi-name `NameString`."""
+    assert 2 <= len(segments) <= 15
+    return bytes([0x5c, 0x2f, len(segments)]) + b''.join(segments)
+
+
+def pci_dstate_fixture(foreign=False):
+    """A device under the firmware's own PCI root bridge that programs its configuration space.
+
+    The bridge's own function (device 0x1f, function 0 -- the LPC/ISA bridge on both the PIIX4
+    and ICH9 machines) is used because the namespace must name a real function for the region's
+    `_ADR` to resolve, and because the Vendor ID register is read-only: the method reads it,
+    stores the value it read back, and the transaction's readback proves the store reached the
+    device without changing anything. This is the *configuration*-space counterpart of the
+    memory-mapped `_PS3` fixture: on a real board, this is where a device's PM register lives.
+
+    The `foreign` variant keeps the same device but points its `_PS3` at a sibling function's
+    field, which the evaluator must refuse: a power method may only program its own function.
+    """
+    # Store (VEND, Local0); Store (Local0, VEND): a real read-modify-write of a 16-bit register,
+    # so the provider is read at its declared width and the write is split into both bytes.
+    own = bytes([0x70]) + b'VEND' + bytes([0x60]) + bytes([0x70, 0x60]) + b'VEND'
+    if foreign:
+        # Store (0x86, \_SB.PCI0.PWR1.VEND): another function's register, named by absolute path.
+        body = bytes([0x70, 0x0a, 0x86]) + absolute(b'_SB_', b'PCI0', b'PWR1', b'VEND')
+    else:
+        body = own
+    device_body = (bytes([0x08]) + b'_ADR' + bytes([0x0c]) + struct.pack('<I', 0x001f_0000)
+                   + pci_region() + pci_field()
+                   + method(b'_PS3', body) + method(b'_PS0', body))
+    scope = absolute(b'_SB_', b'PCI0') + device(b'PWR0', device_body)
+    if foreign:
+        sibling_body = (bytes([0x08]) + b'_ADR'
+                        + bytes([0x0c]) + struct.pack('<I', 0x001e_0000)
+                        + pci_region() + pci_field())
+        scope += device(b'PWR1', sibling_body)
+    return table(package([0x10], scope))
+
+
+def boot(qemu, kernel, machine, devices=False, dstate=False, dstate_refused=False,
+         dstate_pci=False, dstate_foreign=False, smp=1):
     name = f'power-s3-{machine}'
     log = ROOT / 'build' / f'{name}.log'
     qmp = ROOT / 'build' / f'{name}.sock'
@@ -94,7 +145,7 @@ def boot(qemu, kernel, machine, devices=False, dstate=False, dstate_refused=Fals
     platform = 'q35,sata=off' if machine == 'q35' else machine
     command = [qemu, '-machine', platform, '-kernel', str(kernel), '-m', '512M',
                '-nographic', '-no-reboot', '-qmp', f'unix:{qmp},server=on,wait=off',
-               '-net', 'none']
+               '-net', 'none', '-smp', str(smp)]
     disk = None
     if devices:
         # One real virtio-blk controller: its driver suspends before the sleep and must be
@@ -110,6 +161,12 @@ def boot(qemu, kernel, machine, devices=False, dstate=False, dstate_refused=Fals
         # nothing to act on and the fixture would only prove the empty case.
         aml = ROOT / 'build' / f'{name}.aml'
         aml.write_bytes(dstate_fixture(outside=dstate_refused))
+        command += ['-acpitable', f'file={aml}']
+    if dstate_pci or dstate_foreign:
+        # A `PCI_Config` operation region under the firmware's own root bridge: the transition
+        # programs a real function's configuration space instead of a memory-mapped register.
+        aml = ROOT / 'build' / f'{name}.aml'
+        aml.write_bytes(pci_dstate_fixture(foreign=dstate_foreign))
         command += ['-acpitable', f'file={aml}']
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     events = []
@@ -158,8 +215,8 @@ def boot(qemu, kernel, machine, devices=False, dstate=False, dstate_refused=Fals
                     # RUN_STATE_SUSPENDED or the request is refused.
                     connection.sendall(b'{"execute":"system_wakeup"}\r\n')
                     woke_at = time.monotonic()
-                if dstate_refused and ('power: S3 refused: 1 device power transition(s) '
-                                       'refused' in text):
+                if (dstate_refused or dstate_foreign) and ('power: S3 refused: 1 device power '
+                                                           'transition(s) refused' in text):
                     # The fixture never sleeps, so it halts in the ordinary boot loop; the
                     # refusal has been printed and recorded.
                     process.terminate()
@@ -190,6 +247,60 @@ def boot(qemu, kernel, machine, devices=False, dstate=False, dstate_refused=Fals
             if disk is not None:
                 disk.unlink(missing_ok=True)
     text = log.read_text(errors='replace')
+    # Every application processor firmware describes is started, proves itself with an
+    # inter-processor interrupt, parks for the sleep and comes back after the wake with its
+    # per-processor state rebuilt from scratch. These checks are additive: each mode still has
+    # to pass every assertion below, with or without extra processors.
+    note = ''
+    if smp > 1:
+        assert (f'smp: {smp - 1} of {smp - 1} application processor(s) online, '
+                f'{smp - 1} answered an inter-processor interrupt') in text, text
+        note = f', {smp} logical processors: {smp - 1} application processor(s) started and proved'
+        if 'power: requesting ACPI S3' in text:
+            assert (f'smp: parked {smp - 1} application processor(s) for the sleep, 0 refused'
+                    in text), text
+            # Parking is a halt, and a wake may return a halted processor to the firmware
+            # entry point; the processors are put in the wait-for-startup state as well, which
+            # is what keeps them out of the platform restore.
+            assert (f'smp: {smp - 1} application processor(s) held in INIT for the sleep'
+                    in text), text
+            note += ', parked for the sleep'
+        if 'power: resumed from S3' in text:
+            resumed = text.split('power: resumed from S3', 1)[1]
+            assert (f'smp: {smp - 1} application processor(s) held in INIT after the wake'
+                    in resumed), text
+            assert (f'smp: resumed {smp - 1} of {smp - 1} application processor(s) after the '
+                    f'wake, {smp - 1} answered an inter-processor interrupt') in resumed, text
+            assert (f'power: post-resume processor restart: {smp - 1} application processor(s) '
+                    f'online, 0 refused') in resumed, text
+            note += ' and restarted after the wake'
+    if dstate_foreign:
+        # A power method may only program its own function: the plan is refused before any
+        # configuration byte is touched, and the sleep with it.
+        assert 'power: requesting ACPI S3' not in text, text
+        assert not any(e['event'] == 'SUSPEND' for e in events), events
+        assert re.search(r'power: \\_SB_\.PCI0\.PWR0 _PS3 refused: WriteDenied', text), text
+        assert 'power: device power transition _PS3: 0 transitioned, 1 refused' in text, text
+        assert 'power: S3 refused: 1 device power transition(s) refused' in text, text
+        print(f'PASS: {name}; a power method naming another function\'s configuration field '
+              f'was refused before any access and the sleep with it{note}')
+        return
+    if dstate_pci:
+        # Firmware programs a real device's configuration space in both directions across a
+        # real sleep, and the applied transaction verifies every byte it stored.
+        before = text.split('power: requesting ACPI S3', 1)[0]
+        assert re.search(r'power: \\_SB_\.PCI0\.PWR0 _PS3 applied: 0 region field write\(s\) '
+                         r'and 2 PCI configuration write\(s\) verified \(0 \+ 2 journaled\)',
+                         before), text
+        assert 'power: device power transition _PS3: 1 transitioned, 0 refused' in before, text
+        resumed = text.split('power: resumed from S3', 1)[1]
+        assert re.search(r'power: \\_SB_\.PCI0\.PWR0 _PS0 applied: 0 region field write\(s\) '
+                         r'and 2 PCI configuration write\(s\) verified', resumed), text
+        assert ('power: post-resume device power transition: 1 device(s) returned to D0, '
+                '0 refused' in resumed), text
+        print(f'PASS: {name}; 16-bit PCI configuration field read whole and both bytes stored '
+              f'and verified before the sleep and after the wake, then powered off{note}')
+        return
     if dstate_refused:
         # The field is outside every authorized window: the journal is refused at the read that
         # precedes the write, and the sleep is refused with it, because a device firmware would
@@ -203,7 +314,7 @@ def boot(qemu, kernel, machine, devices=False, dstate=False, dstate_refused=Fals
         assert 'power: S3 refused: 1 device power transition(s) refused' in text, text
         assert 'NOLX: address space selftest:' in text, text
         print(f'PASS: {name}; unauthorized power-transition field refused before any access, '
-              f'sleep refused, no SUSPEND event')
+              f'sleep refused, no SUSPEND event{note}')
         return
     assert code == 0, (code, text)
     assert 'NOLX: address space selftest:' in text, text
@@ -214,6 +325,13 @@ def boot(qemu, kernel, machine, devices=False, dstate=False, dstate_refused=Fals
     resumed = text.split('power: resumed from S3', 1)[1]
     assert 'power: post-resume PM1a 0x604' in resumed, text
     assert 'ACPI mode re-entered' in resumed, text
+    # The wake reset stops the HPET and disables the local APIC. Both are re-taken from the
+    # state the boot path validated, and both are proven by what they report afterwards: a
+    # stopped counter would make every delay below unbounded, and a disabled controller could
+    # not deliver the inter-processor interrupt the restart requires.
+    assert 'power: post-resume HPET main counter running' in resumed, text
+    assert re.search(r'power: post-resume local APIC re-enabled \((xAPIC|x2APIC)\), '
+                     r'timer re-armed', resumed), text
     assert resumed.count('power: requesting ACPI S5') == 1, text
     if machine == 'q35':
         # The stale ECAM mapping must be rejected rather than read as "no device".
@@ -230,14 +348,14 @@ def boot(qemu, kernel, machine, devices=False, dstate=False, dstate_refused=Fals
     if dstate:
         # Firmware's own device power transition, in both directions, across a real sleep.
         before = text.split('power: requesting ACPI S3', 1)[0]
-        assert re.search(r'power: \\_SB_\.PWR0 _PS3 applied: 1 region field write\(s\) '
-                         r'verified \(1 journaled\)', before), text
+        assert re.search(r'power: \\_SB_\.PWR0 _PS3 applied: 1 region field write\(s\) and 0 '
+                         r'PCI configuration write\(s\) verified \(1 \+ 0 journaled\)', before), text
         assert ('power: device power transition _PS3: 1 transitioned, 0 refused'
                 in before), text
         assert ('power: pre-suspend device power transition: 1 device(s) in firmware low power'
                 in before), text
-        assert re.search(r'power: \\_SB_\.PWR0 _PS0 applied: 1 region field write\(s\) '
-                         r'verified', resumed), text
+        assert re.search(r'power: \\_SB_\.PWR0 _PS0 applied: 1 region field write\(s\) and 0 '
+                         r'PCI configuration write\(s\) verified', resumed), text
         assert ('power: post-resume device power transition: 1 device(s) returned to D0, '
                 '0 refused' in resumed), text
         # `_PS0` must run before any driver is restarted: a driver must never programme a
@@ -264,10 +382,11 @@ def boot(qemu, kernel, machine, devices=False, dstate=False, dstate_refused=Fals
         assert re.search(r'power: post-resume shutdown quiesce: 1 controller\(s\) stopped, '
                          r'1 verified after wake', resumed), text
         print(f'PASS: {name}; QMP SUSPEND + WAKEUP, control {hex(word)}, resume tag verified, '
-              f'PM re-entered at {post.group(1)}, 1 device suspended/restored/verified, powered off')
+              f'PM re-entered at {post.group(1)}, 1 device suspended/restored/verified, '
+              f'powered off{note}')
     else:
         print(f'PASS: {name}; QMP SUSPEND + WAKEUP, control {hex(word)}, resume tag verified, '
-              f'PM re-entered at {post.group(1)} and powered off')
+              f'PM re-entered at {post.group(1)} and powered off{note}')
 
 
 def main():
@@ -282,12 +401,23 @@ def main():
     parser.add_argument('--dstate-refused', action='store_true',
                         help='inject the same device with a field outside every authorized '
                              'window: the transition must be refused and the sleep with it')
+    parser.add_argument('--dstate-pci', action='store_true',
+                        help='inject a `PCI_Config` operation region under the firmware root '
+                             'bridge: _PS3/_PS0 must read a 16-bit field whole and store both '
+                             'bytes with a verified readback, before and after the wake')
+    parser.add_argument('--dstate-foreign', action='store_true',
+                        help='inject the same device with _PS3 naming a sibling function: the '
+                             'plan must be refused and the sleep with it')
+    parser.add_argument('--smp', type=int, default=1,
+                        help='logical processors to give QEMU; more than one requires the '
+                             'application processors to start, park and restart across the wake')
     parser.add_argument('--machine', choices=['pc', 'q35'], action='append')
     args = parser.parse_args()
     qemu = os.environ.get('QEMU', 'qemu-system-x86_64')
     for machine in args.machine or ['pc', 'q35']:
         boot(qemu, args.kernel.resolve(), machine, devices=args.with_devices,
-             dstate=args.dstate, dstate_refused=args.dstate_refused)
+             dstate=args.dstate, dstate_refused=args.dstate_refused,
+             dstate_pci=args.dstate_pci, dstate_foreign=args.dstate_foreign, smp=args.smp)
 
 
 if __name__ == '__main__':

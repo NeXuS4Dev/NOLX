@@ -84,6 +84,52 @@ pub fn init(info: &HpetInfo) -> Result<u64, HpetError> {
     Ok(frequency)
 }
 
+/// Re-enable the main counter after a wake reset left it stopped.
+///
+/// A platform wake returns the HPET's general configuration to its power-on value, which has
+/// the counter disabled -- the kernel's mapping and the frequency it measured at boot survive
+/// in RAM, so the fix is to set the enable bit again, not to rediscover the device. Other
+/// configuration bits (including the ones firmware set) are preserved.
+///
+/// Returns whether the counter is advancing afterwards, which is what callers depend on: the
+/// statics above can say "initialized" about a device that is not counting.
+#[must_use]
+pub fn resume() -> bool {
+    let base = HPET_BASE.load(Ordering::Acquire);
+    if base == 0 {
+        return false;
+    }
+    // SAFETY: `init` validated this base inside the uncached HPET window and it stays mapped;
+    // the configuration register is a defined 64-bit offset in the same block.
+    unsafe {
+        let config = mmio_read64(base, GENERAL_CONFIGURATION);
+        if config & ENABLE_COUNTER == 0 {
+            mmio_write64(
+                base,
+                GENERAL_CONFIGURATION,
+                (config & !LEGACY_REPLACEMENT) | ENABLE_COUNTER,
+            );
+        }
+    }
+    counter_running()
+}
+
+/// Whether the main counter is advancing, measured rather than assumed.
+#[must_use]
+pub fn counter_running() -> bool {
+    let Some(start) = counter() else {
+        return false;
+    };
+    for _ in 0..100_000 {
+        match counter() {
+            Some(now) if now != start => return true,
+            Some(_) => core::hint::spin_loop(),
+            None => return false,
+        }
+    }
+    false
+}
+
 /// HPET main-counter frequency, or `None` before initialization.
 #[must_use]
 pub fn frequency_hz() -> Option<u64> {
