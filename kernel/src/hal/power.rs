@@ -592,12 +592,13 @@ fn transition_devices(
     console: &mut dyn HalConsole,
     member: [u8; 4],
 ) -> Result<(usize, usize), Error> {
+    // The member is a four-byte name; the log prints it rather than a numeric opcode.
+    let member_name = core::str::from_utf8(&member).unwrap_or("?");
     let total = super::acpi::power_target_count();
     if total == 0 {
         let _ = writeln!(
             console,
-            "power: device power transition {}: no firmware device declares it",
-            core::str::from_utf8(&member).unwrap_or("?")
+            "power: device power transition {member_name}: no firmware device declares it"
         );
         console.flush();
         return Ok((0, 0));
@@ -624,11 +625,7 @@ fn transition_devices(
                 Ok(None) => {
                     // Recorded because it declares another power method; this one is absent, so
                     // there is nothing to transition. Not a refusal.
-                    let _ = writeln!(
-                        console,
-                        "power: {name} declares no {member_str}",
-                        member_str = core::str::from_utf8(&member).unwrap_or("?")
-                    );
+                    let _ = writeln!(console, "power: {name} declares no {member_name}");
                 }
                 Ok(Some(effects)) => {
                     let writes = effects.region_writes.len();
@@ -637,29 +634,20 @@ fn transition_devices(
                             transitioned += 1;
                             let _ = writeln!(
                                 console,
-                                "power: {name} {} applied: {} region field write(s) verified ({} journaled)",
-                                core::str::from_utf8(&member).unwrap_or("?"),
-                                applied.len(),
-                                writes
+                                "power: {name} {member_name} applied: {} region field write(s) verified ({writes} journaled)",
+                                applied.len()
                             );
                         }
                         Err(error) => {
                             refused += 1;
-                            let _ = writeln!(
-                                console,
-                                "power: {name} {} refused: {error:?}",
-                                core::str::from_utf8(&member).unwrap_or("?")
-                            );
+                            let _ =
+                                writeln!(console, "power: {name} {member_name} refused: {error:?}");
                         }
                     }
                 }
                 Err(error) => {
                     refused += 1;
-                    let _ = writeln!(
-                        console,
-                        "power: {name} {} refused: {error:?}",
-                        core::str::from_utf8(&member).unwrap_or("?")
-                    );
+                    let _ = writeln!(console, "power: {name} {member_name} refused: {error:?}");
                 }
             }
         }
@@ -670,8 +658,7 @@ fn transition_devices(
         Err(error) => {
             let _ = writeln!(
                 console,
-                "power: device power transition {}: firmware namespace unavailable: {error:?}",
-                core::str::from_utf8(&member).unwrap_or("?")
+                "power: device power transition {member_name}: firmware namespace unavailable: {error:?}"
             );
             console.flush();
             return Err(Error::Firmware);
@@ -679,8 +666,7 @@ fn transition_devices(
     };
     let _ = writeln!(
         console,
-        "power: device power transition {}: {transitioned} transitioned, {refused} refused",
-        core::str::from_utf8(&member).unwrap_or("?")
+        "power: device power transition {member_name}: {transitioned} transitioned, {refused} refused"
     );
     console.flush();
     Ok((transitioned, refused))
